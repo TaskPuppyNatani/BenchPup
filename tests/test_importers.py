@@ -73,6 +73,11 @@ class CsvImportTests(unittest.TestCase):
         self.assertIn("<!doctype html>", html)
         self.assertIn("Historical July", html)
         self.assertIn("Generated at", html)
+        self.assertIn('id="search"', html)
+        self.assertIn('id="hallucination"', html)
+        self.assertIn('data-sort="score"', html)
+        self.assertIn('class="data-row"', html)
+        self.assertIn("Total entries", html)
 
     def test_scoreboard_context_values_are_normalized_in_preview_and_import(self):
         path = Path(self.directory.name) / "scoreboard-context.csv"

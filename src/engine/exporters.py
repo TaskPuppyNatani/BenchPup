@@ -40,68 +40,149 @@ def export_scoreboard_csv(catalog: CatalogService, path: str | Path) -> Path:
 
 
 def export_scoreboard_html(catalog: CatalogService, path: str | Path) -> Path:
-    """Export historical scoreboard entries as a standalone, offline HTML report."""
+    """Export historical scoreboard entries as an interactive, offline HTML viewer."""
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     batches = {batch.id: batch for batch in catalog.scoreboard_import_batches.list()}
-    grouped: dict[int | None, list] = {}
-    for entry in catalog.scoreboard_entries.list():
-        grouped.setdefault(entry.import_batch_id, []).append(entry)
-
-    columns = (
-        ("Model", "model_name"), ("Score", "score"), ("Hallucination", "hallucination_level"),
-        ("Reliability", "reliability_score"), ("Temperature", "temperature"),
-        ("Context", "context_length"), ("tok/s", "tokens_per_second"), ("Verdict", "verdict"),
-        ("Notes", "notes"), ("Batch", None), ("Imported At", "imported_at"),
-    )
+    entries = catalog.scoreboard_entries.list()
 
     def text(value: object) -> str:
         return escape("-" if value is None or value == "" else str(value), quote=True)
 
-    header = "".join(f"<th>{escape(label)}</th>" for label, _ in columns)
-    sections = []
-    for batch_id, entries in grouped.items():
-        batch = batches.get(batch_id)
+    def numeric(value: object) -> float | None:
+        return float(value) if isinstance(value, (int, float)) else None
+
+    records = []
+    for entry in entries:
+        batch = batches.get(entry.import_batch_id)
         batch_name = batch.name if batch else "Unbatched scoreboard entries"
-        rows = []
-        for entry in entries:
-            cells = []
-            for _, field in columns:
-                value = batch_name if field is None else getattr(entry, field)
-                css_class = " class=\"notes\"" if field == "notes" else ""
-                cells.append(f"<td{css_class}>{text(value)}</td>")
-            rows.append("<tr>" + "".join(cells) + "</tr>")
-        sections.append(
-            f"<section><h2>{text(batch_name)}</h2><table><thead><tr>{header}</tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></section>"
+        records.append({
+            "model_name": entry.model_name, "score": entry.score,
+            "hallucination_level": entry.hallucination_level, "reliability_score": entry.reliability_score,
+            "temperature": entry.temperature, "context_length": entry.context_length,
+            "tokens_per_second": entry.tokens_per_second, "verdict": entry.verdict,
+            "notes": entry.notes, "batch": batch_name, "imported_at": entry.imported_at,
+            "metadata": {
+                "Review quality": entry.review_quality, "Consistency": entry.consistency,
+                "Experts": entry.moe_experts, "Additional notes": entry.notes_extra,
+                "Source file": entry.source_file, "Entry ID": entry.id,
+            },
+        })
+
+    def options(field: str) -> str:
+        values = sorted({str(record[field]) for record in records if record[field] not in (None, "")})
+        return "".join(f'<option value="{text(value)}">{text(value)}</option>' for value in values)
+
+    scores = [(numeric(record["score"]), record["model_name"]) for record in records if numeric(record["score"]) is not None]
+    speeds = [(numeric(record["tokens_per_second"]), record["model_name"]) for record in records if numeric(record["tokens_per_second"]) is not None]
+    highest = max(scores, default=(None, "-"))
+    fastest = max(speeds, default=(None, "-"))
+    average_score = sum(score for score, _ in scores) / len(scores) if scores else None
+    batch_count = len({record["batch"] for record in records if record["batch"] != "Unbatched scoreboard entries"})
+
+    rows = []
+    for record in records:
+        search_text = " ".join(str(record[field] or "") for field in ("model_name", "verdict", "notes", "batch"))
+        metadata = "".join(f"<dt>{text(label)}</dt><dd>{text(value)}</dd>" for label, value in record["metadata"].items())
+        rows.append(
+            f'<tr class="data-row" data-search="{text(search_text).lower()}" '
+            f'data-hallucination="{text(record["hallucination_level"])}" '
+            f'data-reliability="{text(record["reliability_score"])}" '
+            f'data-verdict="{text(record["verdict"])}" data-batch="{text(record["batch"])}" '
+            f'data-model="{text(record["model_name"])}" data-score="{text(record["score"])}" '
+            f'data-temperature="{text(record["temperature"])}" data-context="{text(record["context_length"])}" '
+            f'data-tokens="{text(record["tokens_per_second"])}" data-imported="{text(record["imported_at"])}">'
+            f'<td><button class="row-toggle" type="button" aria-expanded="false">{text(record["model_name"])}</button></td>'
+            f'<td>{text(record["score"])}</td><td>{text(record["hallucination_level"])}</td>'
+            f'<td>{text(record["reliability_score"])}</td><td>{text(record["temperature"])}</td>'
+            f'<td>{text(record["context_length"])}</td><td>{text(record["tokens_per_second"])}</td>'
+            f'<td>{text(record["verdict"])}</td><td class="notes">{text(record["notes"])}</td>'
+            f'<td>{text(record["batch"])}</td><td>{text(record["imported_at"])}</td></tr>'
+            f'<tr class="details-row" hidden><td colspan="11"><div class="details">'
+            f'<strong>Full notes</strong><div class="full-notes">{text(record["notes"])}</div><dl>{metadata}</dl>'
+            f'</div></td></tr>'
         )
 
-    body = "".join(sections) or "<p class=\"empty\">No historical scoreboard entries found.</p>"
-    path.write_text(f"""<!doctype html>
+    table_body = "".join(rows) or '<tr><td colspan="11" class="empty">No historical scoreboard entries found.</td></tr>'
+    generated = text(now())
+    path.write_text("""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BenchPup Scoreboard Report</title>
 <style>
-:root {{ color-scheme: dark; }}
-body {{ margin: 0; padding: 2rem; background: #111827; color: #e5e7eb; font: 15px/1.45 system-ui, sans-serif; }}
-main {{ max-width: 1600px; margin: auto; }}
-h1 {{ margin: 0 0 .25rem; }} .generated {{ color: #9ca3af; margin-top: 0; }}
-section {{ margin-top: 2rem; }} h2 {{ color: #93c5fd; font-size: 1.15rem; }}
-table {{ width: 100%; border-collapse: collapse; background: #1f2937; }}
-th, td {{ padding: .65rem .75rem; border: 1px solid #374151; text-align: left; vertical-align: top; }}
-th {{ position: sticky; top: 0; background: #1d4ed8; color: white; white-space: nowrap; }}
-tr:nth-child(even) {{ background: #243044; }} .notes {{ white-space: pre-wrap; overflow-wrap: anywhere; min-width: 18rem; }}
-.empty {{ color: #9ca3af; }}
-@media (max-width: 800px) {{ body {{ padding: 1rem; }} table {{ display: block; overflow-x: auto; }} }}
+ :root { color-scheme: dark; } body { margin: 0; padding: 2rem; background: #111827; color: #e5e7eb; font: 15px/1.45 system-ui, sans-serif; }
+main { max-width: 1800px; margin: auto; } h1 { margin: 0 0 .25rem; } .generated, .empty { color: #9ca3af; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: .8rem; margin: 1.5rem 0; }
+.card, .controls { background: #1f2937; border: 1px solid #374151; border-radius: .5rem; padding: 1rem; }
+.card .label { color: #9ca3af; font-size: .85rem; } .card .value { font-size: 1.25rem; font-weight: 650; overflow-wrap: anywhere; }
+.controls { display: flex; flex-wrap: wrap; gap: .8rem; align-items: end; } label { display: grid; gap: .25rem; color: #cbd5e1; }
+input, select { background: #111827; color: #e5e7eb; border: 1px solid #4b5563; border-radius: .25rem; padding: .5rem; }
+table { width: 100%; border-collapse: collapse; background: #1f2937; margin-top: 1rem; }
+th, td { padding: .65rem .75rem; border: 1px solid #374151; text-align: left; vertical-align: top; }
+th { position: sticky; top: 0; background: #1d4ed8; color: white; white-space: nowrap; }
+th button, .row-toggle { all: unset; cursor: pointer; color: inherit; font-weight: inherit; } th button::after { content: " ↕"; font-size: .8em; }
+tr.data-row:nth-of-type(4n + 1) { background: #243044; } .notes, .full-notes { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
+.details { padding: .5rem; } dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem .8rem; } dt { color: #93c5fd; } dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 800px) { body { padding: 1rem; } table { display: block; overflow-x: auto; } }
 </style>
 </head>
 <body><main>
 <h1>BenchPup Scoreboard Report</h1>
-<p class="generated">Generated at {text(now())}. Historical scoreboard imports only; benchmark runs are not included.</p>
-{body}
-</main></body></html>
-""", encoding="utf-8")
+<p class="generated">Generated at """ + generated + """. Historical scoreboard imports only; benchmark runs are not included.</p>
+<section class="cards">
+<div class="card"><div class="label">Total entries</div><div class="value">""" + text(len(records)) + """</div></div>
+<div class="card"><div class="label">Import batches</div><div class="value">""" + text(batch_count) + """</div></div>
+<div class="card"><div class="label">Highest score</div><div class="value">""" + text(f"{highest[0]} — {highest[1]}" if highest[0] is not None else "-") + """</div></div>
+<div class="card"><div class="label">Fastest model</div><div class="value">""" + text(f"{fastest[0]} tok/s — {fastest[1]}" if fastest[0] is not None else "-") + """</div></div>
+<div class="card"><div class="label">Average score</div><div class="value">""" + text(f"{average_score:.2f}" if average_score is not None else "-") + """</div></div>
+</section>
+<section class="controls" aria-label="Scoreboard filters">
+<label>Search<input id="search" type="search" placeholder="Model, verdict, notes, or batch"></label>
+<label>Hallucination<select id="hallucination"><option value="">All</option>""" + options("hallucination_level") + """</select></label>
+<label>Reliability<select id="reliability"><option value="">All</option>""" + options("reliability_score") + """</select></label>
+<label>Verdict<select id="verdict"><option value="">All</option>""" + options("verdict") + """</select></label>
+<label>Import batch<select id="batch"><option value="">All</option>""" + options("batch") + """</select></label>
+</section>
+<table><thead><tr>
+<th><button data-sort="model">Model</button></th><th><button data-sort="score">Score</button></th><th>Hallucination</th><th>Reliability</th>
+<th><button data-sort="temperature">Temperature</button></th><th><button data-sort="context">Context</button></th>
+<th><button data-sort="tokens">tok/s</button></th><th><button data-sort="verdict">Verdict</button></th><th>Notes</th><th>Batch</th>
+<th><button data-sort="imported">Imported At</button></th></tr></thead><tbody id="scoreboard-rows">""" + table_body + """</tbody></table>
+</main><script>
+const tbody = document.getElementById('scoreboard-rows');
+const controls = ['hallucination', 'reliability', 'verdict', 'batch'].map(id => document.getElementById(id));
+function applyFilters() {
+  const search = document.getElementById('search').value.trim().toLowerCase();
+  for (const row of tbody.querySelectorAll('.data-row')) {
+    const visible = (!search || row.dataset.search.includes(search)) &&
+      controls.every(control => !control.value || row.dataset[control.id] === control.value);
+    row.hidden = !visible; row.nextElementSibling.hidden = true;
+    row.querySelector('.row-toggle')?.setAttribute('aria-expanded', 'false');
+  }
+}
+document.getElementById('search').addEventListener('input', applyFilters);
+controls.forEach(control => control.addEventListener('change', applyFilters));
+tbody.addEventListener('click', event => {
+  const toggle = event.target.closest('.row-toggle'); if (!toggle) return;
+  const details = toggle.closest('.data-row').nextElementSibling;
+  details.hidden = !details.hidden; toggle.setAttribute('aria-expanded', String(!details.hidden));
+});
+let sortDirection = 1;
+document.querySelectorAll('[data-sort]').forEach(button => button.addEventListener('click', () => {
+  const field = button.dataset.sort;
+  const rows = [...tbody.querySelectorAll('.data-row')];
+  rows.sort((a, b) => {
+    const left = a.dataset[field] || '', right = b.dataset[field] || '';
+    const leftNumber = Number(left), rightNumber = Number(right);
+    const compare = Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && left !== '' && right !== ''
+      ? leftNumber - rightNumber : left.localeCompare(right, undefined, { numeric: true });
+    return compare * sortDirection;
+  });
+  sortDirection *= -1;
+  rows.forEach(row => { const details = row.nextElementSibling; tbody.append(row, details); });
+}));
+</script></body></html>""", encoding="utf-8")
     return path
 
 
