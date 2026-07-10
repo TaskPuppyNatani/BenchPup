@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Callable
 
 from engine.database import EngineDatabase
-from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment
+from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, now
 from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
+from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
 from engine.path_completion import install_path_completion, normalize_path, resolve_export_destination
 
 BACK, CANCEL, MAIN = object(), object(), object()
@@ -33,6 +34,7 @@ class TerminalApp:
         self.catalog = CatalogService(database)
         self.benchmarks = BenchmarkService(database, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
+        self.hardware_importers = HardwareImporterRegistry()
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -223,6 +225,116 @@ class TerminalApp:
         if not values["name"]: self.output("A hardware profile name is required."); return None
         versions = {part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip() for part in values.pop("versions").split(",") if "=" in part}
         return self.catalog.hardware_profiles.create(HardwareProfile(**values, backend_versions=versions))
+
+    def show_hardware_preview(self, draft: HardwareProfileDraft) -> None:
+        self.output("\nDetected Hardware Profile\n----------------------------------")
+        for label, value in (
+            ("Profile Name", draft.name), ("Computer Name", draft.computer_name), ("CPU", draft.cpu),
+            ("GPU", draft.gpu), ("VRAM", f"{draft.vram_gb} GB" if draft.vram_gb is not None else ""),
+            ("RAM", f"{draft.ram_gb} GB" if draft.ram_gb is not None else ""),
+            ("Operating System", draft.operating_system), ("Import Source", draft.source_name),
+        ):
+            self.output(f"{label}: {value or '-'}")
+        self.output("----------------------------------")
+
+    def edit_hardware_draft(self, draft: HardwareProfileDraft) -> HardwareProfileDraft | object:
+        fields = (
+            ("name", "Profile name"), ("computer_name", "Computer name"), ("cpu", "CPU"), ("gpu", "GPU"),
+            ("vram_gb", "VRAM GB"), ("ram_gb", "RAM GB"), ("operating_system", "Operating system"), ("notes", "Notes"),
+        )
+        for name, label in fields:
+            current = getattr(draft, name)
+            value = self.ask(label, navigation=True, default="" if current is None else str(current))
+            if value in (BACK, CANCEL, MAIN):
+                return value
+            if name in {"vram_gb", "ram_gb"}:
+                try:
+                    setattr(draft, name, float(value) if value else None)
+                except ValueError:
+                    self.output(f'"{value}" is not a valid number; keeping the existing value.')
+            else:
+                setattr(draft, name, str(value))
+        return draft
+
+    def imported_hardware_profile(self, draft: HardwareProfileDraft, existing_id: int | None = None) -> HardwareProfile:
+        return HardwareProfile(
+            name=draft.name or draft.computer_name or f"{draft.source_name} hardware",
+            computer_name=draft.computer_name, cpu=draft.cpu, gpu=draft.gpu, vram_gb=draft.vram_gb,
+            ram_gb=draft.ram_gb, operating_system=draft.operating_system, backend_versions=draft.backend_versions,
+            notes=draft.notes, import_source=draft.source_name, imported_at=now(), id=existing_id,
+        )
+
+    def import_hardware_profile(self) -> None:
+        choice = self.ask("Hardware profile data source: 1) MSInfo32  2) DXDiag  3) lshw --short  4) Manual", navigation=True)
+        if choice in (BACK, CANCEL, MAIN):
+            return
+        source_name = {"1": "MSInfo32", "2": "DXDiag", "3": "lshw --short"}.get(self.normalized(str(choice)))
+        if self.normalized(str(choice)) in {"4", "manual"}:
+            self.create_hardware_profile()
+            return
+        if not source_name:
+            self.output("Choose MSInfo32, DXDiag, lshw --short, or Manual.")
+            return
+        path = self.prompt_path("Hardware profile text file", must_exist=True, extensions=(".txt",))
+        if path in (BACK, CANCEL, MAIN, None):
+            return
+        try:
+            raw = Path(str(path)).read_bytes()
+            text = decode_hardware_text(raw)
+            pairs = parse_key_value_pairs(text)
+            non_empty = [line.strip() for line in text.splitlines() if line.strip()][:5]
+            sections = [line.strip()[1:-1] for line in text.splitlines() if line.strip().startswith("[") and line.strip().endswith("]")]
+            self.output(f"Hardware import debug: file bytes={len(raw)}; decoded text length={len(text)}")
+            self.output(f"Hardware import debug: first non-empty lines={non_empty!r}")
+            self.output(f"Hardware import debug: sections={sections!r}; key/value pairs={len(pairs)}")
+            if source_name == "MSInfo32" and not pairs:
+                self.output("Could not parse MSInfo32 data: no Item/Value fields were found. Export MSInfo32 as a text file and try again.")
+                return
+            self.output(f"Hardware import debug: invoking {source_name} parser parse()")
+            draft = self.hardware_importers.parse(source_name, text)
+            self.output(f"Hardware import debug: draft name={draft.name!r}, computer={draft.computer_name!r}, cpu={draft.cpu!r}, gpu={draft.gpu!r}, ram_gb={draft.ram_gb!r}, os={draft.operating_system!r}")
+        except Exception as error:
+            self.logger.exception("Hardware profile parsing failed")
+            self.output(f"Could not parse the hardware profile file: {error}")
+            return
+        while True:
+            self.show_hardware_preview(draft)
+            action = self.ask("Import? Y) Save  E) Edit  C) Cancel", navigation=True, default="y")
+            if action in (BACK, CANCEL, MAIN) or self.normalized(str(action)) in {"c", "cancel"}:
+                return
+            if self.normalized(str(action)) in {"e", "edit"}:
+                edited = self.edit_hardware_draft(draft)
+                if edited in (BACK, CANCEL, MAIN):
+                    return
+                draft = edited
+                continue
+            if self.normalized(str(action)) not in {"y", "yes", "save"}:
+                self.output("Choose Y, E, or C.")
+                continue
+            profile = self.imported_hardware_profile(draft)
+            similar = next((item for item in self.catalog.hardware_profiles.list()
+                            if item.name.casefold() == profile.name.casefold()
+                            or (profile.computer_name and item.computer_name.casefold() == profile.computer_name.casefold())
+                            or (profile.cpu and profile.gpu and item.cpu.casefold() == profile.cpu.casefold()
+                                and item.gpu.casefold() == profile.gpu.casefold())), None)
+            if similar:
+                duplicate = self.ask("Existing hardware profile detected. 1) Update existing  2) Create new profile  3) Cancel", navigation=True)
+                if duplicate in (BACK, CANCEL, MAIN) or self.normalized(str(duplicate)) in {"3", "cancel"}:
+                    return
+                if self.normalized(str(duplicate)) == "1":
+                    self.catalog.hardware_profiles.update(self.imported_hardware_profile(draft, similar.id))
+                    self.output("✓ Hardware profile updated.")
+                    return
+                if self.normalized(str(duplicate)) != "2":
+                    self.output("Choose 1, 2, or 3.")
+                    continue
+                profile.name = f"{profile.name} (imported)"
+            try:
+                self.catalog.hardware_profiles.create(profile)
+                self.output("✓ Hardware profile imported.")
+            except ValueError as error:
+                self.output(f"Could not save hardware profile: {error}")
+            return
 
     def collect_score(self, current: ReviewScore | None = None) -> ReviewScore | object:
         self.output("\nReview score (B=back, C=cancel, Q=main menu)")
@@ -539,10 +651,13 @@ class TerminalApp:
                 if not row.get("benchmark_file", ""): row["benchmark_file"] = benchmark
 
     def import_screen(self) -> None:
-        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type", navigation=True)
+        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type  4) Hardware Profile", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
+        if self.normalized(str(choice)) in {"4", "hardware"}:
+            self.import_hardware_profile()
+            return
         import_type = {"1": "runs", "2": "scoreboard", "3": "auto"}.get(self.normalized(str(choice)))
-        if not import_type: self.output("Choose 1, 2, or 3."); return
+        if not import_type: self.output("Choose 1, 2, 3, or 4."); return
         self.import_csv(import_type)
 
     def import_csv(self, import_type: str = "auto") -> None:
