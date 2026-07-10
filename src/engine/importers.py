@@ -79,6 +79,20 @@ SCORE_FIELDS = {"accuracy_score", "hallucination_level", "reliability_level", "d
                 "strengths", "weaknesses", "verdict", "notes", "review_quality_notes", "reliability_score"}
 
 
+def normalize_context_length(value: str) -> int | None:
+    """Parse scoreboard context values using decimal SI suffixes (k=1,000; m=1,000,000)."""
+    raw = value.strip()
+    if raw.lower() in {"", "-", "n/a"}:
+        return None
+    compact = raw.replace(",", "")
+    match = re.fullmatch(r"(\d+)\s*([kKmM])?", compact)
+    if not match:
+        raise ValueError(f"context_length must be an integer (got {value!r})")
+    amount, suffix = match.groups()
+    multiplier = {None: 1, "k": 1_000, "m": 1_000_000}[suffix.lower() if suffix else None]
+    return int(amount) * multiplier
+
+
 def normalize_heading(heading: str) -> str:
     """Turn human-oriented Sheet headings into stable import field names."""
     cleaned = re.sub(r"[\s\-/]+", "_", heading.strip().lower())
@@ -142,7 +156,15 @@ class CsvImportService:
                 for heading, value in source_row.items():
                     target = resolved.get(heading)
                     if target in fields:
-                        row[target] = (value or "").strip()
+                        cleaned = (value or "").strip()
+                        if summary and target == "context_length":
+                            # Preserve invalid text for a useful row-level validation error.
+                            try:
+                                normalized = normalize_context_length(cleaned)
+                                cleaned = "" if normalized is None else str(normalized)
+                            except ValueError:
+                                pass
+                        row[target] = cleaned
                 rows.append(row)
         return ImportPreview(headings, resolved, rows, unknown)
 
@@ -167,6 +189,8 @@ class CsvImportService:
         if field in FLOAT_FIELDS:
             try: return float(value)
             except ValueError: raise ValueError(f"{field} must be a number") from None
+        if field == "context_length":
+            return normalize_context_length(value)
         if field in INT_FIELDS:
             try: return int(value)
             except ValueError: raise ValueError(f"{field} must be an integer") from None

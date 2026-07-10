@@ -43,6 +43,14 @@ memory, operating system, and backend versions at run time. These snapshots are
 authoritative for historical comparison; foreign keys provide convenient reuse
 and navigation only.
 
+## Scoreboard import context values
+
+Scoreboard CSV imports remain historical summary entries; they do not create
+benchmark runs or require per-benchmark fields. Their `Context` values accept
+integers with optional commas, plus decimal SI suffixes: `k` means 1,000 and
+`m` means 1,000,000 (for example, `32k` becomes `32000` and `1M` becomes
+`1000000`). Blank, `-`, and `N/A` are stored as null.
+
 ## New reusable entities
 
 `benchmark_sessions` contains `id`, `title`, `description`, `started_at`,

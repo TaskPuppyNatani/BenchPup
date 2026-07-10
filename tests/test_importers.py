@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.database import EngineDatabase
 from engine.exporters import export_combined_markdown, export_scoreboard_csv
-from engine.importers import CsvImportService, normalize_heading
+from engine.importers import CsvImportService, normalize_context_length, normalize_heading
 from engine.services import BenchmarkService
 
 
@@ -68,6 +68,37 @@ class CsvImportTests(unittest.TestCase):
         report_path = export_combined_markdown(self.service, self.service.catalog, Path(self.directory.name) / "report.md")
         self.assertIn("Historical July", csv_path.read_text(encoding="utf-8"))
         self.assertIn("### Historical July", report_path.read_text(encoding="utf-8"))
+
+    def test_scoreboard_context_values_are_normalized_in_preview_and_import(self):
+        path = Path(self.directory.name) / "scoreboard-context.csv"
+        path.write_text(
+            "Model,Context\n"
+            "K lower,32k\nK upper,32K\nMillion,1M\nComma,\"8,192\"\nBlank,\nDash,-\nNot applicable,N/A\n",
+            encoding="utf-8",
+        )
+        preview = self.importer.preview(path, summary=True)
+        self.assertEqual(
+            [row["context_length"] for row in preview.rows],
+            ["32000", "32000", "1000000", "8192", "", "", ""],
+        )
+        self.importer.import_scoreboard_entries(preview.rows, path)
+        self.assertEqual(
+            [entry.context_length for entry in self.service.catalog.scoreboard_entries.list()],
+            [32000, 32000, 1000000, 8192, None, None, None],
+        )
+
+    def test_scoreboard_invalid_context_reports_original_value(self):
+        path = Path(self.directory.name) / "invalid-context.csv"
+        path.write_text("Model,Context\nGood,128k\nBad,a lot\n", encoding="utf-8")
+        preview = self.importer.preview(path, summary=True)
+        with self.assertRaisesRegex(ValueError, r"Row 3: context_length must be an integer \(got 'a lot'\)"):
+            self.importer.import_scoreboard_entries(preview.rows, path)
+        self.assertEqual(self.service.catalog.scoreboard_entries.list(), [])
+
+    def test_context_normalization_supports_decimal_suffixes_and_commas(self):
+        self.assertEqual(normalize_context_length("128k"), 128000)
+        self.assertEqual(normalize_context_length("1m"), 1000000)
+        self.assertEqual(normalize_context_length("8192"), 8192)
 
     def test_duplicate_policies_skip_replace_and_keep(self):
         row = {"model_name": "Qwen", "benchmark_file": "main.py", "raw_model_output": "Review"}
