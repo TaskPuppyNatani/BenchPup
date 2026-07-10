@@ -47,7 +47,7 @@ BACK_WORDS = {"b", "back"}
 CANCEL_WORDS = {"c", "cancel"}
 QUIT_WORDS = {"q", "quit", "exit"}
 QUIT_ALL_WORDS = {"qa", "quit all", "quit a"}
-APP_VERSION = "0.3.7-Alpha"
+APP_VERSION = "0.4.1-Alpha"
 MENU_WIDTH = 56
 ARCHIVE_LABELS = {
     "benchmark_sessions": "Sessions", "model_profiles": "Models", "hardware_profiles": "Hardware Profiles",
@@ -663,7 +663,7 @@ class TerminalApp:
                 for item in items: self.output(f"{item.id}) {item.name if hasattr(item, 'name') else item.title}")
             else:
                 self.output("No records found.")
-            choice = self.ask("N) New  B) Back", navigation=True)
+            choice = self.ask("N) New  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
             if choice in (BACK, CANCEL, MAIN): return
             if self.normalized(str(choice)) not in {"n", "new"}:
                 self.output("Choose N to create a record or B to return.")
@@ -757,7 +757,7 @@ class TerminalApp:
                 if not row.get("benchmark_file", ""): row["benchmark_file"] = benchmark
 
     def import_screen(self) -> None:
-        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type  4) Hardware Profile", navigation=True)
+        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type  4) Hardware Profile  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
         if self.normalized(str(choice)) in {"4", "hardware"}:
             self.import_hardware_profile()
@@ -838,7 +838,7 @@ class TerminalApp:
             self.output(f"Import cancelled: {error}. No rows were written.")
 
     def export_screen(self) -> None:
-        choice = self.ask("Export: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) JSONL training data  4) Markdown report  5) Scoreboard HTML", navigation=True)
+        choice = self.ask("Export: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) JSONL training data  4) Markdown report  5) Scoreboard HTML  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
         exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
         selected = exporters.get(self.normalized(str(choice)))
@@ -863,6 +863,7 @@ class TerminalApp:
                 self.output(f"Could not open HTML report: {error}")
 
     def backup_data(self) -> None:
+        self.output("\nBackup BenchPup Data\nQ) Back / Quit  QA) Quit BenchPup completely")
         backup_directory = self.benchmarks.database.path.parent.parent / "backups"
         try:
             backup_directory.mkdir(parents=True, exist_ok=True)
@@ -892,6 +893,7 @@ class TerminalApp:
             self.output(f"Backup failed: {error}")
 
     def restore_data(self) -> None:
+        self.output("\nRestore BenchPup Data\nQ) Back / Quit  QA) Quit BenchPup completely")
         path = self.prompt_path("Archive file", must_exist=True, extensions=(".json",))
         if not isinstance(path, str):
             return
@@ -909,7 +911,7 @@ class TerminalApp:
         self._show_archive_counts(preview["counts"])
         for warning in preview["warnings"]:
             self.output(f"Warning: {warning}")
-        action = self.ask("1) Preview only  2) Merge into current database  3) Replace current database  C) Cancel", navigation=True)
+        action = self.ask("1) Preview only  2) Merge into current database  3) Replace current database  C) Cancel  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
         if not isinstance(action, str) or action in {"", "1"}:
             return
         try:
@@ -954,7 +956,13 @@ class TerminalApp:
             self.output(f"\nSafety backup created:\n{safety_backup}")
 
     def help(self) -> None:
-        self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
+        self.output(
+            "Commands: add, list, view, edit, delete, reference data.\n\n"
+            "Navigation\n"
+            "Q   Back / Cancel current screen\n"
+            "QA  Quit BenchPup completely\n"
+            "    Also: qa, quit all, quit a (case-insensitive; extra spaces allowed)."
+        )
         self.pause()
 
     def show_main_menu(self) -> None:
@@ -972,7 +980,7 @@ class TerminalApp:
         self.output(" Runs\n ----\n 1) Add Run\n 2) List Runs\n 3) View Run\n 4) Edit Run\n 5) Delete Run\n")
         self.output(" Reference Data\n --------------\n 6) Sessions\n 7) Models\n 8) Benchmarks\n 9) Prompt Templates\n10) Hardware Profiles\n")
         self.output(" Data\n ----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n")
-        self.output(" Help\n ----\nH) Help\nS) Settings\nQ) Quit\n")
+        self.output(" Help\n ----\nH) Help\nS) Settings\nQ) Back / Quit\nQA) Quit BenchPup completely\n")
         self.output(border)
 
     def run(self) -> None:

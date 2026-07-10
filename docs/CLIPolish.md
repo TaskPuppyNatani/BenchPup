@@ -15,6 +15,12 @@
 - [x] Cancel current operation
 - [x] Review before save
 - [x] Confirmation before destructive actions
+- [x] Global Quit All command (QA)
+
+Q remains context-specific. QA always exits the entire application and works
+from menus, submenus, wizards, confirmations, path prompts, import/export,
+backup, and restore flows. Cleanup/finally blocks run before exit. Escape is not
+currently supported or documented as a cancellation command.
 
 ## Feedback
 

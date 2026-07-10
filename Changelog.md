@@ -2,6 +2,28 @@
 
 All notable changes to BenchPup will be documented in this file.
 
+## [v0.4.1-alpha] - 2026-07-10
+
+### Added
+- Global QA (Quit All) command
+- prompt_toolkit-based path completion
+- Improved CLI navigation documentation
+
+### Improved
+- Windows path prompt reliability
+- Backup/restore workflow
+- Restore summary formatting
+- Help screen navigation
+
+### Fixed
+- Windows path prompt rendering
+- Path completion lifecycle
+- CLI navigation consistency
+
+### Quality
+- 69 passing unit tests
+- 0 Pyright errors / warnings
+
 ## [0.4.0-alpha] - 2026-07-10
 
 ### Added

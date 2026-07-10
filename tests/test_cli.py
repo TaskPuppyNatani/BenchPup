@@ -83,6 +83,15 @@ class CliPolishTests(unittest.TestCase):
         app.run()
         self.assertIn("Exiting BenchPup.", output)
 
+    def test_help_describes_q_and_global_quit_all_without_escape(self):
+        app, output = self.app_with(iter([""]))
+        app.help()
+        rendered = "\n".join(output)
+        self.assertIn("Q   Back / Cancel current screen", rendered)
+        self.assertIn("QA  Quit BenchPup completely", rendered)
+        self.assertIn("qa, quit all, quit a", rendered)
+        self.assertNotIn("Escape", rendered)
+
     def test_main_menu_uses_grouped_vertical_layout(self):
         app, output = self.app_with(iter(["q"]))
         app.run()
@@ -92,6 +101,8 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn(" Data\n ----\n11) Import", menu)
         self.assertIn("13) Scoreboard", menu)
         self.assertIn("Scoreboard entries : 0", menu)
+        self.assertIn("Q) Back / Quit", menu)
+        self.assertIn("QA) Quit BenchPup completely", menu)
         self.assertIn(" Help\n ----\nH) Help", menu)
         self.assertIn("Version 0.3.7-Alpha", menu)
         self.assertIn("Database : benchmarks.db", menu)
