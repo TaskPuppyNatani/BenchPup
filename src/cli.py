@@ -7,6 +7,7 @@ import csv
 import os
 import webbrowser
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
 
@@ -17,6 +18,7 @@ from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SU
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
 from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
 from engine.path_completion import install_path_completion, normalize_path, resolve_export_destination
+from engine.archive import ArchiveError, ArchiveService, TABLES
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -50,6 +52,7 @@ class TerminalApp:
         self.benchmarks = BenchmarkService(database, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
+        self.archives = ArchiveService(database)
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -85,7 +88,7 @@ class TerminalApp:
     def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | NavigationSignal | None:
         """Prompt for a filesystem path while preserving non-interactive input behavior."""
         self.output("Tip: press Tab to autocomplete paths.")
-        restore_completion = install_path_completion(extensions, debug=self.output) if self.interactive_input else lambda: None
+        restore_completion = install_path_completion(extensions) if self.interactive_input else lambda: None
         try:
             value = self.ask(label, navigation=True, default=default)
         finally:
@@ -112,6 +115,7 @@ class TerminalApp:
             "Benchmark Runs CSV": ("benchmark_runs.csv", None),
             "JSONL training data": ("training_data.jsonl", None),
             "Markdown report": ("report.md", None),
+            "BenchPup Backup": ("benchpup-backup.json", ".json"),
         }
         default_filename, extension = defaults.get(export_name, ("report.md", None))
         output_path = resolve_export_destination(destination, default_filename=default_filename, extension=extension)
@@ -330,17 +334,10 @@ class TerminalApp:
             raw = Path(str(path)).read_bytes()
             text = decode_hardware_text(raw)
             pairs = parse_key_value_pairs(text)
-            non_empty = [line.strip() for line in text.splitlines() if line.strip()][:5]
-            sections = [line.strip()[1:-1] for line in text.splitlines() if line.strip().startswith("[") and line.strip().endswith("]")]
-            self.output(f"Hardware import debug: file bytes={len(raw)}; decoded text length={len(text)}")
-            self.output(f"Hardware import debug: first non-empty lines={non_empty!r}")
-            self.output(f"Hardware import debug: sections={sections!r}; key/value pairs={len(pairs)}")
             if source_name == "MSInfo32" and not pairs:
                 self.output("Could not parse MSInfo32 data: no Item/Value fields were found. Export MSInfo32 as a text file and try again.")
                 return
-            self.output(f"Hardware import debug: invoking {source_name} parser parse()")
             draft = self.hardware_importers.parse(source_name, text)
-            self.output(f"Hardware import debug: draft name={draft.name!r}, computer={draft.computer_name!r}, cpu={draft.cpu!r}, gpu={draft.gpu!r}, ram_gb={draft.ram_gb!r}, os={draft.operating_system!r}")
         except Exception as error:
             self.logger.exception("Hardware profile parsing failed")
             self.output(f"Could not parse the hardware profile file: {error}")
@@ -824,6 +821,61 @@ class TerminalApp:
             except OSError as error:
                 self.output(f"Could not open HTML report: {error}")
 
+    def backup_data(self) -> None:
+        default = self.benchmarks.database.path.parent / f"benchpup-backup-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.json"
+        path = self.prompt_path("Backup destination", default=str(default), preserve_trailing_separator=True)
+        if not isinstance(path, str):
+            return
+        output_path = self.prepare_export_destination(path, "BenchPup Backup")
+        if not isinstance(output_path, Path):
+            return
+        if not output_path.suffix:
+            output_path = output_path.with_suffix(".json")
+        try:
+            saved = self.archives.export(output_path, APP_VERSION)
+            preview = self.archives.preview(self.archives.load(saved))
+            self.output(f"Backup archive v{preview['archive_version']} schema v{preview['schema_version']} written to {saved}")
+            self.output("Record counts: " + ", ".join(f"{table}={count}" for table, count in preview["counts"].items()))
+        except ArchiveError as error:
+            self.output(f"Backup failed: {error}")
+
+    def restore_data(self) -> None:
+        path = self.prompt_path("Archive file", must_exist=True, extensions=(".json",))
+        if not isinstance(path, str):
+            return
+        try:
+            archive = self.archives.load(path)
+            preview = self.archives.preview(archive)
+        except ArchiveError as error:
+            self.output(f"Restore cancelled: {error}")
+            return
+        self.output(f"Archive created: {preview['created_at']} | BenchPup: {preview['benchpup_version']} | archive v{preview['archive_version']} | schema v{preview['schema_version']}")
+        self.output("Record counts: " + ", ".join(f"{table}={count}" for table, count in preview["counts"].items()))
+        for warning in preview["warnings"]:
+            self.output(f"Warning: {warning}")
+        action = self.ask("1) Preview only  2) Merge into current database  3) Replace current database  C) Cancel", navigation=True)
+        if not isinstance(action, str) or action in {"", "1"}:
+            return
+        try:
+            if action == "2":
+                report = self.archives.merge(archive)
+                self.output("Merge complete: " + ", ".join(
+                    f"{table} created={report.created[table]} skipped={report.skipped[table]} updated={report.updated[table]} failed={report.failed[table]}"
+                    for table in TABLES
+                ))
+            elif action == "3":
+                confirmation = self.ask("Type RESTORE to replace the current database", navigation=True)
+                if confirmation != "RESTORE":
+                    self.output("Replace restore cancelled.")
+                    return
+                safety = self.archives.replace(archive, APP_VERSION)
+                self.output(f"Replace restore complete. Safety backup: {safety}")
+            else:
+                self.output("Choose 1, 2, 3, or C.")
+        except ArchiveError as error:
+            self.logger.exception("Archive restore failed")
+            self.output(f"Restore failed; no partial changes were written: {error}")
+
     def help(self) -> None:
         self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
         self.pause()
@@ -842,7 +894,7 @@ class TerminalApp:
         self.output(f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\nVersion  : {APP_VERSION}\n")
         self.output(" Runs\n ----\n 1) Add Run\n 2) List Runs\n 3) View Run\n 4) Edit Run\n 5) Delete Run\n")
         self.output(" Reference Data\n --------------\n 6) Sessions\n 7) Models\n 8) Benchmarks\n 9) Prompt Templates\n10) Hardware Profiles\n")
-        self.output(" Data\n ----\n11) Import\n12) Export\n13) Scoreboard\n")
+        self.output(" Data\n ----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n")
         self.output(" Help\n ----\nH) Help\nS) Settings\nQ) Quit\n")
         self.output(border)
 
@@ -857,6 +909,7 @@ class TerminalApp:
             "10": "hardware", "hardware": "hardware",
             "11": "import", "import": "import", "12": "export", "export": "export",
             "13": "scoreboard", "scoreboard": "scoreboard",
+            "14": "backup", "backup": "backup", "15": "restore", "restore": "restore",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -882,6 +935,8 @@ class TerminalApp:
                 elif command == "import": self.import_screen()
                 elif command == "export": self.export_screen()
                 elif command == "scoreboard": self.scoreboard_screen()
+                elif command == "backup": self.backup_data()
+                elif command == "restore": self.restore_data()
                 elif command == "settings": self.not_available("Settings", "a future phase")
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")

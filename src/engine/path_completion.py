@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
-import sys
 from typing import Callable
 
 
@@ -72,35 +71,20 @@ def path_candidates(value: str, *, extensions: tuple[str, ...] = (), directories
     return candidates
 
 
-def install_path_completion(extensions: tuple[str, ...] = (), *, debug: Callable[[str], None] | None = None) -> Callable[[], None]:
+def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], None]:
     """Install a temporary readline completer; return a function that restores it."""
-    def report(message: str) -> None:
-        if debug:
-            debug(f"Path completion debug: {message}")
-
-    terminal = (
-        "Windows Terminal" if os.environ.get("WT_SESSION") else
-        os.environ.get("TERM_PROGRAM") or os.environ.get("TERM") or
-        os.environ.get("ComSpec", "unknown terminal")
-    )
-    report(f"platform={sys.platform}; stdin_tty={sys.stdin.isatty()}; terminal={terminal}")
     try:
         import readline  # type: ignore[import-not-found]
-        report(f"imported readline from {getattr(readline, '__file__', 'built-in')}")
-    except ImportError as error:
-        report(f"readline import failed: {error!r}")
+    except ImportError:
         try:
             import pyreadline3 as readline  # type: ignore[import-not-found]
-            report(f"imported pyreadline3 from {getattr(readline, '__file__', 'built-in')}")
-        except ImportError as fallback_error:
-            report(f"pyreadline3 import failed: {fallback_error!r}; completion unavailable")
+        except ImportError:
             return lambda: None
 
     try:
         previous_completer = readline.get_completer()
         previous_delimiters = readline.get_completer_delims()
-    except (AttributeError, RuntimeError) as error:
-        report(f"readline backend does not expose completion APIs: {error!r}")
+    except (AttributeError, RuntimeError):
         return lambda: None
     matches: list[str] = []
 
@@ -114,11 +98,8 @@ def install_path_completion(extensions: tuple[str, ...] = (), *, debug: Callable
         readline.set_completer(complete)
         # Spaces and path separators must remain part of the current completion token.
         readline.set_completer_delims("\t\n")
-        report("set_completer() and set_completer_delims() executed")
         readline.parse_and_bind("tab: complete")
-        report("parse_and_bind('tab: complete') executed")
-    except (AttributeError, RuntimeError) as error:
-        report(f"Tab binding failed: {error!r}")
+    except (AttributeError, RuntimeError):
         readline.set_completer(previous_completer)
         readline.set_completer_delims(previous_delimiters)
         return lambda: None
@@ -126,6 +107,5 @@ def install_path_completion(extensions: tuple[str, ...] = (), *, debug: Callable
     def restore() -> None:
         readline.set_completer(previous_completer)
         readline.set_completer_delims(previous_delimiters)
-        report("previous completer restored")
 
     return restore

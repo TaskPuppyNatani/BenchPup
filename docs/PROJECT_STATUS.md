@@ -2,7 +2,7 @@
 
 Current Version
 
-0.2 Alpha
+0.3.5 Alpha
 
 Completed
 
@@ -13,7 +13,7 @@ Completed
 
 In Progress
 
-- [ ] CSV Import
+- [] CSV Import
 
 Planned
 

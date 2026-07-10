@@ -70,17 +70,17 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn("13) Scoreboard", menu)
         self.assertIn("Scoreboard entries : 0", menu)
         self.assertIn(" Help\n ----\nH) Help", menu)
-        self.assertIn("Version 0.2 Alpha", menu)
+        self.assertIn("Version 0.3.5-Alpha", menu)
         self.assertIn("Database : benchmarks.db", menu)
 
     def test_title_lines_are_centered_to_the_menu_width(self):
         app, output = self.app_with(iter(["q"]))
         app.run()
-        title = next(line for line in output if "Local LLM Benchmark Recorder" in line)
-        version = next(line for line in output if "Version 0.2 Alpha" in line)
+        title = next(line for line in output if "BenchPup" in line)
+        version = next(line for line in output if "Version 0.3.5-Alpha" in line)
         self.assertEqual(len(title), len(version))
-        title_center = title.index("Local") + len("Local LLM Benchmark Recorder") / 2
-        version_center = version.index("Version") + len("Version 0.2 Alpha") / 2
+        title_center = title.index("BenchPup") + len("BenchPup") / 2
+        version_center = version.index("Version") + len("Version 0.3.5-Alpha") / 2
         self.assertLessEqual(abs(title_center - version_center), 0.5)
 
     def test_keyboard_interrupt_returns_to_main_menu(self):
@@ -194,6 +194,20 @@ class CliPolishTests(unittest.TestCase):
         self.assertTrue(destination.exists())
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", destination.read_text(encoding="utf-8"))
         self.assertTrue(any("Exported Scoreboard HTML" in line for line in output))
+
+    def test_backup_and_restore_preview_do_not_write_database(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        archive_path = Path(directory.name) / "backup.json"
+        answers = iter([str(archive_path)])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.backup_data()
+        self.assertTrue(archive_path.exists())
+        answers = iter([str(archive_path), "1"])
+        app.input = lambda _: next(answers)
+        app.restore_data()
+        self.assertEqual(app.benchmarks.runs.list(), [])
+        self.assertTrue(any("Archive created:" in line for line in output))
 
     def test_export_creates_missing_parent_after_confirmation_and_shows_final_path(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)

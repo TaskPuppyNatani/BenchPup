@@ -34,12 +34,9 @@ class PathCompletionTests(unittest.TestCase):
             self.assertEqual(candidates, [str(root / "import.csv")])
             self.assertIn(str(root / "exports") + os.sep, path_candidates(str(root / "e"), extensions=(".csv",)))
 
-    def test_completion_debug_reports_backend_availability(self):
-        messages = []
-        restore = install_path_completion(debug=messages.append)
+    def test_completion_setup_is_safe_when_no_terminal_backend_is_available(self):
+        restore = install_path_completion()
         restore()
-        self.assertTrue(any("platform=" in message for message in messages))
-        self.assertTrue(any("readline import" in message or "imported readline" in message for message in messages))
 
     def test_export_destination_uses_default_filename_for_directories_and_trailing_slashes(self):
         with tempfile.TemporaryDirectory() as directory:
