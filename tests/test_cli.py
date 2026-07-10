@@ -36,6 +36,13 @@ class CliPolishTests(unittest.TestCase):
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].raw_model_output, "final output")
 
+    def test_create_session_from_cli_does_not_pass_duplicate_timestamps(self):
+        app, _ = self.app_with(iter(["July import", "Historical entries", "", "", "Imported from CSV"]))
+        session = app.create_session()
+        self.assertEqual(session.title, "July import")
+        self.assertIsNone(session.started_at)
+        self.assertIsNone(session.completed_at)
+
     def test_invalid_integer_and_float_are_reprompted(self):
         app, output = self.app_with(iter(["abc", "3", "bad", "2.5"]))
         self.assertEqual(app.ask_id(), 3)

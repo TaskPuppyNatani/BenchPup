@@ -185,7 +185,9 @@ class TerminalApp:
         values = self._form([("title", "Session title", None, "text"), ("description", "Description", "", "text"), ("started_at", "Started at (ISO, optional)", "", "text"), ("completed_at", "Completed at (ISO, optional)", "", "text"), ("notes", "Notes", "", "text")])
         if values in (BACK, CANCEL, MAIN): return values
         if not values["title"]: self.output("A session title is required."); return None
-        return self.catalog.sessions.create(BenchmarkSession(**values, started_at=values["started_at"] or None, completed_at=values["completed_at"] or None))
+        started_at = values.pop("started_at") or None
+        completed_at = values.pop("completed_at") or None
+        return self.catalog.sessions.create(BenchmarkSession(**values, started_at=started_at, completed_at=completed_at))
 
     def create_model_profile(self) -> ModelProfile | object | None:
         values = self._form([("name", "Profile name", None, "text"), ("model_name", "Model name", None, "text"), ("backend", "Backend", "Other", "text"), ("model_family", "Model family", "", "text"), ("model_size", "Model size", "", "text"), ("quantization", "Quantization", "", "text"), ("temperature", "Temperature", None, "float"), ("tokens_per_second", "Tokens per second", None, "float")])
