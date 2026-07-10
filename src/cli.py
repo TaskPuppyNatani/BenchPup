@@ -8,21 +8,36 @@ import os
 import webbrowser
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
 
 from engine.database import EngineDatabase
-from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, now
+from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardImportBatch, now
 from engine.services import BenchmarkService, CatalogService
-from engine.importers import CsvImportService, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
+from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
 from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
 from engine.path_completion import install_path_completion, normalize_path, resolve_export_destination
 
-BACK, CANCEL, MAIN = object(), object(), object()
+class NavigationSignal:
+    """Typed sentinel for returning from a prompt without accepting input."""
+
+
+BACK, CANCEL, MAIN = NavigationSignal(), NavigationSignal(), NavigationSignal()
+PromptResult: TypeAlias = str | NavigationSignal
+NumericPromptResult: TypeAlias = float | None | NavigationSignal
+FormValue: TypeAlias = str | float | None
+FormValues: TypeAlias = dict[str, FormValue]
+
+
+class AttachmentDraft(TypedDict):
+    attachment_type: str
+    file_path: str
+    original_filename: str
+    notes: str
 BACK_WORDS = {"b", "back"}
 CANCEL_WORDS = {"c", "cancel"}
 QUIT_WORDS = {"q", "quit", "exit"}
-APP_VERSION = "0.2 Alpha"
+APP_VERSION = "0.3.5-Alpha"
 MENU_WIDTH = 56
 
 
@@ -48,7 +63,7 @@ class TerminalApp:
     def normalized(value: str) -> str:
         return value.strip().lower()
 
-    def ask(self, label: str, *, navigation: bool = False, default: str | None = None) -> str | object:
+    def ask(self, label: str, *, navigation: bool = False, default: str | None = None) -> PromptResult:
         suffix = f" [{default}]" if default not in (None, "") else ""
         try:
             raw = self.input(f"{label}{suffix}: ")
@@ -67,7 +82,7 @@ class TerminalApp:
         try: self.input("Press Enter to continue...")
         except KeyboardInterrupt: self.output("")
 
-    def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | object:
+    def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | NavigationSignal | None:
         """Prompt for a filesystem path while preserving non-interactive input behavior."""
         self.output("Tip: press Tab to autocomplete paths.")
         restore_completion = install_path_completion(extensions, debug=self.output) if self.interactive_input else lambda: None
@@ -90,8 +105,8 @@ class TerminalApp:
             return None
         return normalized
 
-    def prepare_export_destination(self, destination: str, export_name: str) -> Path | None | object:
-        defaults = {
+    def prepare_export_destination(self, destination: str, export_name: str) -> Path | NavigationSignal | None:
+        defaults: dict[str, tuple[str, str | None]] = {
             "Scoreboard HTML": ("scoreboard.html", ".html"),
             "Scoreboard CSV": ("scoreboard.csv", None),
             "Benchmark Runs CSV": ("benchmark_runs.csv", None),
@@ -115,23 +130,23 @@ class TerminalApp:
         self.output(f"Writing export to {output_path}")
         return output_path
 
-    def ask_float(self, label: str, *, default: float | None = None, navigation: bool = False) -> float | None | object:
+    def ask_float(self, label: str, *, default: float | None = None, navigation: bool = False) -> NumericPromptResult:
         while True:
             value = self.ask(label, navigation=navigation, default=str(default) if default is not None else None)
-            if value in (BACK, CANCEL, MAIN): return value
+            if isinstance(value, NavigationSignal): return value
             if value == "": return None
             try: return float(value)
-            except (TypeError, ValueError): self.output(f'"{value}" is not a valid number. Please enter a number or leave it blank.')
+            except ValueError: self.output(f'"{value}" is not a valid number. Please enter a number or leave it blank.')
 
-    def ask_id(self, label: str = "Run ID", *, navigation: bool = True) -> int | object:
+    def ask_id(self, label: str = "Run ID", *, navigation: bool = True) -> int | NavigationSignal:
         while True:
             value = self.ask(label, navigation=navigation)
             if value in (BACK, CANCEL, MAIN): return value
             if isinstance(value, str) and value.isdigit() and int(value) > 0: return int(value)
             self.output(f'"{value}" is not a valid {label}. Please enter a numeric ID or B to go back.')
 
-    def pick(self, label: str, choices: tuple[str, ...], default: str, *, navigation: bool = False) -> str | object:
-        lookup = {item.lower(): item for item in choices}
+    def pick(self, label: str, choices: tuple[str, ...], default: str, *, navigation: bool = False) -> PromptResult:
+        lookup: dict[str, str] = {item.lower(): item for item in choices}
         while True:
             value = self.ask(f"{label} [{'/'.join(choices)}]", navigation=navigation, default=default)
             if value in (BACK, CANCEL, MAIN): return value
@@ -139,7 +154,7 @@ class TerminalApp:
             if selected: return selected
             self.output("Choose one of the listed values.")
 
-    def yes_no(self, label: str, *, default: bool = False, navigation: bool = False) -> bool | object:
+    def yes_no(self, label: str, *, default: bool = False, navigation: bool = False) -> bool | NavigationSignal:
         hint = "Y/n" if default else "y/N"
         while True:
             value = self.ask(f"{label} [{hint}]", navigation=navigation)
@@ -150,16 +165,26 @@ class TerminalApp:
             if command in {"n", "no"}: return False
             self.output("Please answer yes or no.")
 
-    def _form(self, fields: list[tuple[str, str, str | float | None, str]]) -> dict | object:
+    def _form(self, fields: list[tuple[str, str, FormValue, str]]) -> FormValues | NavigationSignal:
         """Collect simple text/number fields; navigation works from every prompt."""
-        values = {}
+        values: FormValues = {}
         for name, label, default, kind in fields:
-            value = self.ask_float(label, default=default, navigation=True) if kind == "float" else self.ask(label, navigation=True, default=default if isinstance(default, str) else None)
-            if value in (BACK, CANCEL, MAIN): return value
+            value = self.ask_float(label, default=default if isinstance(default, float) else None, navigation=True) if kind == "float" else self.ask(label, navigation=True, default=default if isinstance(default, str) else None)
+            if isinstance(value, NavigationSignal): return value
             values[name] = value
         return values
 
-    def choose_catalog(self, title: str, repository, create, key: str, *, optional: bool, current_id: int | None = None) -> int | None | object:
+    @staticmethod
+    def _form_text(values: Mapping[str, FormValue], key: str) -> str:
+        value = values.get(key)
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _form_float(values: Mapping[str, FormValue], key: str) -> float | None:
+        value = values.get(key)
+        return value if isinstance(value, float) else None
+
+    def choose_catalog(self, title: str, repository: Any, create: Callable[[], Any], key: str, *, optional: bool, current_id: int | None = None) -> int | None | NavigationSignal:
         while True:
             items = repository.list()
             self.output(f"\n{title}")
@@ -183,48 +208,71 @@ class TerminalApp:
                 self.last_used[key] = int(value); return int(value)
             self.output("Choose a listed numeric ID, N to create, or B to go back.")
 
-    def create_session(self) -> BenchmarkSession | object | None:
-        values = self._form([("title", "Session title", None, "text"), ("description", "Description", "", "text"), ("started_at", "Started at (ISO, optional)", "", "text"), ("completed_at", "Completed at (ISO, optional)", "", "text"), ("notes", "Notes", "", "text")])
-        if values in (BACK, CANCEL, MAIN): return values
-        if not values["title"]: self.output("A session title is required."); return None
-        started_at = values.pop("started_at") or None
-        completed_at = values.pop("completed_at") or None
-        return self.catalog.sessions.create(BenchmarkSession(**values, started_at=started_at, completed_at=completed_at))
+    def create_session(self) -> BenchmarkSession | NavigationSignal | None:
+        values: FormValues | NavigationSignal = self._form([("title", "Session title", None, "text"), ("description", "Description", "", "text"), ("started_at", "Started at (ISO, optional)", "", "text"), ("completed_at", "Completed at (ISO, optional)", "", "text"), ("notes", "Notes", "", "text")])
+        if isinstance(values, NavigationSignal): return values
+        session = BenchmarkSession(
+            title=self._form_text(values, "title"), description=self._form_text(values, "description"),
+            started_at=self._form_text(values, "started_at") or None,
+            completed_at=self._form_text(values, "completed_at") or None, notes=self._form_text(values, "notes"),
+        )
+        if not session.title: self.output("A session title is required."); return None
+        return self.catalog.sessions.create(session)
 
-    def create_model_profile(self) -> ModelProfile | object | None:
-        values = self._form([("name", "Profile name", None, "text"), ("model_name", "Model name", None, "text"), ("backend", "Backend", "Other", "text"), ("model_family", "Model family", "", "text"), ("model_size", "Model size", "", "text"), ("quantization", "Quantization", "", "text"), ("temperature", "Temperature", None, "float"), ("tokens_per_second", "Tokens per second", None, "float")])
-        if values in (BACK, CANCEL, MAIN): return values
-        if not values["name"] or not values["model_name"]: self.output("Profile name and model name are required."); return None
-        return self.catalog.model_profiles.create(ModelProfile(**values))
+    def create_model_profile(self) -> ModelProfile | NavigationSignal | None:
+        values: FormValues | NavigationSignal = self._form([("name", "Profile name", None, "text"), ("model_name", "Model name", None, "text"), ("backend", "Backend", "Other", "text"), ("model_family", "Model family", "", "text"), ("model_size", "Model size", "", "text"), ("quantization", "Quantization", "", "text"), ("temperature", "Temperature", None, "float"), ("tokens_per_second", "Tokens per second", None, "float")])
+        if isinstance(values, NavigationSignal): return values
+        profile = ModelProfile(
+            name=self._form_text(values, "name"), model_name=self._form_text(values, "model_name"),
+            backend=self._form_text(values, "backend"), model_family=self._form_text(values, "model_family"),
+            model_size=self._form_text(values, "model_size"), quantization=self._form_text(values, "quantization"),
+            temperature=self._form_float(values, "temperature"), tokens_per_second=self._form_float(values, "tokens_per_second"),
+        )
+        if not profile.name or not profile.model_name: self.output("Profile name and model name are required."); return None
+        return self.catalog.model_profiles.create(profile)
 
-    def create_definition(self) -> BenchmarkDefinition | object | None:
-        name = self.ask("Benchmark name", navigation=True)
-        if name in (BACK, CANCEL, MAIN): return name
+    def create_definition(self) -> BenchmarkDefinition | NavigationSignal | None:
+        name: PromptResult = self.ask("Benchmark name", navigation=True)
+        if isinstance(name, NavigationSignal): return name
         file_path = self.prompt_path("Benchmark file path")
-        if file_path in (BACK, CANCEL, MAIN): return file_path
+        if isinstance(file_path, NavigationSignal): return file_path
+        if file_path is None: return None
         if not name or not file_path: self.output("Benchmark name and file path are required."); return None
         benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
-        if benchmark_type in (BACK, CANCEL, MAIN): return benchmark_type
-        rest = self._form([("default_prompt", "Default prompt (optional)", "", "text"), ("tags", "Tags (optional)", "", "text")])
-        if rest in (BACK, CANCEL, MAIN): return rest
-        return self.catalog.benchmark_definitions.create(BenchmarkDefinition(name=str(name), file_path=str(file_path), benchmark_type=benchmark_type, **rest))
+        if isinstance(benchmark_type, NavigationSignal): return benchmark_type
+        rest: FormValues | NavigationSignal = self._form([("default_prompt", "Default prompt (optional)", "", "text"), ("tags", "Tags (optional)", "", "text")])
+        if isinstance(rest, NavigationSignal): return rest
+        return self.catalog.benchmark_definitions.create(BenchmarkDefinition(
+            name=name, file_path=file_path, benchmark_type=benchmark_type,
+            default_prompt=self._form_text(rest, "default_prompt"), tags=self._form_text(rest, "tags"),
+        ))
 
-    def create_prompt_template(self) -> PromptTemplate | object | None:
-        values = self._form([("name", "Prompt template name", None, "text"), ("version", "Prompt version", None, "text"), ("prompt_text", "Prompt text", None, "text")])
-        if values in (BACK, CANCEL, MAIN): return values
-        if not all(values.values()): self.output("Template name, version, and prompt text are required."); return None
+    def create_prompt_template(self) -> PromptTemplate | NavigationSignal | None:
+        values: FormValues | NavigationSignal = self._form([("name", "Prompt template name", None, "text"), ("version", "Prompt version", None, "text"), ("prompt_text", "Prompt text", None, "text")])
+        if isinstance(values, NavigationSignal): return values
+        name, version, prompt_text = (self._form_text(values, key) for key in ("name", "version", "prompt_text"))
+        if not all((name, version, prompt_text)): self.output("Template name, version, and prompt text are required."); return None
         benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
-        if benchmark_type in (BACK, CANCEL, MAIN): return benchmark_type
+        if isinstance(benchmark_type, NavigationSignal): return benchmark_type
         notes = self.ask("Notes", navigation=True, default="")
-        if notes in (BACK, CANCEL, MAIN): return notes
-        return self.catalog.prompt_templates.create(PromptTemplate(**values, prompt_hash=hashlib.sha256(values["prompt_text"].encode("utf-8")).hexdigest(), benchmark_type=benchmark_type, notes=notes))
+        if isinstance(notes, NavigationSignal): return notes
+        return self.catalog.prompt_templates.create(PromptTemplate(
+            name=name, version=version, prompt_text=prompt_text,
+            prompt_hash=hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(), benchmark_type=benchmark_type, notes=notes,
+        ))
 
-    def create_hardware_profile(self) -> HardwareProfile | object | None:
-        values = self._form([("name", "Hardware profile name", None, "text"), ("cpu", "CPU", "", "text"), ("gpu", "GPU", "", "text"), ("vram_gb", "VRAM GB", None, "float"), ("ram_gb", "RAM GB", None, "float"), ("operating_system", "Operating system", "", "text"), ("versions", "Backend versions (LM Studio=0.3, optional)", "", "text"), ("notes", "Notes", "", "text")])
-        if values in (BACK, CANCEL, MAIN): return values
-        if not values["name"]: self.output("A hardware profile name is required."); return None
-        versions = {part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip() for part in values.pop("versions").split(",") if "=" in part}
-        return self.catalog.hardware_profiles.create(HardwareProfile(**values, backend_versions=versions))
+    def create_hardware_profile(self) -> HardwareProfile | NavigationSignal | None:
+        values: FormValues | NavigationSignal = self._form([("name", "Hardware profile name", None, "text"), ("cpu", "CPU", "", "text"), ("gpu", "GPU", "", "text"), ("vram_gb", "VRAM GB", None, "float"), ("ram_gb", "RAM GB", None, "float"), ("operating_system", "Operating system", "", "text"), ("versions", "Backend versions (LM Studio=0.3, optional)", "", "text"), ("notes", "Notes", "", "text")])
+        if isinstance(values, NavigationSignal): return values
+        versions_text = self._form_text(values, "versions")
+        versions: dict[str, str] = {part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip() for part in versions_text.split(",") if "=" in part}
+        profile = HardwareProfile(
+            name=self._form_text(values, "name"), cpu=self._form_text(values, "cpu"), gpu=self._form_text(values, "gpu"),
+            vram_gb=self._form_float(values, "vram_gb"), ram_gb=self._form_float(values, "ram_gb"),
+            operating_system=self._form_text(values, "operating_system"), backend_versions=versions, notes=self._form_text(values, "notes"),
+        )
+        if not profile.name: self.output("A hardware profile name is required."); return None
+        return self.catalog.hardware_profiles.create(profile)
 
     def show_hardware_preview(self, draft: HardwareProfileDraft) -> None:
         self.output("\nDetected Hardware Profile\n----------------------------------")
@@ -237,7 +285,7 @@ class TerminalApp:
             self.output(f"{label}: {value or '-'}")
         self.output("----------------------------------")
 
-    def edit_hardware_draft(self, draft: HardwareProfileDraft) -> HardwareProfileDraft | object:
+    def edit_hardware_draft(self, draft: HardwareProfileDraft) -> HardwareProfileDraft | NavigationSignal:
         fields = (
             ("name", "Profile name"), ("computer_name", "Computer name"), ("cpu", "CPU"), ("gpu", "GPU"),
             ("vram_gb", "VRAM GB"), ("ram_gb", "RAM GB"), ("operating_system", "Operating system"), ("notes", "Notes"),
@@ -245,7 +293,7 @@ class TerminalApp:
         for name, label in fields:
             current = getattr(draft, name)
             value = self.ask(label, navigation=True, default="" if current is None else str(current))
-            if value in (BACK, CANCEL, MAIN):
+            if isinstance(value, NavigationSignal):
                 return value
             if name in {"vram_gb", "ram_gb"}:
                 try:
@@ -300,11 +348,11 @@ class TerminalApp:
         while True:
             self.show_hardware_preview(draft)
             action = self.ask("Import? Y) Save  E) Edit  C) Cancel", navigation=True, default="y")
-            if action in (BACK, CANCEL, MAIN) or self.normalized(str(action)) in {"c", "cancel"}:
+            if isinstance(action, NavigationSignal) or self.normalized(str(action)) in {"c", "cancel"}:
                 return
             if self.normalized(str(action)) in {"e", "edit"}:
                 edited = self.edit_hardware_draft(draft)
-                if edited in (BACK, CANCEL, MAIN):
+                if isinstance(edited, NavigationSignal):
                     return
                 draft = edited
                 continue
@@ -319,7 +367,7 @@ class TerminalApp:
                                 and item.gpu.casefold() == profile.gpu.casefold())), None)
             if similar:
                 duplicate = self.ask("Existing hardware profile detected. 1) Update existing  2) Create new profile  3) Cancel", navigation=True)
-                if duplicate in (BACK, CANCEL, MAIN) or self.normalized(str(duplicate)) in {"3", "cancel"}:
+                if isinstance(duplicate, NavigationSignal) or self.normalized(str(duplicate)) in {"3", "cancel"}:
                     return
                 if self.normalized(str(duplicate)) == "1":
                     self.catalog.hardware_profiles.update(self.imported_hardware_profile(draft, similar.id))
@@ -336,34 +384,44 @@ class TerminalApp:
                 self.output(f"Could not save hardware profile: {error}")
             return
 
-    def collect_score(self, current: ReviewScore | None = None) -> ReviewScore | object:
+    def collect_score(self, current: ReviewScore | None = None) -> ReviewScore | NavigationSignal:
         self.output("\nReview score (B=back, C=cancel, Q=main menu)")
         accuracy = self.ask_float("Accuracy score (0-5)", default=current.accuracy_score if current else None, navigation=True)
-        if accuracy in (BACK, CANCEL, MAIN): return accuracy
+        if isinstance(accuracy, NavigationSignal): return accuracy
         hallucination = self.pick("Hallucination level", LEVELS, current.hallucination_level if current else "Medium", navigation=True)
         reliability = self.pick("Reliability level", LEVELS, current.reliability_level if current else "Medium", navigation=True)
-        if hallucination in (BACK, CANCEL, MAIN) or reliability in (BACK, CANCEL, MAIN): return hallucination if hallucination in (BACK, CANCEL, MAIN) else reliability
-        values = self._form([("depth_score", "Depth score (0-5)", current.depth_score if current else None, "float"), ("signal_noise_score", "Signal/noise score (0-5)", current.signal_noise_score if current else None, "float"), ("actionability_score", "Actionability score (0-5)", current.actionability_score if current else None, "float"), ("seniority_score", "Seniority score (0-5)", current.seniority_score if current else None, "float"), ("overall_score", "Overall score (0-5)", current.overall_score if current else None, "float"), ("strengths", "Strengths", current.strengths if current else "", "text"), ("weaknesses", "Weaknesses", current.weaknesses if current else "", "text"), ("verdict", "Verdict", current.verdict if current else "", "text"), ("notes", "Notes", current.notes if current else "", "text")])
-        if values in (BACK, CANCEL, MAIN): return values
-        return ReviewScore(run_id=current.run_id if current else 0, id=current.id if current else None, accuracy_score=accuracy, hallucination_level=hallucination, reliability_level=reliability, **values)
+        if isinstance(hallucination, NavigationSignal): return hallucination
+        if isinstance(reliability, NavigationSignal): return reliability
+        values: FormValues | NavigationSignal = self._form([("depth_score", "Depth score (0-5)", current.depth_score if current else None, "float"), ("signal_noise_score", "Signal/noise score (0-5)", current.signal_noise_score if current else None, "float"), ("actionability_score", "Actionability score (0-5)", current.actionability_score if current else None, "float"), ("seniority_score", "Seniority score (0-5)", current.seniority_score if current else None, "float"), ("overall_score", "Overall score (0-5)", current.overall_score if current else None, "float"), ("strengths", "Strengths", current.strengths if current else "", "text"), ("weaknesses", "Weaknesses", current.weaknesses if current else "", "text"), ("verdict", "Verdict", current.verdict if current else "", "text"), ("notes", "Notes", current.notes if current else "", "text")])
+        if isinstance(values, NavigationSignal): return values
+        return ReviewScore(
+            run_id=current.run_id if current else 0, id=current.id if current else None, accuracy_score=accuracy,
+            hallucination_level=hallucination, reliability_level=reliability,
+            depth_score=self._form_float(values, "depth_score"), signal_noise_score=self._form_float(values, "signal_noise_score"),
+            actionability_score=self._form_float(values, "actionability_score"), seniority_score=self._form_float(values, "seniority_score"),
+            overall_score=self._form_float(values, "overall_score"), strengths=self._form_text(values, "strengths"),
+            weaknesses=self._form_text(values, "weaknesses"), verdict=self._form_text(values, "verdict"), notes=self._form_text(values, "notes"),
+        )
 
-    def collect_attachments(self, draft: list[dict]) -> object | None:
+    def collect_attachments(self, draft: list[AttachmentDraft]) -> NavigationSignal | None:
         while True:
             answer = self.yes_no("Add attachment metadata", navigation=True)
-            if answer in (BACK, CANCEL, MAIN): return answer
+            if isinstance(answer, NavigationSignal): return answer
             if not answer: return None
             attachment_type = self.pick("Attachment type", ATTACHMENT_TYPES, "other", navigation=True)
-            if attachment_type in (BACK, CANCEL, MAIN): return attachment_type
+            if isinstance(attachment_type, NavigationSignal): return attachment_type
             file_path = self.prompt_path("File path", must_exist=True)
-            if file_path in (BACK, CANCEL, MAIN): return file_path
+            if isinstance(file_path, NavigationSignal): return file_path
+            if file_path is None: continue
             original_filename = self.ask("Original filename", navigation=True)
             notes = self.ask("Attachment notes", navigation=True, default="")
-            if original_filename in (BACK, CANCEL, MAIN) or notes in (BACK, CANCEL, MAIN): return original_filename if original_filename in (BACK, CANCEL, MAIN) else notes
+            if isinstance(original_filename, NavigationSignal): return original_filename
+            if isinstance(notes, NavigationSignal): return notes
             if not file_path or not original_filename: self.output("File path and filename are required."); continue
             draft.append({"attachment_type": attachment_type, "file_path": file_path, "original_filename": original_filename, "notes": notes})
 
     def add_run_wizard(self) -> None:
-        state: dict = {"attachments": []}
+        state: dict[str, Any] = {"attachments": []}
         steps = [
             ("session_id", lambda: self.choose_catalog("Session", self.catalog.sessions, self.create_session, "session", optional=True, current_id=state.get("session_id"))),
             ("model_profile_id", lambda: self.choose_catalog("Model profile", self.catalog.model_profiles, self.create_model_profile, "model", optional=False, current_id=state.get("model_profile_id"))),
@@ -382,11 +440,11 @@ class TerminalApp:
             state[key] = value; index += 1
         self.review_and_save(state, steps)
 
-    def attachment_step(self, draft: list[dict]) -> list[dict] | object:
+    def attachment_step(self, draft: list[AttachmentDraft]) -> list[AttachmentDraft] | NavigationSignal:
         result = self.collect_attachments(draft)
         return draft if result is None else result
 
-    def review_and_save(self, state: dict, steps: list) -> None:
+    def review_and_save(self, state: dict[str, Any], steps: list[tuple[str, Callable[[], Any]]]) -> None:
         while True:
             self.show_draft(state)
             selected = self.ask("S) Save  E) Edit  C) Cancel  Q) Main menu", navigation=True)
@@ -396,8 +454,10 @@ class TerminalApp:
             if choice in {"s", "save"}:
                 try:
                     template = self.catalog.prompt_templates.get(state["prompt_template_id"])
+                    assert template is not None
                     run = BenchmarkRun(raw_model_output=state["raw_model_output"], prompt_name=template.name, session_id=state["session_id"], model_profile_id=state["model_profile_id"], benchmark_definition_id=state["benchmark_definition_id"], prompt_template_id=state["prompt_template_id"], hardware_profile_id=state["hardware_profile_id"])
                     saved, _ = self.benchmarks.save_run(run, state["score"])
+                    assert saved.id is not None
                     for attachment in state["attachments"]: self.benchmarks.add_attachment(RunAttachment(run_id=saved.id, **attachment))
                     self.output("✓ Benchmark saved."); return
                 except ValueError: self.output("The benchmark could not be saved. Check the entered values and try again.")
@@ -405,6 +465,7 @@ class TerminalApp:
                 section = self.ask_id("Section number", navigation=True)
                 if section in (CANCEL, MAIN): return
                 if section is BACK: continue
+                if not isinstance(section, int): continue
                 if not 1 <= section <= len(steps): self.output("Choose a section from 1 to 8."); continue
                 index = section - 1
                 while index < len(steps):
@@ -415,10 +476,11 @@ class TerminalApp:
             elif choice in {"", "c", "cancel"}: self.output("Wizard cancelled."); return
             else: self.output("Choose Save, Edit, Cancel, or Main menu.")
 
-    def show_draft(self, state: dict) -> None:
+    def show_draft(self, state: Mapping[str, Any]) -> None:
         model = self.catalog.model_profiles.get(state["model_profile_id"])
         definition = self.catalog.benchmark_definitions.get(state["benchmark_definition_id"])
         template = self.catalog.prompt_templates.get(state["prompt_template_id"])
+        assert model is not None and definition is not None and template is not None
         self.output("\nReview benchmark run")
         self.output(f"Model: {model.name} | Benchmark: {definition.name} | Prompt: {template.name} v{template.version}")
         self.output(f"Raw output: {state['raw_model_output'][:120]}")
@@ -428,6 +490,7 @@ class TerminalApp:
         runs = self.benchmarks.runs.list()
         if not runs: self.output("No benchmark runs found."); self.pause(); return
         for run in runs:
+            assert run.id is not None
             score = self.benchmarks.get_run(run.id)[1]
             self.output(f"#{run.id} | {run.model_snapshot.get('model_name', 'Unknown')} | {run.benchmark_snapshot.get('name') or run.benchmark_snapshot.get('file_path', 'Unknown')} | overall={score.overall_score if score else '-'}")
         self.pause()
@@ -460,12 +523,17 @@ class TerminalApp:
                 run = self.benchmarks.update_run(replace(run, prompt_text=value)); self.output("✓ Run updated.")
             elif choice in {"3", "score"}:
                 new_score = self.collect_score(score)
-                if new_score not in (BACK, CANCEL, MAIN): score = self.benchmarks.update_score(new_score) if score else self.benchmarks.scores.create(replace(new_score, run_id=run.id)); self.output("✓ Review score updated.")
-            elif choice in {"4", "attachment"}: self.collect_attachments_after_save(run.id)
+                if isinstance(new_score, ReviewScore):
+                    assert run.id is not None
+                    score = self.benchmarks.update_score(new_score) if score else self.benchmarks.scores.create(replace(new_score, run_id=run.id))
+                    self.output("✓ Review score updated.")
+            elif choice in {"4", "attachment"}:
+                assert run.id is not None
+                self.collect_attachments_after_save(run.id)
             else: self.output("Choose output, prompt, score, attachment, or back.")
 
     def collect_attachments_after_save(self, run_id: int) -> None:
-        draft: list[dict] = []
+        draft: list[AttachmentDraft] = []
         result = self.collect_attachments(draft)
         if result is None:
             for attachment in draft: self.benchmarks.add_attachment(RunAttachment(run_id=run_id, **attachment))
@@ -479,7 +547,7 @@ class TerminalApp:
         if confirmation in (BACK, CANCEL, MAIN) or str(confirmation).upper() != "DELETE": self.output("Delete cancelled."); return
         self.benchmarks.delete_run(run_id); self.output("✓ Run deleted.")
 
-    def _scoreboard_batches(self) -> dict[int, object]:
+    def _scoreboard_batches(self) -> dict[int, ScoreboardImportBatch]:
         return {batch.id: batch for batch in self.catalog.scoreboard_import_batches.list() if batch.id is not None}
 
     def list_scoreboard_entries(self, batch_id: int | None = None) -> None:
@@ -491,7 +559,7 @@ class TerminalApp:
             self.output("No scoreboard entries found.")
             return
         for entry in entries:
-            batch = batches.get(entry.import_batch_id)
+            batch = batches.get(entry.import_batch_id) if entry.import_batch_id is not None else None
             self.output(
                 f"#{entry.id} | {entry.model_name} | score={entry.score if entry.score is not None else '-'} "
                 f"| batch={batch.name if batch else '-'} | imported={entry.imported_at}"
@@ -502,7 +570,7 @@ class TerminalApp:
         if not entry:
             self.output("Scoreboard entry not found.")
             return
-        batch = self._scoreboard_batches().get(entry.import_batch_id)
+        batch = self._scoreboard_batches().get(entry.import_batch_id) if entry.import_batch_id is not None else None
         self.output(f"\nScoreboard entry #{entry.id}")
         self.output(f"Batch: {batch.name if batch else '-'}")
         self.output(f"Imported at: {entry.imported_at}")
@@ -519,7 +587,7 @@ class TerminalApp:
                 entry_counts[entry.import_batch_id] = entry_counts.get(entry.import_batch_id, 0) + 1
         for batch in batches:
             self.output(
-                f"#{batch.id} | {batch.name} | entries={entry_counts.get(batch.id, 0)} "
+                f"#{batch.id} | {batch.name} | entries={entry_counts.get(batch.id, 0) if batch.id is not None else 0} "
                 f"| imported={batch.imported_at} | source={batch.source_file}"
             )
 
@@ -534,13 +602,13 @@ class TerminalApp:
                 self.list_scoreboard_entries()
             elif command in {"2", "view"}:
                 entry_id = self.ask_id("Scoreboard entry ID")
-                if entry_id not in (BACK, CANCEL, MAIN):
+                if isinstance(entry_id, int):
                     self.view_scoreboard_entry(entry_id)
             elif command in {"3", "batches"}:
                 self.list_scoreboard_batches()
             elif command in {"4", "batch"}:
                 batch_id = self.ask_id("Import batch ID")
-                if batch_id not in (BACK, CANCEL, MAIN):
+                if isinstance(batch_id, int):
                     if batch_id not in self._scoreboard_batches():
                         self.output("Import batch not found.")
                     else:
@@ -572,15 +640,15 @@ class TerminalApp:
         self.output(f"{name} will be available in {phase}.")
         self.pause()
 
-    def show_import_mapping(self, preview) -> None:
+    def show_import_mapping(self, preview: ImportPreview) -> None:
         self.output("\nDetected columns:")
         for heading in preview.headings:
             target = preview.mapping[heading]
             marker = "✓" if target else "–"
             self.output(f"{marker} {heading:<20} -> {target or 'ignored'}")
 
-    def edit_import_mapping(self, preview, mapping_fields=MAPPING_FIELDS) -> dict[str, str | None] | object:
-        mapping = dict(preview.mapping)
+    def edit_import_mapping(self, preview: ImportPreview, mapping_fields: tuple[str, ...] = MAPPING_FIELDS) -> dict[str, str | None] | NavigationSignal:
+        mapping: dict[str, str | None] = dict(preview.mapping)
         while True:
             self.output("\nEdit mapping")
             for number, heading in enumerate(preview.headings, start=1):
@@ -609,7 +677,7 @@ class TerminalApp:
                     break
                 self.output(f"Enter a number from 0 to {len(mapping_fields)}.")
 
-    def choose_mapping_profile(self) -> dict[str, str | None] | object | None:
+    def choose_mapping_profile(self) -> dict[str, str | None] | NavigationSignal | None:
         profiles = self.importer.mapping_profiles()
         if not profiles: return None
         use_profile = self.yes_no("Use saved mapping profile", navigation=True)
@@ -623,7 +691,7 @@ class TerminalApp:
             if selected.isdigit() and 1 <= int(selected) <= len(profiles): return profiles[int(selected) - 1][2]
             self.output("Choose a listed mapping profile number.")
 
-    def save_mapping_profile(self, mapping: dict[str, str | None]) -> object | None:
+    def save_mapping_profile(self, mapping: dict[str, str | None]) -> NavigationSignal | None:
         save_profile = self.yes_no("Save this mapping as a profile", navigation=True)
         if save_profile in (BACK, CANCEL, MAIN): return save_profile
         if not save_profile: return None
@@ -673,7 +741,7 @@ class TerminalApp:
         summary_import = import_type == "scoreboard" or (import_type == "auto" and not run_fields <= set(preview.mapping.values()))
         if summary_import: preview = self.importer.preview(str(path), summary=True)
         profile_mapping = self.choose_mapping_profile()
-        if profile_mapping in (BACK, CANCEL, MAIN): return
+        if isinstance(profile_mapping, NavigationSignal): return
         if profile_mapping is not None: preview = self.importer.preview(str(path), profile_mapping, summary=summary_import)
         while True:
             self.show_import_mapping(preview)
@@ -685,10 +753,10 @@ class TerminalApp:
             if command in {"y", "import"}: break
             if command in {"e", "edit"}:
                 mapping = self.edit_import_mapping(preview, SUMMARY_MAPPING_FIELDS if summary_import else MAPPING_FIELDS)
-                if mapping in (BACK, CANCEL, MAIN): return
+                if isinstance(mapping, NavigationSignal): return
                 preview = self.importer.preview(str(path), mapping, summary=summary_import)
                 saved = self.save_mapping_profile(mapping)
-                if saved in (BACK, CANCEL, MAIN): return
+                if isinstance(saved, NavigationSignal): return
                 continue
             self.output("Choose Y to import, E to edit the mapping, or C to cancel.")
         if not summary_import:
@@ -768,7 +836,7 @@ class TerminalApp:
         database_name = self.benchmarks.database.path.name
         border = "=" * MENU_WIDTH
         self.output(f"\n{border}")
-        self.output("Local LLM Benchmark Recorder".center(MENU_WIDTH))
+        self.output("BenchPup".center(MENU_WIDTH))
         self.output(f"Version {APP_VERSION}".center(MENU_WIDTH))
         self.output(f"{border}\n")
         self.output(f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\nVersion  : {APP_VERSION}\n")
@@ -804,6 +872,7 @@ class TerminalApp:
                     run_id = self.ask_id("Run ID")
                     if run_id is MAIN: continue
                     if run_id in (BACK, CANCEL): continue
+                    if not isinstance(run_id, int): continue
                     {"view": self.view_run, "edit": self.edit_run, "delete": self.delete_run}[command](run_id)
                 elif command == "sessions": self.catalog_screen("Sessions", self.catalog.sessions, self.create_session)
                 elif command == "models": self.catalog_screen("Model Profiles", self.catalog.model_profiles, self.create_model_profile)
