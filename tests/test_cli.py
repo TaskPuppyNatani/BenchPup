@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from cli import BACK, CANCEL, TerminalApp
+from cli import BACK, CANCEL, QuitApplication, TerminalApp
 from engine.domain import BenchmarkDefinition, ModelProfile, PromptTemplate, ScoreboardEntry, ScoreboardImportBatch
 
 
@@ -59,6 +59,29 @@ class CliPolishTests(unittest.TestCase):
         app, output = self.app_with(iter(["LIST", "", "Quit"]))
         app.run()
         self.assertIn("No benchmark runs found.", output)
+
+    def test_quit_all_normalizes_case_and_spaces(self):
+        app, _ = self.app_with(iter(["  QUIT   ALL  "]))
+        self.assertEqual(app.normalized("  QUIT   ALL  "), "quit all")
+        app.run()
+
+    def test_quit_all_exits_from_main_menu(self):
+        app, output = self.app_with(iter(["qa"]))
+        app.run()
+        self.assertIn("Exiting BenchPup.", output)
+
+    def test_quit_all_exits_from_submenu_and_wizard(self):
+        app, output = self.app_with(iter(["11", "QA"]))
+        app.run()
+        self.assertIn("Exiting BenchPup.", output)
+        app, output = self.app_with(iter(["1", "Quit All"]))
+        app.run()
+        self.assertIn("Exiting BenchPup.", output)
+
+    def test_quit_all_exits_from_path_prompt(self):
+        app, output = self.app_with(iter(["15", "Quit A"]))
+        app.run()
+        self.assertIn("Exiting BenchPup.", output)
 
     def test_main_menu_uses_grouped_vertical_layout(self):
         app, output = self.app_with(iter(["q"]))

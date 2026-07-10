@@ -27,6 +27,10 @@ class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
 
 
+class QuitApplication(BaseException):
+    """Propagates a global Quit All request to the top-level application loop."""
+
+
 BACK, CANCEL, MAIN = NavigationSignal(), NavigationSignal(), NavigationSignal()
 PromptResult: TypeAlias = str | NavigationSignal
 NumericPromptResult: TypeAlias = float | None | NavigationSignal
@@ -42,6 +46,7 @@ class AttachmentDraft(TypedDict):
 BACK_WORDS = {"b", "back"}
 CANCEL_WORDS = {"c", "cancel"}
 QUIT_WORDS = {"q", "quit", "exit"}
+QUIT_ALL_WORDS = {"qa", "quit all", "quit a"}
 APP_VERSION = "0.3.7-Alpha"
 MENU_WIDTH = 56
 ARCHIVE_LABELS = {
@@ -74,7 +79,11 @@ class TerminalApp:
 
     @staticmethod
     def normalized(value: str) -> str:
-        return value.strip().lower()
+        return " ".join(value.strip().lower().split())
+
+    def _check_quit_all(self, raw_choice: str) -> None:
+        if self.normalized(raw_choice) in QUIT_ALL_WORDS:
+            raise QuitApplication()
 
     def ask(self, label: str, *, navigation: bool = False, default: str | None = None) -> PromptResult:
         suffix = f" [{default}]" if default not in (None, "") else ""
@@ -85,8 +94,9 @@ class TerminalApp:
         except KeyboardInterrupt:
             self.output("\nOperation cancelled.")
             return MAIN
+        self._check_quit_all(raw)
         value = raw.strip()
-        command = value.lower()
+        command = self.normalized(value)
         if navigation:
             if command in BACK_WORDS: return BACK
             if command in CANCEL_WORDS: return CANCEL
@@ -108,7 +118,13 @@ class TerminalApp:
                     completer=PathCompleter(expanduser=True),
                     complete_while_typing=False,
                 )
+                self._check_quit_all(raw)
                 value: PromptResult = default if raw.strip() == "" and default is not None else raw.strip()
+                if isinstance(value, str):
+                    command = self.normalized(value)
+                    if command in BACK_WORDS: value = BACK
+                    elif command in CANCEL_WORDS: value = CANCEL
+                    elif command in QUIT_WORDS: value = MAIN
             except (KeyboardInterrupt, EOFError):
                 self.output("\nOperation cancelled.")
                 return MAIN
@@ -960,6 +976,12 @@ class TerminalApp:
         self.output(border)
 
     def run(self) -> None:
+        try:
+            self._run_loop()
+        except QuitApplication:
+            self.output("Exiting BenchPup.")
+
+    def _run_loop(self) -> None:
         commands = {
             "1": "add", "add": "add", "2": "list", "list": "list", "3": "view", "view": "view",
             "4": "edit", "edit": "edit", "5": "delete", "delete": "delete",

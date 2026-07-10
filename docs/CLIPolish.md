@@ -37,9 +37,18 @@
 
 ## Current Polish Task
 
-- [ ] Remove temporary path-completion diagnostics from normal CLI output
-- [ ] Remove temporary hardware-import diagnostics from normal CLI output
-- [ ] Keep technical details in logs when needed
-- [ ] Default backups to `<project_root>/backups/`
+- [ ] Confirm temporary path-completion diagnostics are removed
+- [x] Remove temporary hardware-import diagnostics from normal CLI output
+- [x] Keep technical details in logs when needed
+- [x] Default backups to `<project_root>/backups/`
 - [ ] Automatically create the backups folder
-- [ ] Show aligned, human-readable backup and restore summaries
+- [ ] Confirm polished backup summary
+- [x] Show aligned, human-readable restore summary
+
+### Navigation
+
+- [x] Back from every submenu
+- [x] Cancel current operation
+- [x] Review before save
+- [x] Confirmation before delete
+- [x] Global Quit All (QA)

@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.path_completion import install_path_completion, normalize_path, path_candidates, resolve_export_destination
-from cli import MAIN, TerminalApp
+from cli import MAIN, QuitApplication, TerminalApp
 
 
 class PathCompletionTests(unittest.TestCase):
@@ -79,6 +79,24 @@ class PathCompletionTests(unittest.TestCase):
                 self.assertIs(app.prompt_path("Archive file"), MAIN)
             self.assertEqual(app.ask("Choose an option"), "q")
             self.assertTrue(any("Operation cancelled." in line for line in output))
+
+    def test_quit_all_path_prompt_flushes_before_propagating_global_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = TerminalApp(Path(directory) / "benchmarks.db", input_fn=lambda _: "", output_fn=lambda _: None)
+            app.interactive_input = True
+            from unittest.mock import patch
+            with patch("cli.toolkit_prompt", return_value="Qa"), patch("cli.sys.stdout.flush") as flush:
+                with self.assertRaises(QuitApplication):
+                    app.prompt_path("Archive file")
+            self.assertTrue(flush.called)
+
+    def test_local_quit_still_returns_main_signal_from_interactive_path_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = TerminalApp(Path(directory) / "benchmarks.db", input_fn=lambda _: "", output_fn=lambda _: None)
+            app.interactive_input = True
+            from unittest.mock import patch
+            with patch("cli.toolkit_prompt", return_value="q"):
+                self.assertIs(app.prompt_path("Archive file"), MAIN)
 
     def test_export_destination_uses_default_filename_for_directories_and_trailing_slashes(self):
         with tempfile.TemporaryDirectory() as directory:
