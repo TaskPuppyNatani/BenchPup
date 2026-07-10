@@ -3,10 +3,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from cli import BACK, CANCEL, QuitApplication, TerminalApp
+from cli import APP_VERSION, BACK, CANCEL, QuitApplication, TerminalApp
 from engine.domain import BenchmarkDefinition, ModelProfile, PromptTemplate, ScoreboardEntry, ScoreboardImportBatch
 
 
@@ -104,17 +105,17 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn("Q) Back / Quit", menu)
         self.assertIn("QA) Quit BenchPup completely", menu)
         self.assertIn(" Help\n ----\nH) Help", menu)
-        self.assertIn("Version 0.3.7-Alpha", menu)
+        self.assertIn(f"Version {APP_VERSION}", menu)
         self.assertIn("Database : benchmarks.db", menu)
 
     def test_title_lines_are_centered_to_the_menu_width(self):
         app, output = self.app_with(iter(["q"]))
         app.run()
         title = next(line for line in output if "BenchPup" in line)
-        version = next(line for line in output if "Version 0.3.7-Alpha" in line)
+        version = next(line for line in output if f"Version {APP_VERSION}" in line)
         self.assertEqual(len(title), len(version))
         title_center = title.index("BenchPup") + len("BenchPup") / 2
-        version_center = version.index("Version") + len("Version 0.3.7-Alpha") / 2
+        version_center = version.index("Version") + len(f"Version {APP_VERSION}") / 2
         self.assertLessEqual(abs(title_center - version_center), 0.5)
 
     def test_keyboard_interrupt_at_main_menu_exits_without_reprompting(self):
@@ -149,6 +150,71 @@ class CliPolishTests(unittest.TestCase):
         app.import_csv("runs")
         self.assertEqual(len(app.benchmarks.runs.list()), 1)
         self.assertTrue(any("Imported 1" in line for line in output))
+
+    def test_prompt_file_import_is_available_from_import_and_prompt_template_screens(self):
+        app, _ = self.app_with(iter(["5"]))
+        import_action = Mock()
+        app.import_prompt_template_file = import_action
+        app.import_screen()
+        import_action.assert_called_once_with()
+
+        app, _ = self.app_with(iter(["i", "b"]))
+        import_action = Mock()
+        app.catalog_screen("Prompt Templates", app.catalog.prompt_templates, app.create_prompt_template, import_action)
+        import_action.assert_called_once_with()
+
+    def test_import_prompt_file_preserves_raw_markdown_and_uses_filename_stem(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        source = Path(directory.name) / "review template.md"
+        text = "# Review\n\n- Preserve this\n\n```python\n  return value\n```\n"
+        source.write_bytes(text.encode("utf-8"))
+        answers = iter([str(source), "", "", "", "", "y", "y"])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.import_prompt_template_file()
+        templates = app.catalog.prompt_templates.list()
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0].name, "review template")
+        self.assertEqual(templates[0].version, "1.0")
+        self.assertEqual(templates[0].prompt_text, text)
+        self.assertEqual(templates[0].prompt_hash, hashlib.sha256(text.encode("utf-8")).hexdigest())
+        self.assertTrue(any("Prompt template imported successfully" in line for line in output))
+
+    def test_import_prompt_file_allows_unfamiliar_readable_extension(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        source = Path(directory.name) / "raw-prompt.custom"
+        source.write_text("Use the complete file.", encoding="utf-8")
+        answers = iter([str(source), "", "", "", "", "y", "y"])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.import_prompt_template_file()
+        self.assertEqual(app.catalog.prompt_templates.list()[0].prompt_text, "Use the complete file.")
+        self.assertTrue(any("unfamiliar" in line for line in output))
+
+    def test_import_prompt_file_duplicate_name_and_version_can_choose_new_version(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        source = Path(directory.name) / "review.txt"
+        source.write_text("New prompt", encoding="utf-8")
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: "", output_fn=lambda _: None)
+        old_text = "Existing prompt"
+        app.catalog.prompt_templates.create(PromptTemplate(name="review", version="1.0", prompt_text=old_text, prompt_hash=hashlib.sha256(old_text.encode()).hexdigest(), benchmark_type="code_review"))
+        answers = iter([str(source), "", "", "v", "2.0", "", "", "y", "y"])
+        app.input = lambda _: next(answers)
+        app.interactive_input = False
+        app.import_prompt_template_file()
+        templates = app.catalog.prompt_templates.list()
+        self.assertEqual([(item.name, item.version) for item in templates], [("review", "1.0"), ("review", "2.0")])
+
+    def test_prompt_file_import_honors_local_and_global_quit_commands(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        source = Path(directory.name) / "review.txt"
+        source.write_text("Prompt", encoding="utf-8")
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: "q", output_fn=lambda _: None)
+        app.import_prompt_template_file()
+        self.assertEqual(app.catalog.prompt_templates.list(), [])
+        app = TerminalApp(Path(directory.name) / "other.db", input_fn=lambda _: "Quit A", output_fn=lambda _: None)
+        with self.assertRaises(QuitApplication):
+            app.import_prompt_template_file()
 
     def test_import_mapping_edit_uses_numbered_choices(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)

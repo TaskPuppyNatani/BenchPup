@@ -22,6 +22,7 @@ from engine.exporters import export_benchmark_runs_csv, export_combined_markdown
 from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
 from engine.path_completion import normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
+from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -305,6 +306,90 @@ class TerminalApp:
             name=name, version=version, prompt_text=prompt_text,
             prompt_hash=hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(), benchmark_type=benchmark_type, notes=notes,
         ))
+
+    def import_prompt_template_file(self) -> None:
+        path = self.prompt_path("Prompt template file", must_exist=True)
+        if not isinstance(path, str):
+            return
+        suffix = Path(path).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".prompt"}:
+            self.output(f'Warning: "{suffix or "no extension"}" is unfamiliar; importing because it is readable text.')
+        try:
+            prompt_text, encoding = decode_prompt_file(Path(path).read_bytes())
+        except (OSError, PromptFileError) as error:
+            self.output(f"Could not import prompt file: {error}")
+            return
+        preview, truncated = prompt_preview(prompt_text)
+        self.output("\nPrompt File Preview\n-------------------")
+        self.output(f"Filename: {Path(path).name}")
+        self.output(f"Encoding: {encoding}")
+        self.output(f"Characters: {len(prompt_text)}")
+        self.output(f"Lines: {len(prompt_text.splitlines())}")
+        self.output(preview)
+        if truncated:
+            self.output("[Preview truncated]")
+
+        name = self.ask("Template name", navigation=True, default=Path(path).stem)
+        if not isinstance(name, str):
+            return
+        if not name:
+            self.output("Template name is required.")
+            return
+        existing: PromptTemplate | None = None
+        replace_existing = False
+        while True:
+            version = self.ask("Version", navigation=True, default="1.0")
+            if not isinstance(version, str):
+                return
+            if not version:
+                self.output("Version is required.")
+                continue
+            existing = next((item for item in self.catalog.prompt_templates.list()
+                             if item.name == name and item.version == version), None)
+            if not existing:
+                replace_existing = False
+                break
+            duplicate = self.ask("Name and version already exist: C) Cancel  V) Choose different version  R) Replace", navigation=True)
+            if not isinstance(duplicate, str) or self.normalized(duplicate) in {"c", "cancel"}:
+                return
+            if self.normalized(duplicate) in {"v", "version"}:
+                continue
+            if self.normalized(duplicate) in {"r", "replace"}:
+                replace_existing = True
+                break
+            self.output("Choose C, V, or R.")
+        benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
+        if not isinstance(benchmark_type, str):
+            return
+        notes = self.ask("Notes (optional)", navigation=True, default="")
+        if not isinstance(notes, str):
+            return
+        active = self.yes_no("Active", default=True, navigation=True)
+        if active is not True and active is not False:
+            return
+        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        hash_match = next((item for item in self.catalog.prompt_templates.list()
+                           if item.prompt_hash == prompt_hash and (item.name != name or item.version != version)), None)
+        if hash_match:
+            self.output(f'Warning: identical prompt content already exists as "{hash_match.name}" v{hash_match.version}.')
+        confirm = self.yes_no("Import this prompt template", default=True, navigation=True)
+        if confirm is not True:
+            return
+        template = PromptTemplate(
+            name=name, version=version, prompt_text=prompt_text, prompt_hash=prompt_hash,
+            benchmark_type=benchmark_type, notes=notes, is_active=active,
+            id=existing.id if existing is not None and replace_existing else None,
+        )
+        try:
+            saved = self.catalog.prompt_templates.update(template) if template.id else self.catalog.prompt_templates.create(template)
+        except ValueError as error:
+            self.output(f"Could not save prompt template: {error}")
+            return
+        self.output(
+            "\n✓ Prompt template imported successfully\n"
+            f"Name: {saved.name}\nVersion: {saved.version}\nBenchmark type: {saved.benchmark_type}\n"
+            f"Source file: {path}\nCharacters: {len(prompt_text)}\nLines: {len(prompt_text.splitlines())}\nSHA-256: {prompt_hash}"
+        )
 
     def create_hardware_profile(self) -> HardwareProfile | NavigationSignal | None:
         values: FormValues | NavigationSignal = self._form([("name", "Hardware profile name", None, "text"), ("cpu", "CPU", "", "text"), ("gpu", "GPU", "", "text"), ("vram_gb", "VRAM GB", None, "float"), ("ram_gb", "RAM GB", None, "float"), ("operating_system", "Operating system", "", "text"), ("versions", "Backend versions (LM Studio=0.3, optional)", "", "text"), ("notes", "Notes", "", "text")])
@@ -654,7 +739,7 @@ class TerminalApp:
             else:
                 self.output("Choose 1, 2, 3, 4, or B to return.")
 
-    def catalog_screen(self, title: str, repository, create) -> None:
+    def catalog_screen(self, title: str, repository, create, import_action: Callable[[], None] | None = None) -> None:
         """A small, focused catalog screen for one reusable record type."""
         while True:
             self.output(f"\n{title}\n{'-' * len(title)}")
@@ -663,10 +748,14 @@ class TerminalApp:
                 for item in items: self.output(f"{item.id}) {item.name if hasattr(item, 'name') else item.title}")
             else:
                 self.output("No records found.")
-            choice = self.ask("N) New  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
+            action_hint = "  I) Import raw prompt file" if import_action is not None else ""
+            choice = self.ask(f"N) New{action_hint}  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
             if choice in (BACK, CANCEL, MAIN): return
+            if import_action is not None and self.normalized(str(choice)) in {"i", "import"}:
+                import_action()
+                continue
             if self.normalized(str(choice)) not in {"n", "new"}:
-                self.output("Choose N to create a record or B to return.")
+                self.output("Choose N to create, I to import, or B to return.")
                 continue
             try:
                 item = create()
@@ -757,13 +846,17 @@ class TerminalApp:
                 if not row.get("benchmark_file", ""): row["benchmark_file"] = benchmark
 
     def import_screen(self) -> None:
-        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type  4) Hardware Profile  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
+        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type  4) Hardware Profile  5) Prompt Template File  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
-        if self.normalized(str(choice)) in {"4", "hardware"}:
+        command = self.normalized(str(choice))
+        if command in {"4", "hardware"}:
             self.import_hardware_profile()
             return
-        import_type = {"1": "runs", "2": "scoreboard", "3": "auto"}.get(self.normalized(str(choice)))
-        if not import_type: self.output("Choose 1, 2, 3, or 4."); return
+        if command in {"5", "prompt", "prompts", "prompt template", "prompt template file"}:
+            self.import_prompt_template_file()
+            return
+        import_type = {"1": "runs", "2": "scoreboard", "3": "auto"}.get(command)
+        if not import_type: self.output("Choose 1, 2, 3, 4, or 5."); return
         self.import_csv(import_type)
 
     def import_csv(self, import_type: str = "auto") -> None:
@@ -1024,7 +1117,7 @@ class TerminalApp:
                 elif command == "sessions": self.catalog_screen("Sessions", self.catalog.sessions, self.create_session)
                 elif command == "models": self.catalog_screen("Model Profiles", self.catalog.model_profiles, self.create_model_profile)
                 elif command == "benchmarks": self.catalog_screen("Benchmark Definitions", self.catalog.benchmark_definitions, self.create_definition)
-                elif command == "prompts": self.catalog_screen("Prompt Templates", self.catalog.prompt_templates, self.create_prompt_template)
+                elif command == "prompts": self.catalog_screen("Prompt Templates", self.catalog.prompt_templates, self.create_prompt_template, self.import_prompt_template_file)
                 elif command == "hardware": self.catalog_screen("Hardware Profiles", self.catalog.hardware_profiles, self.create_hardware_profile)
                 elif command == "import": self.import_screen()
                 elif command == "export": self.export_screen()
