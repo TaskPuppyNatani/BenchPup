@@ -216,6 +216,84 @@ class CliPolishTests(unittest.TestCase):
         with self.assertRaises(QuitApplication):
             app.import_prompt_template_file()
 
+    def test_prompt_template_view_displays_complete_text_and_metadata(self):
+        app, output = self.app_with(iter([""]))
+        text = "# Heading\n\n  indented\n\n```python\nprint('complete')\n```\n"
+        template = app.catalog.prompt_templates.create(PromptTemplate(
+            name="Complete", version="2.0", prompt_text=text,
+            prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review", notes="Keep formatting",
+        ))
+        assert template.id is not None
+        app.view_prompt_template(template.id)
+        rendered = "\n".join(output)
+        self.assertIn("Name: Complete", rendered)
+        self.assertIn("Version: 2.0", rendered)
+        self.assertIn("SHA-256:", rendered)
+        self.assertIn(text, rendered)
+
+    def test_prompt_template_edit_recalculates_hash_after_file_replacement(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        replacement = Path(directory.name) / "replacement.md"
+        replacement_text = "# New\n\n  exact indentation\n"
+        replacement.write_bytes(replacement_text.encode("utf-8"))
+        answers = iter(["", "", "", "", "", "y", str(replacement), "y"])
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=lambda _: None)
+        original = "Original"
+        template = app.catalog.prompt_templates.create(PromptTemplate(
+            name="Replace", version="1.0", prompt_text=original,
+            prompt_hash=hashlib.sha256(original.encode()).hexdigest(), benchmark_type="code_review",
+        ))
+        assert template.id is not None
+        app.edit_prompt_template(template.id)
+        saved = app.catalog.prompt_templates.get(template.id)
+        assert saved is not None
+        self.assertEqual(saved.prompt_text, replacement_text)
+        self.assertEqual(saved.prompt_hash, hashlib.sha256(replacement_text.encode()).hexdigest())
+
+    def test_prompt_template_export_writes_exact_prompt_body(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        destination = Path(directory.name) / "export.md"
+        text = "# Exact\n\n    indented\n"
+        answers = iter([str(destination)])
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=lambda _: None)
+        template = app.catalog.prompt_templates.create(PromptTemplate(
+            name="Exact", version="1", prompt_text=text,
+            prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review",
+        ))
+        assert template.id is not None
+        app.export_prompt_template(template.id)
+        self.assertEqual(destination.read_bytes(), text.encode("utf-8"))
+
+    def test_prompt_template_file_operations_use_shared_prompt_toolkit_cleanup(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        replacement = Path(directory.name) / "replacement.txt"
+        replacement.write_text("Replacement", encoding="utf-8")
+        destination = Path(directory.name) / "export.txt"
+        answers = iter(["", "", "", "", "", "y", "y"])
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=lambda _: None)
+        app.interactive_input = True
+        original = "Original"
+        template = app.catalog.prompt_templates.create(PromptTemplate(name="Shared", version="1", prompt_text=original, prompt_hash=hashlib.sha256(original.encode()).hexdigest(), benchmark_type="code_review"))
+        assert template.id is not None
+        from unittest.mock import patch
+        with patch("cli.toolkit_prompt", side_effect=[str(replacement), str(destination)]), patch("cli.sys.stdout.flush") as flush:
+            app.edit_prompt_template(template.id)
+            app.export_prompt_template(template.id)
+        self.assertGreaterEqual(flush.call_count, 2)
+        self.assertEqual(destination.read_bytes(), b"Replacement")
+
+    def test_prompt_template_view_honors_local_and_global_quit(self):
+        app, _ = self.app_with(iter(["q"]))
+        text = "Prompt"
+        template = app.catalog.prompt_templates.create(PromptTemplate(name="Quit", version="1", prompt_text=text, prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review"))
+        assert template.id is not None
+        app.view_prompt_template(template.id)
+        app, _ = self.app_with(iter(["QA"]))
+        template = app.catalog.prompt_templates.create(PromptTemplate(name="Quit", version="1", prompt_text=text, prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review"))
+        assert template.id is not None
+        with self.assertRaises(QuitApplication):
+            app.view_prompt_template(template.id)
+
     def test_import_mapping_edit_uses_numbered_choices(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
         source = Path(directory.name) / "runs.csv"

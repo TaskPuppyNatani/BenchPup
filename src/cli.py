@@ -391,6 +391,148 @@ class TerminalApp:
             f"Source file: {path}\nCharacters: {len(prompt_text)}\nLines: {len(prompt_text.splitlines())}\nSHA-256: {prompt_hash}"
         )
 
+    def view_prompt_template(self, template_id: int) -> None:
+        template = self.catalog.prompt_templates.get(template_id)
+        if template is None:
+            self.output("Prompt template not found.")
+            return
+        self.output("\nPrompt Template\n---------------")
+        self.output(
+            f"Name: {template.name}\nVersion: {template.version}\nBenchmark type: {template.benchmark_type}\n"
+            f"Active: {'Yes' if template.is_active else 'No'}\nCharacters: {len(template.prompt_text)}\n"
+            f"Lines: {len(template.prompt_text.splitlines())}\nSHA-256: {template.prompt_hash}\n"
+            f"Notes: {template.notes or '-'}\nCreated: {template.created_at}\nUpdated: {template.updated_at}"
+        )
+        self.output("\nPrompt Text\n-----------")
+        self.output(template.prompt_text)
+        self.ask("Press Enter to continue", navigation=True, default="")
+
+    def edit_prompt_template(self, template_id: int) -> None:
+        template = self.catalog.prompt_templates.get(template_id)
+        if template is None:
+            self.output("Prompt template not found.")
+            return
+        name = self.ask("Template name", navigation=True, default=template.name)
+        version = self.ask("Version", navigation=True, default=template.version)
+        if not isinstance(name, str) or not isinstance(version, str):
+            return
+        if not name or not version:
+            self.output("Template name and version are required.")
+            return
+        benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, template.benchmark_type, navigation=True)
+        notes = self.ask("Notes", navigation=True, default=template.notes)
+        active = self.yes_no("Active", default=template.is_active, navigation=True)
+        if not isinstance(benchmark_type, str) or not isinstance(notes, str) or not isinstance(active, bool):
+            return
+        replacement = self.yes_no("Replace prompt text from a text file", default=False, navigation=True)
+        if not isinstance(replacement, bool):
+            return
+        prompt_text = template.prompt_text
+        if replacement:
+            path = self.prompt_path("Replacement prompt file", must_exist=True)
+            if not isinstance(path, str):
+                return
+            try:
+                prompt_text, _ = decode_prompt_file(Path(path).read_bytes())
+            except (OSError, PromptFileError) as error:
+                self.output(f"Could not read replacement prompt file: {error}")
+                return
+        duplicate = next((item for item in self.catalog.prompt_templates.list()
+                          if item.id != template.id and item.name == name and item.version == version), None)
+        if duplicate is not None:
+            self.output(f'Another template already uses "{name}" version {version}.')
+            return
+        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        changed_text = prompt_text != template.prompt_text
+        if changed_text:
+            self.output(f"Replacement prompt: {len(prompt_text)} characters, {len(prompt_text.splitlines())} lines, SHA-256 {prompt_hash}")
+        confirm = self.yes_no("Save template changes", default=True, navigation=True)
+        if confirm is not True:
+            return
+        saved = self.catalog.prompt_templates.update(replace(
+            template, name=name, version=version, benchmark_type=benchmark_type, notes=notes,
+            is_active=active, prompt_text=prompt_text, prompt_hash=prompt_hash,
+        ))
+        self.output(f"✓ Prompt template updated: {saved.name} v{saved.version}")
+        if changed_text:
+            self.output(f"Prompt text updated. SHA-256: {saved.prompt_hash}")
+
+    def export_prompt_template(self, template_id: int) -> None:
+        template = self.catalog.prompt_templates.get(template_id)
+        if template is None:
+            self.output("Prompt template not found.")
+            return
+        filename = "".join(character if character.isalnum() or character in "._- " else "_" for character in template.name).strip() or "prompt-template"
+        path = self.prompt_path("Prompt template export destination", default=f"{filename}.txt", preserve_trailing_separator=True)
+        if not isinstance(path, str):
+            return
+        output_path = resolve_export_destination(path, default_filename=f"{filename}.txt")
+        if output_path.suffix.lower() not in {".txt", ".md"}:
+            self.output("Prompt template exports must use a .txt or .md extension.")
+            return
+        if not output_path.parent.exists():
+            create = self.yes_no(f'Parent directory "{output_path.parent}" does not exist. Create it?', navigation=True)
+            if create is not True:
+                return
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.output(f"Could not create export directory: {error}")
+                return
+        try:
+            output_path.write_bytes(template.prompt_text.encode("utf-8"))
+        except OSError as error:
+            self.output(f"Could not export prompt template: {error}")
+            return
+        self.output(f"Exported prompt template to {output_path}.")
+
+    def delete_prompt_template(self, template_id: int) -> None:
+        template = self.catalog.prompt_templates.get(template_id)
+        if template is None:
+            self.output("Prompt template not found.")
+            return
+        if self.yes_no(f'Delete prompt template "{template.name}" v{template.version}', navigation=True) is True:
+            self.catalog.prompt_templates.delete(template_id)
+            self.output("Prompt template deleted.")
+
+    def prompt_templates_screen(self) -> None:
+        while True:
+            self.output("\nPrompt Templates\n----------------")
+            templates = self.catalog.prompt_templates.list()
+            if templates:
+                for template in templates:
+                    self.output(f"{template.id}) {template.name} v{template.version} ({template.benchmark_type})")
+            else:
+                self.output("No prompt templates found.")
+            choice = self.ask("N) New  I) Import raw prompt file  V) View template  E) Edit template  X) Export template  D) Delete template  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
+            if choice in (BACK, CANCEL, MAIN):
+                return
+            command = self.normalized(str(choice))
+            if command in {"n", "new"}:
+                try:
+                    created = self.create_prompt_template()
+                    if created not in (BACK, CANCEL, MAIN, None):
+                        self.output("✓ PromptTemplate created.")
+                except ValueError:
+                    self.output("The prompt template could not be created. Check the entered values and try again.")
+                continue
+            if command in {"i", "import"}:
+                self.import_prompt_template_file()
+                continue
+            actions: dict[str, Callable[[int], None]] = {
+                "v": self.view_prompt_template, "view": self.view_prompt_template,
+                "e": self.edit_prompt_template, "edit": self.edit_prompt_template,
+                "x": self.export_prompt_template, "export": self.export_prompt_template,
+                "d": self.delete_prompt_template, "delete": self.delete_prompt_template,
+            }
+            action = actions.get(command)
+            if action is None:
+                self.output("Choose N, I, V, E, X, D, or B.")
+                continue
+            template_id = self.ask_id("Prompt template ID")
+            if isinstance(template_id, int):
+                action(template_id)
+
     def create_hardware_profile(self) -> HardwareProfile | NavigationSignal | None:
         values: FormValues | NavigationSignal = self._form([("name", "Hardware profile name", None, "text"), ("cpu", "CPU", "", "text"), ("gpu", "GPU", "", "text"), ("vram_gb", "VRAM GB", None, "float"), ("ram_gb", "RAM GB", None, "float"), ("operating_system", "Operating system", "", "text"), ("versions", "Backend versions (LM Studio=0.3, optional)", "", "text"), ("notes", "Notes", "", "text")])
         if isinstance(values, NavigationSignal): return values
@@ -1117,7 +1259,7 @@ class TerminalApp:
                 elif command == "sessions": self.catalog_screen("Sessions", self.catalog.sessions, self.create_session)
                 elif command == "models": self.catalog_screen("Model Profiles", self.catalog.model_profiles, self.create_model_profile)
                 elif command == "benchmarks": self.catalog_screen("Benchmark Definitions", self.catalog.benchmark_definitions, self.create_definition)
-                elif command == "prompts": self.catalog_screen("Prompt Templates", self.catalog.prompt_templates, self.create_prompt_template, self.import_prompt_template_file)
+                elif command == "prompts": self.prompt_templates_screen()
                 elif command == "hardware": self.catalog_screen("Hardware Profiles", self.catalog.hardware_profiles, self.create_hardware_profile)
                 elif command == "import": self.import_screen()
                 elif command == "export": self.export_screen()

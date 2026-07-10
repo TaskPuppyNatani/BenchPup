@@ -44,6 +44,7 @@ def export_scoreboard_html(catalog: CatalogService, path: str | Path) -> Path:
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     batches = {batch.id: batch for batch in catalog.scoreboard_import_batches.list()}
     entries = catalog.scoreboard_entries.list()
+    templates = catalog.prompt_templates.list()
 
     def text(value: object) -> str:
         return escape("-" if value is None or value == "" else str(value), quote=True)
@@ -103,6 +104,28 @@ def export_scoreboard_html(catalog: CatalogService, path: str | Path) -> Path:
         )
 
     table_body = "".join(rows) or '<tr><td colspan="11" class="empty">No historical scoreboard entries found.</td></tr>'
+    template_types = sorted({template.benchmark_type for template in templates})
+    template_rows = []
+    for template in templates:
+        active = "Active" if template.is_active else "Inactive"
+        search_text = " ".join((template.name, template.version, template.benchmark_type, template.notes, template.prompt_text))
+        template_rows.append(
+            f'<tr class="template-data-row" data-template-search="{text(search_text).lower()}" '
+            f'data-template-type="{text(template.benchmark_type)}" data-template-active="{text(active)}">'
+            f'<td><button class="template-row-toggle" type="button" aria-expanded="false">{text(template.name)}</button></td>'
+            f'<td>{text(template.version)}</td><td>{text(template.benchmark_type)}</td><td>{text(active)}</td>'
+            f'<td>{text(len(template.prompt_text))}</td><td>{text(len(template.prompt_text.splitlines()))}</td>'
+            f'<td class="notes">{text(template.notes)}</td></tr>'
+            f'<tr class="template-details-row" hidden><td colspan="7"><div class="details">'
+            f'<strong>Prompt text</strong><pre class="prompt-text">{text(template.prompt_text)}</pre><dl>'
+            f'<dt>SHA-256</dt><dd>{text(template.prompt_hash)}</dd><dt>Created</dt><dd>{text(template.created_at)}</dd>'
+            f'<dt>Updated</dt><dd>{text(template.updated_at)}</dd><dt>Benchmark type</dt><dd>{text(template.benchmark_type)}</dd>'
+            f'<dt>Active</dt><dd>{text(active)}</dd></dl></div></td></tr>'
+        )
+    template_table_body = "".join(template_rows) or '<tr><td colspan="7" class="empty">No prompt templates found.</td></tr>'
+    template_type_options = "".join(f'<option value="{text(value)}">{text(value)}</option>' for value in template_types)
+    active_template_count = sum(template.is_active for template in templates)
+    unique_prompt_hashes = len({template.prompt_hash for template in templates})
     generated = text(now())
     path.write_text("""<!doctype html>
 <html lang="en">
@@ -112,7 +135,7 @@ def export_scoreboard_html(catalog: CatalogService, path: str | Path) -> Path:
 <title>BenchPup Scoreboard Report</title>
 <style>
  :root { color-scheme: dark; } body { margin: 0; padding: 2rem; background: #111827; color: #e5e7eb; font: 15px/1.45 system-ui, sans-serif; }
-main { max-width: 1800px; margin: auto; } h1 { margin: 0 0 .25rem; } .generated, .empty { color: #9ca3af; }
+main { max-width: 1800px; margin: auto; } h1 { margin: 0 0 .25rem; } .generated, .empty { color: #9ca3af; } .tabs { display: flex; gap: .5rem; margin: 1rem 0; } .tabs button { background: #1d4ed8; color: white; border: 0; border-radius: .25rem; padding: .5rem .8rem; cursor: pointer; } .tabs button[aria-selected="false"] { background: #374151; }
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: .8rem; margin: 1.5rem 0; }
 .card, .controls { background: #1f2937; border: 1px solid #374151; border-radius: .5rem; padding: 1rem; }
 .card .label { color: #9ca3af; font-size: .85rem; } .card .value { font-size: 1.25rem; font-weight: 650; overflow-wrap: anywhere; }
@@ -122,14 +145,17 @@ table { width: 100%; border-collapse: collapse; background: #1f2937; margin-top:
 th, td { padding: .65rem .75rem; border: 1px solid #374151; text-align: left; vertical-align: top; }
 th { position: sticky; top: 0; background: #1d4ed8; color: white; white-space: nowrap; }
 th button, .row-toggle { all: unset; cursor: pointer; color: inherit; font-weight: inherit; } th button::after { content: " ↕"; font-size: .8em; }
-tr.data-row:nth-of-type(4n + 1) { background: #243044; } .notes, .full-notes { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
+tr.data-row:nth-of-type(4n + 1), tr.template-data-row:nth-of-type(4n + 1) { background: #243044; } .notes, .full-notes { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 16rem; }
+.prompt-text { white-space: pre-wrap; overflow-wrap: anywhere; background: #111827; border: 1px solid #374151; border-radius: .25rem; padding: .75rem; max-height: 34rem; overflow: auto; }
 .details { padding: .5rem; } dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem .8rem; } dt { color: #93c5fd; } dd { margin: 0; overflow-wrap: anywhere; }
 @media (max-width: 800px) { body { padding: 1rem; } table { display: block; overflow-x: auto; } }
 </style>
 </head>
 <body><main>
 <h1>BenchPup Scoreboard Report</h1>
-<p class="generated">Generated at """ + generated + """. Historical scoreboard imports only; benchmark runs are not included.</p>
+<p class="generated">Generated at """ + generated + """. Historical scoreboard imports and stored prompt templates; benchmark runs are not included.</p>
+<nav class="tabs" aria-label="Report sections"><button type="button" data-tab="scoreboard-section" aria-selected="true">Scoreboard</button><button type="button" data-tab="prompt-templates-section" aria-selected="false">Prompt Templates</button></nav>
+<section id="scoreboard-section" class="report-section">
 <section class="cards">
 <div class="card"><div class="label">Total entries</div><div class="value">""" + text(len(records)) + """</div></div>
 <div class="card"><div class="label">Import batches</div><div class="value">""" + text(batch_count) + """</div></div>
@@ -149,6 +175,21 @@ tr.data-row:nth-of-type(4n + 1) { background: #243044; } .notes, .full-notes { w
 <th><button data-sort="temperature">Temperature</button></th><th><button data-sort="context">Context</button></th>
 <th><button data-sort="tokens">tok/s</button></th><th><button data-sort="verdict">Verdict</button></th><th>Notes</th><th>Batch</th>
 <th><button data-sort="imported">Imported At</button></th></tr></thead><tbody id="scoreboard-rows">""" + table_body + """</tbody></table>
+</section>
+<section id="prompt-templates-section" class="report-section" hidden>
+<section class="cards">
+<div class="card"><div class="label">Total prompt templates</div><div class="value">""" + text(len(templates)) + """</div></div>
+<div class="card"><div class="label">Active templates</div><div class="value">""" + text(active_template_count) + """</div></div>
+<div class="card"><div class="label">Benchmark types represented</div><div class="value">""" + text(len(template_types)) + """</div></div>
+<div class="card"><div class="label">Unique prompt hashes</div><div class="value">""" + text(unique_prompt_hashes) + """</div></div>
+</section>
+<section class="controls" aria-label="Prompt template filters">
+<label>Search prompts<input id="template-search" type="search" placeholder="Name, notes, type, or prompt text"></label>
+<label>Benchmark type<select id="template-type"><option value="">All</option>""" + template_type_options + """</select></label>
+<label>Active state<select id="template-active"><option value="">All</option><option value="Active">Active</option><option value="Inactive">Inactive</option></select></label>
+</section>
+<table><thead><tr><th>Name</th><th>Version</th><th>Benchmark type</th><th>Active</th><th>Character count</th><th>Line count</th><th>Notes</th></tr></thead><tbody id="prompt-template-rows">""" + template_table_body + """</tbody></table>
+</section>
 </main><script>
 const tbody = document.getElementById('scoreboard-rows');
 const controls = ['hallucination', 'reliability', 'verdict', 'batch'].map(id => document.getElementById(id));
@@ -181,6 +222,28 @@ document.querySelectorAll('[data-sort]').forEach(button => button.addEventListen
   });
   sortDirection *= -1;
   rows.forEach(row => { const details = row.nextElementSibling; tbody.append(row, details); });
+}));
+const templateBody = document.getElementById('prompt-template-rows');
+function applyTemplateFilters() {
+  const search = document.getElementById('template-search').value.trim().toLowerCase();
+  const type = document.getElementById('template-type').value;
+  const active = document.getElementById('template-active').value;
+  for (const row of templateBody.querySelectorAll('.template-data-row')) {
+    const visible = (!search || row.dataset.templateSearch.includes(search)) &&
+      (!type || row.dataset.templateType === type) && (!active || row.dataset.templateActive === active);
+    row.hidden = !visible; row.nextElementSibling.hidden = true;
+    row.querySelector('.template-row-toggle')?.setAttribute('aria-expanded', 'false');
+  }
+}
+['template-search', 'template-type', 'template-active'].forEach(id => document.getElementById(id).addEventListener(id === 'template-search' ? 'input' : 'change', applyTemplateFilters));
+templateBody.addEventListener('click', event => {
+  const toggle = event.target.closest('.template-row-toggle'); if (!toggle) return;
+  const details = toggle.closest('.template-data-row').nextElementSibling;
+  details.hidden = !details.hidden; toggle.setAttribute('aria-expanded', String(!details.hidden));
+});
+document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('.report-section').forEach(section => { section.hidden = section.id !== button.dataset.tab; });
+  document.querySelectorAll('[data-tab]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
 }));
 </script></body></html>""", encoding="utf-8")
     return path

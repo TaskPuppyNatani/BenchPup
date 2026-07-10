@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from engine.database import EngineDatabase
 from engine.exporters import export_combined_markdown, export_scoreboard_csv, export_scoreboard_html
 from engine.importers import CsvImportService, normalize_context_length, normalize_heading
+from engine.domain import PromptTemplate
 from engine.services import BenchmarkService
 
 
@@ -78,6 +79,27 @@ class CsvImportTests(unittest.TestCase):
         self.assertIn('data-sort="score"', html)
         self.assertIn('class="data-row"', html)
         self.assertIn("Total entries", html)
+
+    def test_html_report_includes_escaped_prompt_template_viewer(self):
+        text = "# Prompt\n\n<script>alert('no')</script>\n\n    code fence indentation\n"
+        self.service.catalog.prompt_templates.create(PromptTemplate(
+            name="<unsafe>", version="1.0", prompt_text=text,
+            prompt_hash=__import__("hashlib").sha256(text.encode()).hexdigest(), benchmark_type="code_review",
+            notes="<notes>", is_active=False,
+        ))
+        html_path = export_scoreboard_html(self.service.catalog, Path(self.directory.name) / "report.html")
+        html = html_path.read_text(encoding="utf-8")
+        self.assertIn('id="prompt-templates-section"', html)
+        self.assertIn("Total prompt templates", html)
+        self.assertIn('id="template-search"', html)
+        self.assertIn('id="template-type"', html)
+        self.assertIn('id="template-active"', html)
+        self.assertIn('class="prompt-text"', html)
+        self.assertIn("&lt;script&gt;alert(&#x27;no&#x27;)&lt;/script&gt;", html)
+        self.assertNotIn("<script>alert('no')</script>", html)
+        self.assertIn("    code fence indentation", html)
+        self.assertIn("data-template-search", html)
+        self.assertIn("Inactive", html)
 
     def test_scoreboard_context_values_are_normalized_in_preview_and_import(self):
         path = Path(self.directory.name) / "scoreboard-context.csv"
