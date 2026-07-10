@@ -1,10 +1,9 @@
-"""Path parsing and optional readline completion for CLI prompts."""
+"""Path parsing helpers used by prompt_toolkit-backed CLI prompts."""
 from __future__ import annotations
 
 import os
 from pathlib import Path
 import re
-from typing import Callable
 
 
 def unquote_path(value: str) -> str:
@@ -40,72 +39,3 @@ def resolve_export_destination(destination: str | Path, *, default_filename: str
     if extension and not path.suffix:
         path = path.with_suffix(extension)
     return path
-
-
-def path_candidates(value: str, *, extensions: tuple[str, ...] = (), directories_only: bool = False) -> list[str]:
-    """Return filesystem completion candidates without relying on terminal state."""
-    raw = unquote_path(value)
-    expanded = os.path.expanduser(raw)
-    path = Path(expanded)
-    parent = path.parent if str(path.parent) else Path(".")
-    prefix = path.name
-    try:
-        children = sorted(parent.iterdir(), key=lambda child: (not child.is_dir(), child.name.lower()))
-    except OSError:
-        return []
-    allowed = {extension.lower() for extension in extensions}
-    candidates = []
-    for child in children:
-        if not child.name.lower().startswith(prefix.lower()):
-            continue
-        if directories_only and not child.is_dir():
-            continue
-        if not child.is_dir() and allowed and child.suffix.lower() not in allowed:
-            continue
-        candidate = str(child)
-        if child.is_dir():
-            candidate += os.sep
-        if " " in candidate:
-            candidate = f'"{candidate}"'
-        candidates.append(candidate)
-    return candidates
-
-
-def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], None]:
-    """Install a temporary readline completer; return a function that restores it."""
-    try:
-        import readline  # type: ignore[import-not-found]
-    except ImportError:
-        try:
-            import pyreadline3 as readline  # type: ignore[import-not-found]
-        except ImportError:
-            return lambda: None
-
-    try:
-        previous_completer = readline.get_completer()
-        previous_delimiters = readline.get_completer_delims()
-    except (AttributeError, RuntimeError):
-        return lambda: None
-    matches: list[str] = []
-
-    def complete(_: str, state: int) -> str | None:
-        nonlocal matches
-        if state == 0:
-            matches = path_candidates(readline.get_line_buffer(), extensions=extensions)
-        return matches[state] if state < len(matches) else None
-
-    try:
-        readline.set_completer(complete)
-        # Spaces and path separators must remain part of the current completion token.
-        readline.set_completer_delims("\t\n")
-        readline.parse_and_bind("tab: complete")
-    except (AttributeError, RuntimeError):
-        readline.set_completer(previous_completer)
-        readline.set_completer_delims(previous_delimiters)
-        return lambda: None
-
-    def restore() -> None:
-        readline.set_completer(previous_completer)
-        readline.set_completer_delims(previous_delimiters)
-
-    return restore

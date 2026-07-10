@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from engine.path_completion import install_path_completion, normalize_path, path_candidates, resolve_export_destination
+from engine.path_completion import normalize_path, resolve_export_destination
 from cli import MAIN, QuitApplication, TerminalApp
 
 
@@ -24,20 +24,6 @@ class PathCompletionTests(unittest.TestCase):
         value = r"C:\Users\natan\Documents\file.csv"
         expected = value if os.name != "nt" else str(Path(value).resolve())
         self.assertEqual(normalize_path(value), expected)
-
-    def test_candidates_filter_extensions_and_complete_directories(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "import.csv").write_text("", encoding="utf-8")
-            (root / "ignore.txt").write_text("", encoding="utf-8")
-            (root / "exports").mkdir()
-            candidates = path_candidates(str(root / "i"), extensions=(".csv",))
-            self.assertEqual(candidates, [str(root / "import.csv")])
-            self.assertIn(str(root / "exports") + os.sep, path_candidates(str(root / "e"), extensions=(".csv",)))
-
-    def test_completion_setup_is_safe_when_no_terminal_backend_is_available(self):
-        restore = install_path_completion()
-        restore()
 
     def test_path_prompt_uses_prompt_toolkit_when_interactive(self):
         with tempfile.TemporaryDirectory() as directory:
