@@ -23,6 +23,7 @@ from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileD
 from engine.path_completion import normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
 from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
+from engine.settings import DefaultWorkingDirectorySettings
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -69,6 +70,7 @@ class TerminalApp:
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
         self.archives = ArchiveService(database)
+        self.settings = DefaultWorkingDirectorySettings(database_path)
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -108,15 +110,20 @@ class TerminalApp:
         try: self.input("Press Enter to continue...")
         except KeyboardInterrupt: self.output("")
 
-    def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | NavigationSignal | None:
+    def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False, blank_cancels: bool = False, directory_only: bool = False, reject_boolean_paths: bool = False) -> str | NavigationSignal | None:
         """Prompt for a filesystem path while preserving non-interactive input behavior."""
+        default_directory = self.settings.get_default_working_directory()
         self.output("Tip: press Tab to autocomplete paths.")
         if self.interactive_input:
             try:
                 suffix = f" [{default}]" if default not in (None, "") else ""
+                completer = (
+                    PathCompleter(expanduser=True, get_paths=lambda: [str(default_directory)])
+                    if default_directory is not None else PathCompleter(expanduser=True)
+                )
                 raw = toolkit_prompt(
                     f"{label}{suffix}: ",
-                    completer=PathCompleter(expanduser=True),
+                    completer=completer,
                     complete_while_typing=False,
                 )
                 self._check_quit_all(raw)
@@ -138,10 +145,18 @@ class TerminalApp:
         if value in (BACK, CANCEL, MAIN):
             return value
         raw_value = str(value)
-        normalized = normalize_path(raw_value)
+        if blank_cancels and not raw_value.strip():
+            return None
+        if reject_boolean_paths and self.normalized(raw_value) in {"y", "yes", "n", "no"}:
+            self.output("Enter a directory path, not a yes/no response.")
+            return None
+        normalized = normalize_path(raw_value, base_dir=default_directory)
         if preserve_trailing_separator and raw_value.rstrip().endswith(("/", "\\")):
             normalized += os.sep
         suffixes = {extension.lower() for extension in extensions}
+        if directory_only and Path(normalized).exists() and not Path(normalized).is_dir():
+            self.output(f'Expected a directory, not a file: "{normalized}".')
+            return None
         if must_exist and not Path(normalized).is_file():
             self.output(f'Path not found or not a file: "{normalized}".')
             return None
@@ -905,6 +920,53 @@ class TerminalApp:
             except ValueError:
                 self.output("The record could not be created. Check the entered values and try again.")
 
+    def set_default_working_directory(self) -> None:
+        selected = self.prompt_path(
+            "Default Working Directory",
+            blank_cancels=True,
+            directory_only=True,
+            reject_boolean_paths=True,
+        )
+        if not isinstance(selected, str):
+            return
+        directory = Path(selected)
+        if directory.exists():
+            self.settings.set_default_working_directory(directory)
+            self.output(f"Default Working Directory saved: {directory}")
+            return
+        self.output(f"Directory does not exist:\n{directory}")
+        create = self.yes_no("Create this directory", default=True, navigation=True)
+        if create is not True:
+            self.output("Default Working Directory was not changed.")
+            return
+        if not directory.parent.is_dir():
+            self.output(f'Parent directory does not exist: "{directory.parent}". No directory was created.')
+            return
+        try:
+            directory.mkdir()
+        except OSError as error:
+            self.output(f"Could not create directory: {error}")
+            return
+        self.settings.set_default_working_directory(directory)
+        self.output(f"Default Working Directory saved: {directory}")
+
+    def settings_screen(self) -> None:
+        while True:
+            current = self.settings.get_default_working_directory()
+            self.output("\nDefault Working Directory\n-------------------------")
+            self.output(f"Current: {current if current is not None else 'Not configured'}")
+            choice = self.ask("1) Set Default Working Directory  2) Clear Default Working Directory  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
+            if choice in (BACK, CANCEL, MAIN):
+                return
+            command = self.normalized(str(choice))
+            if command in {"1", "set"}:
+                self.set_default_working_directory()
+            elif command in {"2", "clear"}:
+                self.settings.clear_default_working_directory()
+                self.output("Default Working Directory cleared.")
+            else:
+                self.output("Choose 1, 2, or B to return.")
+
     def not_available(self, name: str, phase: str) -> None:
         self.output(f"{name} will be available in {phase}.")
         self.pause()
@@ -1266,7 +1328,7 @@ class TerminalApp:
                 elif command == "scoreboard": self.scoreboard_screen()
                 elif command == "backup": self.backup_data()
                 elif command == "restore": self.restore_data()
-                elif command == "settings": self.not_available("Settings", "a future phase")
+                elif command == "settings": self.settings_screen()
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")
             except KeyboardInterrupt:

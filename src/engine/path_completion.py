@@ -20,7 +20,7 @@ def is_windows_path(value: str) -> bool:
 
 def normalize_path(value: str, *, base_dir: str | Path | None = None) -> str:
     """Remove optional quotes, expand ~, and make local relative paths absolute."""
-    cleaned = os.path.expanduser(unquote_path(value))
+    cleaned = os.path.expandvars(os.path.expanduser(unquote_path(value)))
     # Preserve Windows paths when tests or tooling run on a non-Windows host.
     if os.name != "nt" and is_windows_path(cleaned):
         return cleaned
