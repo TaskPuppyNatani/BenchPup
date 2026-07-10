@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
+from prompt_toolkit import prompt as toolkit_prompt
+from prompt_toolkit.completion import PathCompleter
 
 from engine.database import EngineDatabase
 from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardImportBatch, now
@@ -18,7 +20,7 @@ from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
 from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
-from engine.path_completion import completion_diagnostics, install_path_completion, normalize_path, resolve_export_destination
+from engine.path_completion import normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
 
 class NavigationSignal:
@@ -81,7 +83,7 @@ class TerminalApp:
             sys.stdout.flush()
             raw = self.input(f"{label}{suffix}: ")
         except KeyboardInterrupt:
-            self.output("\nReturning to the main menu.")
+            self.output("\nOperation cancelled.")
             return MAIN
         value = raw.strip()
         command = value.lower()
@@ -98,20 +100,24 @@ class TerminalApp:
     def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | NavigationSignal | None:
         """Prompt for a filesystem path while preserving non-interactive input behavior."""
         self.output("Tip: press Tab to autocomplete paths.")
-        restore_completion = install_path_completion(extensions) if self.interactive_input else lambda: None
-        try:
-            module_name, completer, delimiters, tab_bound = completion_diagnostics()
-            self.output(f"[DEBUG READLINE MODULE] {module_name}")
-            self.output(f"[DEBUG READLINE COMPLETER] {completer!r}")
-            self.output(f"[DEBUG READLINE DELIMITERS] {delimiters!r}")
-            self.output(f"[DEBUG TAB COMPLETE BOUND] {tab_bound}")
+        if self.interactive_input:
             try:
-                value = self.ask(label, navigation=True, default=default)
-            except KeyboardInterrupt:
-                self.output("\nReturning to the main menu.")
+                suffix = f" [{default}]" if default not in (None, "") else ""
+                raw = toolkit_prompt(
+                    f"{label}{suffix}: ",
+                    completer=PathCompleter(expanduser=True),
+                    complete_while_typing=False,
+                )
+                value: PromptResult = default if raw.strip() == "" and default is not None else raw.strip()
+            except (KeyboardInterrupt, EOFError):
+                self.output("\nOperation cancelled.")
                 return MAIN
-        finally:
-            restore_completion()
+            finally:
+                # prompt_toolkit owns its terminal state; flushing ensures its
+                # completed render is settled before normal CLI output resumes.
+                sys.stdout.flush()
+        else:
+            value = self.ask(label, navigation=True, default=default)
         if value in (BACK, CANCEL, MAIN):
             return value
         raw_value = str(value)
@@ -970,6 +976,9 @@ class TerminalApp:
         while True:
             self.show_main_menu()
             raw = self.ask("Choose an option")
+            if raw is MAIN:
+                self.output("Exiting BenchPup.")
+                return
             command = self.normalized(str(raw))
             if command in QUIT_WORDS: return
             command = commands.get(command)
@@ -996,7 +1005,7 @@ class TerminalApp:
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")
             except KeyboardInterrupt:
-                self.output("\nReturning to the main menu.")
+                self.output("\nOperation cancelled.")
             except Exception:
                 self.logger.exception("Unexpected CLI error")
                 self.output("An unexpected error occurred.\nSee logs/error.log for details.")

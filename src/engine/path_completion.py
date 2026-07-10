@@ -7,10 +7,6 @@ import re
 from typing import Callable
 
 
-_last_module_name = "unavailable"
-_tab_complete_bound = False
-
-
 def unquote_path(value: str) -> str:
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
@@ -77,8 +73,6 @@ def path_candidates(value: str, *, extensions: tuple[str, ...] = (), directories
 
 def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], None]:
     """Install a temporary readline completer; return a function that restores it."""
-    global _last_module_name, _tab_complete_bound
-    _tab_complete_bound = False
     try:
         import readline  # type: ignore[import-not-found]
     except ImportError:
@@ -86,7 +80,6 @@ def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], No
             import pyreadline3 as readline  # type: ignore[import-not-found]
         except ImportError:
             return lambda: None
-    _last_module_name = getattr(readline, "__name__", type(readline).__name__)
 
     try:
         previous_completer = readline.get_completer()
@@ -106,7 +99,6 @@ def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], No
         # Spaces and path separators must remain part of the current completion token.
         readline.set_completer_delims("\t\n")
         readline.parse_and_bind("tab: complete")
-        _tab_complete_bound = True
     except (AttributeError, RuntimeError):
         readline.set_completer(previous_completer)
         readline.set_completer_delims(previous_delimiters)
@@ -117,23 +109,3 @@ def install_path_completion(extensions: tuple[str, ...] = ()) -> Callable[[], No
         readline.set_completer_delims(previous_delimiters)
 
     return restore
-
-
-def completion_diagnostics() -> tuple[str, object | None, str | None, bool]:
-    """Temporary runtime details for validating the active completion backend."""
-    try:
-        import readline  # type: ignore[import-not-found]
-    except ImportError:
-        try:
-            import pyreadline3 as readline  # type: ignore[import-not-found]
-        except ImportError:
-            return _last_module_name, None, None, _tab_complete_bound
-    try:
-        return (
-            getattr(readline, "__name__", type(readline).__name__),
-            readline.get_completer(),
-            readline.get_completer_delims(),
-            _tab_complete_bound,
-        )
-    except (AttributeError, RuntimeError):
-        return getattr(readline, "__name__", type(readline).__name__), None, None, _tab_complete_bound

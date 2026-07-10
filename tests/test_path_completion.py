@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.path_completion import install_path_completion, normalize_path, path_candidates, resolve_export_destination
+from cli import MAIN, TerminalApp
 
 
 class PathCompletionTests(unittest.TestCase):
@@ -37,6 +38,47 @@ class PathCompletionTests(unittest.TestCase):
     def test_completion_setup_is_safe_when_no_terminal_backend_is_available(self):
         restore = install_path_completion()
         restore()
+
+    def test_path_prompt_uses_prompt_toolkit_when_interactive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+            def output_fn(message):
+                events.append(("output", message))
+            def input_fn(_prompt):
+                raise AssertionError("interactive path prompts must use prompt_toolkit")
+            app = TerminalApp(Path(directory) / "benchmarks.db", input_fn=input_fn, output_fn=output_fn)
+            app.interactive_input = True
+            from unittest.mock import patch
+            with patch("cli.toolkit_prompt", return_value="~/archive.json") as prompt, patch("cli.PathCompleter") as completer:
+                app.prompt_path("Archive file", default=str(Path(directory) / "backup.json"))
+            completer.assert_called_once_with(expanduser=True)
+            self.assertEqual(prompt.call_args.kwargs["complete_while_typing"], False)
+            self.assertEqual(prompt.call_args.args[0], f"Archive file [{Path(directory) / 'backup.json'}]: ")
+
+    def test_path_prompt_uses_injected_input_without_prompt_toolkit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output, prompts = [], []
+            def input_fn(prompt):
+                prompts.append(prompt)
+                return ""
+            app = TerminalApp(Path(directory) / "benchmarks.db", input_fn=input_fn, output_fn=output.append)
+            from unittest.mock import patch
+            with patch("cli.toolkit_prompt") as prompt:
+                app.prompt_path("Archive file", default=str(Path(directory) / "backup.json"))
+            prompt.assert_not_called()
+            self.assertEqual(prompts, [f"Archive file [{Path(directory) / 'backup.json'}]: "])
+            self.assertIn("Tip: press Tab to autocomplete paths.", output)
+
+    def test_keyboard_interrupt_in_path_prompt_cancels_and_allows_later_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = []
+            app = TerminalApp(Path(directory) / "benchmarks.db", input_fn=lambda _: "q", output_fn=output.append)
+            app.interactive_input = True
+            from unittest.mock import patch
+            with patch("cli.toolkit_prompt", side_effect=KeyboardInterrupt):
+                self.assertIs(app.prompt_path("Archive file"), MAIN)
+            self.assertEqual(app.ask("Choose an option"), "q")
+            self.assertTrue(any("Operation cancelled." in line for line in output))
 
     def test_export_destination_uses_default_filename_for_directories_and_trailing_slashes(self):
         with tempfile.TemporaryDirectory() as directory:

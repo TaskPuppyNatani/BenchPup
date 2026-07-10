@@ -70,21 +70,21 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn("13) Scoreboard", menu)
         self.assertIn("Scoreboard entries : 0", menu)
         self.assertIn(" Help\n ----\nH) Help", menu)
-        self.assertIn("Version 0.3.5-Alpha", menu)
+        self.assertIn("Version 0.3.7-Alpha", menu)
         self.assertIn("Database : benchmarks.db", menu)
 
     def test_title_lines_are_centered_to_the_menu_width(self):
         app, output = self.app_with(iter(["q"]))
         app.run()
         title = next(line for line in output if "BenchPup" in line)
-        version = next(line for line in output if "Version 0.3.5-Alpha" in line)
+        version = next(line for line in output if "Version 0.3.7-Alpha" in line)
         self.assertEqual(len(title), len(version))
         title_center = title.index("BenchPup") + len("BenchPup") / 2
-        version_center = version.index("Version") + len("Version 0.3.5-Alpha") / 2
+        version_center = version.index("Version") + len("Version 0.3.7-Alpha") / 2
         self.assertLessEqual(abs(title_center - version_center), 0.5)
 
-    def test_keyboard_interrupt_returns_to_main_menu(self):
-        calls = iter([KeyboardInterrupt(), "quit"])
+    def test_keyboard_interrupt_at_main_menu_exits_without_reprompting(self):
+        calls = iter([KeyboardInterrupt()])
         def interrupted_input(_):
             value = next(calls)
             if isinstance(value, BaseException): raise value
@@ -93,7 +93,17 @@ class CliPolishTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=interrupted_input, output_fn=output.append)
         app.run()
-        self.assertTrue(any("Returning to the main menu" in line for line in output))
+        self.assertTrue(any("Operation cancelled." in line for line in output))
+        self.assertIn("Exiting BenchPup.", output)
+
+    def test_keyboard_interrupt_in_submenu_cancels_operation(self):
+        def interrupted_input(_):
+            raise KeyboardInterrupt()
+        directory = tempfile.TemporaryDirectory(); output = []
+        self.addCleanup(directory.cleanup)
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=interrupted_input, output_fn=output.append)
+        app.import_screen()
+        self.assertTrue(any("Operation cancelled." in line for line in output))
 
     def test_import_menu_flow_imports_csv(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
