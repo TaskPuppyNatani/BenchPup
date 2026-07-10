@@ -187,3 +187,14 @@ class CliPolishTests(unittest.TestCase):
         self.assertTrue(destination.exists())
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", destination.read_text(encoding="utf-8"))
         self.assertTrue(any("Exported Scoreboard HTML" in line for line in output))
+
+    def test_export_creates_missing_parent_after_confirmation_and_shows_final_path(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        destination = Path(directory.name) / "new exports" / "scoreboard"
+        answers = iter(["5", str(destination), "y", "n"])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.export_screen()
+        expected = destination.with_suffix(".html")
+        self.assertTrue(expected.exists())
+        self.assertTrue(any(f"Writing export to {expected}" in line for line in output))

@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import csv
+import os
 import webbrowser
 from dataclasses import replace
 from pathlib import Path
@@ -14,6 +15,7 @@ from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDe
 from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
+from engine.path_completion import install_path_completion, normalize_path, resolve_export_destination
 
 BACK, CANCEL, MAIN = object(), object(), object()
 BACK_WORDS = {"b", "back"}
@@ -32,6 +34,7 @@ class TerminalApp:
         self.benchmarks = BenchmarkService(database, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
         self.input, self.output = input_fn, output_fn
+        self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
         log_path = Path(database_path).parent.parent / "logs" / "error.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,6 +64,54 @@ class TerminalApp:
     def pause(self) -> None:
         try: self.input("Press Enter to continue...")
         except KeyboardInterrupt: self.output("")
+
+    def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False) -> str | object:
+        """Prompt for a filesystem path while preserving non-interactive input behavior."""
+        self.output("Tip: press Tab to autocomplete paths.")
+        restore_completion = install_path_completion(extensions, debug=self.output) if self.interactive_input else lambda: None
+        try:
+            value = self.ask(label, navigation=True, default=default)
+        finally:
+            restore_completion()
+        if value in (BACK, CANCEL, MAIN):
+            return value
+        raw_value = str(value)
+        normalized = normalize_path(raw_value)
+        if preserve_trailing_separator and raw_value.rstrip().endswith(("/", "\\")):
+            normalized += os.sep
+        suffixes = {extension.lower() for extension in extensions}
+        if must_exist and not Path(normalized).is_file():
+            self.output(f'Path not found or not a file: "{normalized}".')
+            return None
+        if must_exist and suffixes and Path(normalized).suffix.lower() not in suffixes:
+            self.output(f'Expected a {"/".join(extensions)} file: "{normalized}".')
+            return None
+        return normalized
+
+    def prepare_export_destination(self, destination: str, export_name: str) -> Path | None | object:
+        defaults = {
+            "Scoreboard HTML": ("scoreboard.html", ".html"),
+            "Scoreboard CSV": ("scoreboard.csv", None),
+            "Benchmark Runs CSV": ("benchmark_runs.csv", None),
+            "JSONL training data": ("training_data.jsonl", None),
+            "Markdown report": ("report.md", None),
+        }
+        default_filename, extension = defaults.get(export_name, ("report.md", None))
+        output_path = resolve_export_destination(destination, default_filename=default_filename, extension=extension)
+        if not output_path.parent.exists():
+            create = self.yes_no(f'Parent directory "{output_path.parent}" does not exist. Create it?', navigation=True)
+            if create in (BACK, CANCEL, MAIN):
+                return create
+            if create is not True:
+                self.output("Export cancelled; parent directory was not created.")
+                return None
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                self.output(f'Could not create parent directory "{output_path.parent}": {error}')
+                return None
+        self.output(f"Writing export to {output_path}")
+        return output_path
 
     def ask_float(self, label: str, *, default: float | None = None, navigation: bool = False) -> float | None | object:
         while True:
@@ -143,14 +194,16 @@ class TerminalApp:
         return self.catalog.model_profiles.create(ModelProfile(**values))
 
     def create_definition(self) -> BenchmarkDefinition | object | None:
-        values = self._form([("name", "Benchmark name", None, "text"), ("file_path", "Benchmark file path", None, "text")])
-        if values in (BACK, CANCEL, MAIN): return values
-        if not values["name"] or not values["file_path"]: self.output("Benchmark name and file path are required."); return None
+        name = self.ask("Benchmark name", navigation=True)
+        if name in (BACK, CANCEL, MAIN): return name
+        file_path = self.prompt_path("Benchmark file path")
+        if file_path in (BACK, CANCEL, MAIN): return file_path
+        if not name or not file_path: self.output("Benchmark name and file path are required."); return None
         benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
         if benchmark_type in (BACK, CANCEL, MAIN): return benchmark_type
         rest = self._form([("default_prompt", "Default prompt (optional)", "", "text"), ("tags", "Tags (optional)", "", "text")])
         if rest in (BACK, CANCEL, MAIN): return rest
-        return self.catalog.benchmark_definitions.create(BenchmarkDefinition(**values, benchmark_type=benchmark_type, **rest))
+        return self.catalog.benchmark_definitions.create(BenchmarkDefinition(name=str(name), file_path=str(file_path), benchmark_type=benchmark_type, **rest))
 
     def create_prompt_template(self) -> PromptTemplate | object | None:
         values = self._form([("name", "Prompt template name", None, "text"), ("version", "Prompt version", None, "text"), ("prompt_text", "Prompt text", None, "text")])
@@ -187,10 +240,13 @@ class TerminalApp:
             if not answer: return None
             attachment_type = self.pick("Attachment type", ATTACHMENT_TYPES, "other", navigation=True)
             if attachment_type in (BACK, CANCEL, MAIN): return attachment_type
-            values = self._form([("file_path", "File path", None, "text"), ("original_filename", "Original filename", None, "text"), ("notes", "Attachment notes", "", "text")])
-            if values in (BACK, CANCEL, MAIN): return values
-            if not values["file_path"] or not values["original_filename"]: self.output("File path and filename are required."); continue
-            draft.append({"attachment_type": attachment_type, **values})
+            file_path = self.prompt_path("File path", must_exist=True)
+            if file_path in (BACK, CANCEL, MAIN): return file_path
+            original_filename = self.ask("Original filename", navigation=True)
+            notes = self.ask("Attachment notes", navigation=True, default="")
+            if original_filename in (BACK, CANCEL, MAIN) or notes in (BACK, CANCEL, MAIN): return original_filename if original_filename in (BACK, CANCEL, MAIN) else notes
+            if not file_path or not original_filename: self.output("File path and filename are required."); continue
+            draft.append({"attachment_type": attachment_type, "file_path": file_path, "original_filename": original_filename, "notes": notes})
 
     def add_run_wizard(self) -> None:
         state: dict = {"attachments": []}
@@ -488,7 +544,8 @@ class TerminalApp:
         self.import_csv(import_type)
 
     def import_csv(self, import_type: str = "auto") -> None:
-        path = self.ask("CSV file path", navigation=True)
+        path = self.prompt_path("CSV file path", must_exist=True, extensions=(".csv",))
+        if path is None: return
         if path in (BACK, CANCEL, MAIN): return
         try:
             preview = self.importer.preview(str(path))
@@ -563,15 +620,18 @@ class TerminalApp:
         exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
         selected = exporters.get(self.normalized(str(choice)))
         if not selected: self.output("Choose 1, 2, 3, 4, or 5."); return
-        path = self.ask(f"Destination for {selected[0]}", navigation=True)
+        path = self.prompt_path(f"Destination for {selected[0]}", preserve_trailing_separator=True)
+        if path is None: return
         if path in (BACK, CANCEL, MAIN): return
+        output_path = self.prepare_export_destination(str(path), selected[0])
+        if output_path is None or output_path in (BACK, CANCEL, MAIN): return
         exporter = selected[1]
         if selected[0] == "Markdown report":
-            saved = exporter(self.benchmarks, self.catalog, str(path))
+            saved = exporter(self.benchmarks, self.catalog, str(output_path))
         elif selected[0] in {"Scoreboard CSV", "Scoreboard HTML"}:
-            saved = exporter(self.catalog, str(path))
+            saved = exporter(self.catalog, str(output_path))
         else:
-            saved = exporter(self.benchmarks, str(path))
+            saved = exporter(self.benchmarks, str(output_path))
         self.output(f"Exported {selected[0]} to {saved}.")
         if selected[0] == "Scoreboard HTML" and self.yes_no("Open HTML report in browser?", navigation=True) is True:
             try:
