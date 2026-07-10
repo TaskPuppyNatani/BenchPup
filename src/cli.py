@@ -5,6 +5,7 @@ import json
 import logging
 import csv
 import os
+import sys
 import webbrowser
 from dataclasses import replace
 from datetime import datetime
@@ -17,7 +18,7 @@ from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
 from engine.hardware_importers import HardwareImporterRegistry, HardwareProfileDraft, decode_hardware_text, parse_key_value_pairs
-from engine.path_completion import install_path_completion, normalize_path, resolve_export_destination
+from engine.path_completion import completion_diagnostics, install_path_completion, normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
 
 class NavigationSignal:
@@ -52,7 +53,7 @@ ARCHIVE_LABELS = {
 
 class TerminalApp:
     """A forgiving terminal interface over the Phase 1 service layer."""
-    def __init__(self, database_path: str | Path, input_fn: Callable[[str], str] = input, output_fn: Callable[[str], None] = print):
+    def __init__(self, database_path: str | Path, input_fn: Callable[..., str] = input, output_fn: Callable[[str], None] = print):
         database = EngineDatabase(database_path)
         database.migrate()
         self.catalog = CatalogService(database)
@@ -76,6 +77,8 @@ class TerminalApp:
     def ask(self, label: str, *, navigation: bool = False, default: str | None = None) -> PromptResult:
         suffix = f" [{default}]" if default not in (None, "") else ""
         try:
+            # Ensure all status text has reached the terminal before input() owns the cursor.
+            sys.stdout.flush()
             raw = self.input(f"{label}{suffix}: ")
         except KeyboardInterrupt:
             self.output("\nReturning to the main menu.")
@@ -97,7 +100,16 @@ class TerminalApp:
         self.output("Tip: press Tab to autocomplete paths.")
         restore_completion = install_path_completion(extensions) if self.interactive_input else lambda: None
         try:
-            value = self.ask(label, navigation=True, default=default)
+            module_name, completer, delimiters, tab_bound = completion_diagnostics()
+            self.output(f"[DEBUG READLINE MODULE] {module_name}")
+            self.output(f"[DEBUG READLINE COMPLETER] {completer!r}")
+            self.output(f"[DEBUG READLINE DELIMITERS] {delimiters!r}")
+            self.output(f"[DEBUG TAB COMPLETE BOUND] {tab_bound}")
+            try:
+                value = self.ask(label, navigation=True, default=default)
+            except KeyboardInterrupt:
+                self.output("\nReturning to the main menu.")
+                return MAIN
         finally:
             restore_completion()
         if value in (BACK, CANCEL, MAIN):
