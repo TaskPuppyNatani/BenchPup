@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from cli import BACK, CANCEL, TerminalApp
-from engine.domain import BenchmarkDefinition, ModelProfile, PromptTemplate
+from engine.domain import BenchmarkDefinition, ModelProfile, PromptTemplate, ScoreboardEntry, ScoreboardImportBatch
 
 
 def score_answers():
@@ -60,6 +60,8 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn(" Runs\n ----\n 1) Add Run", menu)
         self.assertIn(" Reference Data\n --------------\n 6) Sessions", menu)
         self.assertIn(" Data\n ----\n11) Import", menu)
+        self.assertIn("13) Scoreboard", menu)
+        self.assertIn("Scoreboard entries : 0", menu)
         self.assertIn(" Help\n ----\nH) Help", menu)
         self.assertIn("Version 0.2 Alpha", menu)
         self.assertIn("Database : benchmarks.db", menu)
@@ -147,3 +149,41 @@ class CliPolishTests(unittest.TestCase):
         app.import_csv()
         self.assertEqual(len(app.catalog.scoreboard_entries.list()), 1)
         self.assertTrue(any("Imported 1 scoreboard entry" in line for line in output))
+
+    def test_scoreboard_preview_reports_skipped_non_data_rows(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        source = Path(directory.name) / "summary.csv"
+        source.write_text("Model Name,Score\nQwen,4\nLEGEND,Out of five\n", encoding="utf-8")
+        answers = iter([str(source), "y", "y", ""])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.import_csv()
+        self.assertTrue(any("Preview: 1 importable row(s), 1 skipped non-data row(s)" in line for line in output))
+
+    def test_scoreboard_browser_lists_views_and_filters_historical_entries(self):
+        app, output = self.app_with(iter(["1", "2", "1", "3", "4", "1", "b"]))
+        batch = app.catalog.scoreboard_import_batches.create(
+            ScoreboardImportBatch(name="Historical July", source_file="july.csv", imported_at="2026-07-10T12:00:00Z")
+        )
+        app.catalog.scoreboard_entries.create(
+            ScoreboardEntry(model_name="Qwen", score=4.5, verdict="Useful", import_batch_id=batch.id, imported_at="2026-07-10T12:00:00Z")
+        )
+        app.scoreboard_screen()
+        rendered = "\n".join(output)
+        self.assertIn("Scoreboard (historical summary imports)", rendered)
+        self.assertIn("#1 | Qwen | score=4.5 | batch=Historical July | imported=2026-07-10T12:00:00Z", rendered)
+        self.assertIn("Scoreboard entry #1", rendered)
+        self.assertIn("Batch: Historical July", rendered)
+        self.assertIn("#1 | Historical July | entries=1 | imported=2026-07-10T12:00:00Z | source=july.csv", rendered)
+
+    def test_scoreboard_html_export_prompts_to_open_report(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        destination = Path(directory.name) / "scoreboard.html"
+        answers = iter(["5", str(destination), "n"])
+        output = []
+        app = TerminalApp(Path(directory.name) / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=output.append)
+        app.catalog.scoreboard_entries.create(ScoreboardEntry(model_name="Qwen", notes="<script>alert(1)</script>"))
+        app.export_screen()
+        self.assertTrue(destination.exists())
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", destination.read_text(encoding="utf-8"))
+        self.assertTrue(any("Exported Scoreboard HTML" in line for line in output))

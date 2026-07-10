@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.database import EngineDatabase
-from engine.exporters import export_combined_markdown, export_scoreboard_csv
+from engine.exporters import export_combined_markdown, export_scoreboard_csv, export_scoreboard_html
 from engine.importers import CsvImportService, normalize_context_length, normalize_heading
 from engine.services import BenchmarkService
 
@@ -68,6 +68,11 @@ class CsvImportTests(unittest.TestCase):
         report_path = export_combined_markdown(self.service, self.service.catalog, Path(self.directory.name) / "report.md")
         self.assertIn("Historical July", csv_path.read_text(encoding="utf-8"))
         self.assertIn("### Historical July", report_path.read_text(encoding="utf-8"))
+        html_path = export_scoreboard_html(self.service.catalog, Path(self.directory.name) / "scoreboard-report.html")
+        html = html_path.read_text(encoding="utf-8")
+        self.assertIn("<!doctype html>", html)
+        self.assertIn("Historical July", html)
+        self.assertIn("Generated at", html)
 
     def test_scoreboard_context_values_are_normalized_in_preview_and_import(self):
         path = Path(self.directory.name) / "scoreboard-context.csv"
@@ -94,6 +99,33 @@ class CsvImportTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"Row 3: context_length must be an integer \(got 'a lot'\)"):
             self.importer.import_scoreboard_entries(preview.rows, path)
         self.assertEqual(self.service.catalog.scoreboard_entries.list(), [])
+
+    def test_scoreboard_preview_skips_non_data_rows_and_imports_the_preview(self):
+        path = Path(self.directory.name) / "scoreboard-with-footer.csv"
+        path.write_text(
+            "Model,Score,Notes\n"
+            "Qwen,4.5,Useful\n"
+            ",,\n"
+            "LEGEND,,Scores are out of five\n"
+            "Notes,,Imported from July sheet\n"
+            ",,,\n"
+            "Llama,4.0,Good\n",
+            encoding="utf-8",
+        )
+        preview = self.importer.preview(path, summary=True)
+        self.assertEqual([row["model_name"] for row in preview.rows], ["Qwen", "Llama"])
+        self.assertEqual(preview.skipped_rows, [(3, "blank row"), (4, "metadata row"), (5, "metadata row"), (6, "blank row")])
+        result = self.importer.import_scoreboard_entries(preview.rows, path, row_numbers=preview.row_numbers)
+        self.assertEqual(result.imported, len(preview.rows))
+        self.assertEqual(len(self.service.catalog.scoreboard_entries.list()), len(preview.rows))
+
+    def test_scoreboard_row_with_score_but_no_model_is_an_error(self):
+        path = Path(self.directory.name) / "missing-model.csv"
+        path.write_text("Model,Score,Notes\n,4.5,Useful\n", encoding="utf-8")
+        preview = self.importer.preview(path, summary=True)
+        self.assertEqual(len(preview.rows), 1)
+        with self.assertRaisesRegex(ValueError, "Row 2: model_name is required"):
+            self.importer.import_scoreboard_entries(preview.rows, path, row_numbers=preview.row_numbers)
 
     def test_context_normalization_supports_decimal_suffixes_and_commas(self):
         self.assertEqual(normalize_context_length("128k"), 128000)

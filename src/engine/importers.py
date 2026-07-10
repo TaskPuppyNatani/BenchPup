@@ -124,6 +124,8 @@ class ImportPreview:
     mapping: dict[str, str | None]
     rows: list[dict[str, str]]
     unknown_headings: list[str]
+    row_numbers: list[int]
+    skipped_rows: list[tuple[int, str]]
 
 
 @dataclass
@@ -138,6 +140,24 @@ class CsvImportService:
     def __init__(self, benchmarks: BenchmarkService):
         self.benchmarks = benchmarks
 
+    @staticmethod
+    def _scoreboard_skip_reason(source_row: dict[str, str | None], row: dict[str, str]) -> str | None:
+        values = [
+            str(cell or "").strip()
+            for value in source_row.values()
+            for cell in (value if isinstance(value, list) else [value])
+        ]
+        populated = [value for value in values if value]
+        if not populated:
+            return "blank row"
+        if re.match(r"^(legend|notes?|summary|totals?|footer)\b", populated[0], re.IGNORECASE):
+            return "metadata row"
+        if not row.get("model_name", "").strip() and not any(
+            row.get(field, "").strip() for field in ("score", "verdict", "notes", "notes_extra")
+        ):
+            return "no model or scoreboard data"
+        return None
+
     def preview(self, path: str | Path, mapping: dict[str, str | None] | None = None, *, summary: bool = False) -> ImportPreview:
         with Path(path).open("r", encoding="utf-8-sig", newline="") as source:
             reader = csv.DictReader(source)
@@ -151,7 +171,9 @@ class CsvImportService:
                 resolved[heading] = target if target in fields else None
             unknown = [heading for heading, target in resolved.items() if target is None]
             rows = []
-            for source_row in reader:
+            row_numbers = []
+            skipped_rows = []
+            for row_number, source_row in enumerate(reader, start=2):
                 row: dict[str, str] = {}
                 for heading, value in source_row.items():
                     target = resolved.get(heading)
@@ -165,8 +187,14 @@ class CsvImportService:
                             except ValueError:
                                 pass
                         row[target] = cleaned
+                if summary:
+                    reason = self._scoreboard_skip_reason(source_row, row)
+                    if reason:
+                        skipped_rows.append((row_number, reason))
+                        continue
                 rows.append(row)
-        return ImportPreview(headings, resolved, rows, unknown)
+                row_numbers.append(row_number)
+        return ImportPreview(headings, resolved, rows, unknown, row_numbers, skipped_rows)
 
     def mapping_profiles(self) -> list[tuple[int, str, dict[str, str | None]]]:
         with self.benchmarks.database.connection() as connection:
@@ -267,9 +295,10 @@ class CsvImportService:
                 existing.add(run.fingerprint); seen.add(run.fingerprint); result.imported += 1
         return result
 
-    def import_scoreboard_entries(self, rows: list[dict[str, str]], source_file: str | Path, batch_name: str | None = None, batch_notes: str = "") -> ImportResult:
+    def import_scoreboard_entries(self, rows: list[dict[str, str]], source_file: str | Path, batch_name: str | None = None, batch_notes: str = "", row_numbers: list[int] | None = None) -> ImportResult:
         entries = []
-        for row_number, row in enumerate(rows, start=2):
+        row_numbers = row_numbers or list(range(2, len(rows) + 2))
+        for row_number, row in zip(row_numbers, rows):
             try:
                 model_name = self._value(row, "model_name")
                 if not model_name: raise ValueError("model_name is required")

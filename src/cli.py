@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import csv
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -12,7 +13,7 @@ from engine.database import EngineDatabase
 from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment
 from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
-from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv
+from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
 
 BACK, CANCEL, MAIN = object(), object(), object()
 BACK_WORDS = {"b", "back"}
@@ -308,6 +309,75 @@ class TerminalApp:
         if confirmation in (BACK, CANCEL, MAIN) or str(confirmation).upper() != "DELETE": self.output("Delete cancelled."); return
         self.benchmarks.delete_run(run_id); self.output("✓ Run deleted.")
 
+    def _scoreboard_batches(self) -> dict[int, object]:
+        return {batch.id: batch for batch in self.catalog.scoreboard_import_batches.list() if batch.id is not None}
+
+    def list_scoreboard_entries(self, batch_id: int | None = None) -> None:
+        batches = self._scoreboard_batches()
+        entries = self.catalog.scoreboard_entries.list()
+        if batch_id is not None:
+            entries = [entry for entry in entries if entry.import_batch_id == batch_id]
+        if not entries:
+            self.output("No scoreboard entries found.")
+            return
+        for entry in entries:
+            batch = batches.get(entry.import_batch_id)
+            self.output(
+                f"#{entry.id} | {entry.model_name} | score={entry.score if entry.score is not None else '-'} "
+                f"| batch={batch.name if batch else '-'} | imported={entry.imported_at}"
+            )
+
+    def view_scoreboard_entry(self, entry_id: int) -> None:
+        entry = self.catalog.scoreboard_entries.get(entry_id)
+        if not entry:
+            self.output("Scoreboard entry not found.")
+            return
+        batch = self._scoreboard_batches().get(entry.import_batch_id)
+        self.output(f"\nScoreboard entry #{entry.id}")
+        self.output(f"Batch: {batch.name if batch else '-'}")
+        self.output(f"Imported at: {entry.imported_at}")
+        self.output(json.dumps(entry.__dict__, indent=2))
+
+    def list_scoreboard_batches(self) -> None:
+        batches = self.catalog.scoreboard_import_batches.list()
+        if not batches:
+            self.output("No scoreboard import batches found.")
+            return
+        entry_counts: dict[int, int] = {}
+        for entry in self.catalog.scoreboard_entries.list():
+            if entry.import_batch_id is not None:
+                entry_counts[entry.import_batch_id] = entry_counts.get(entry.import_batch_id, 0) + 1
+        for batch in batches:
+            self.output(
+                f"#{batch.id} | {batch.name} | entries={entry_counts.get(batch.id, 0)} "
+                f"| imported={batch.imported_at} | source={batch.source_file}"
+            )
+
+    def scoreboard_screen(self) -> None:
+        while True:
+            self.output("\nScoreboard (historical summary imports)\n---------------------------------------")
+            choice = self.ask("1) List entries  2) View entry  3) List import batches  4) View entries by batch  B) Back", navigation=True)
+            if choice in (BACK, CANCEL, MAIN):
+                return
+            command = self.normalized(str(choice))
+            if command in {"1", "list"}:
+                self.list_scoreboard_entries()
+            elif command in {"2", "view"}:
+                entry_id = self.ask_id("Scoreboard entry ID")
+                if entry_id not in (BACK, CANCEL, MAIN):
+                    self.view_scoreboard_entry(entry_id)
+            elif command in {"3", "batches"}:
+                self.list_scoreboard_batches()
+            elif command in {"4", "batch"}:
+                batch_id = self.ask_id("Import batch ID")
+                if batch_id not in (BACK, CANCEL, MAIN):
+                    if batch_id not in self._scoreboard_batches():
+                        self.output("Import batch not found.")
+                    else:
+                        self.list_scoreboard_entries(batch_id)
+            else:
+                self.output("Choose 1, 2, 3, 4, or B to return.")
+
     def catalog_screen(self, title: str, repository, create) -> None:
         """A small, focused catalog screen for one reusable record type."""
         while True:
@@ -453,7 +523,10 @@ class TerminalApp:
                 default_benchmark = self.ask(f"Benchmark is blank for {blank_benchmarks} row(s). Default benchmark (optional)", navigation=True)
                 if default_benchmark in (BACK, CANCEL, MAIN): return
                 self.apply_default_benchmark(preview.rows, str(default_benchmark))
-        self.output(f"\nPreview: {len(preview.rows)} row(s)")
+        if summary_import:
+            self.output(f"\nPreview: {len(preview.rows)} importable row(s), {len(preview.skipped_rows)} skipped non-data row(s)")
+        else:
+            self.output(f"\nPreview: {len(preview.rows)} row(s)")
         for number, row in enumerate(preview.rows[:5], start=1):
             score = row.get("score", "-") if summary_import else row.get("overall_score", "-")
             self.output(f"{number}) model={row.get('model_name', '')!r}, benchmark={row.get('benchmark_file', '') if not summary_import else 'summary'!r}, score={score!r}, hallucination={row.get('hallucination_level', '-')!r}, reliability={row.get('reliability_level', '-')!r}, notes={row.get('notes', '')[:50]!r}")
@@ -464,7 +537,7 @@ class TerminalApp:
             batch_name = self.ask("Optional scoreboard import batch name (blank uses filename and import date)", navigation=True)
             if batch_name in (BACK, CANCEL, MAIN): return
             try:
-                result = self.importer.import_scoreboard_entries(preview.rows, str(path), str(batch_name) or None)
+                result = self.importer.import_scoreboard_entries(preview.rows, str(path), str(batch_name) or None, row_numbers=preview.row_numbers)
                 self.output(f"Imported {result.imported} scoreboard entry row(s).")
             except ValueError as error:
                 self.output(f"Import cancelled: {error}. No rows were written.")
@@ -485,16 +558,26 @@ class TerminalApp:
             self.output(f"Import cancelled: {error}. No rows were written.")
 
     def export_screen(self) -> None:
-        choice = self.ask("Export: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) JSONL training data  4) Markdown report", navigation=True)
+        choice = self.ask("Export: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) JSONL training data  4) Markdown report  5) Scoreboard HTML", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
-        exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown)}
+        exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
         selected = exporters.get(self.normalized(str(choice)))
-        if not selected: self.output("Choose 1, 2, 3, or 4."); return
+        if not selected: self.output("Choose 1, 2, 3, 4, or 5."); return
         path = self.ask(f"Destination for {selected[0]}", navigation=True)
         if path in (BACK, CANCEL, MAIN): return
         exporter = selected[1]
-        saved = exporter(self.catalog if selected[0] == "Scoreboard CSV" else self.benchmarks, str(path)) if selected[0] != "Markdown report" else exporter(self.benchmarks, self.catalog, str(path))
+        if selected[0] == "Markdown report":
+            saved = exporter(self.benchmarks, self.catalog, str(path))
+        elif selected[0] in {"Scoreboard CSV", "Scoreboard HTML"}:
+            saved = exporter(self.catalog, str(path))
+        else:
+            saved = exporter(self.benchmarks, str(path))
         self.output(f"Exported {selected[0]} to {saved}.")
+        if selected[0] == "Scoreboard HTML" and self.yes_no("Open HTML report in browser?", navigation=True) is True:
+            try:
+                webbrowser.open(Path(saved).resolve().as_uri())
+            except OSError as error:
+                self.output(f"Could not open HTML report: {error}")
 
     def help(self) -> None:
         self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
@@ -502,6 +585,7 @@ class TerminalApp:
 
     def show_main_menu(self) -> None:
         runs = len(self.benchmarks.runs.list())
+        scoreboard_entries = len(self.catalog.scoreboard_entries.list())
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
@@ -510,10 +594,10 @@ class TerminalApp:
         self.output("Local LLM Benchmark Recorder".center(MENU_WIDTH))
         self.output(f"Version {APP_VERSION}".center(MENU_WIDTH))
         self.output(f"{border}\n")
-        self.output(f"Database : {database_name}\nRuns     : {runs}\nModels   : {models}\nSessions : {sessions}\nVersion  : {APP_VERSION}\n")
+        self.output(f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\nVersion  : {APP_VERSION}\n")
         self.output(" Runs\n ----\n 1) Add Run\n 2) List Runs\n 3) View Run\n 4) Edit Run\n 5) Delete Run\n")
         self.output(" Reference Data\n --------------\n 6) Sessions\n 7) Models\n 8) Benchmarks\n 9) Prompt Templates\n10) Hardware Profiles\n")
-        self.output(" Data\n ----\n11) Import\n12) Export\n")
+        self.output(" Data\n ----\n11) Import\n12) Export\n13) Scoreboard\n")
         self.output(" Help\n ----\nH) Help\nS) Settings\nQ) Quit\n")
         self.output(border)
 
@@ -527,6 +611,7 @@ class TerminalApp:
             "9": "prompts", "prompt": "prompts", "prompts": "prompts", "template": "prompts",
             "10": "hardware", "hardware": "hardware",
             "11": "import", "import": "import", "12": "export", "export": "export",
+            "13": "scoreboard", "scoreboard": "scoreboard",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -550,6 +635,7 @@ class TerminalApp:
                 elif command == "hardware": self.catalog_screen("Hardware Profiles", self.catalog.hardware_profiles, self.create_hardware_profile)
                 elif command == "import": self.import_screen()
                 elif command == "export": self.export_screen()
+                elif command == "scoreboard": self.scoreboard_screen()
                 elif command == "settings": self.not_available("Settings", "a future phase")
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")
