@@ -51,6 +51,7 @@ class RestoreReport:
 class ArchiveService:
     def __init__(self, database: EngineDatabase):
         self.database = database
+        self.last_restore_report: RestoreReport | None = None
 
     def build_archive(self, benchpup_version: str) -> dict[str, Any]:
         with self.database.connection() as connection:
@@ -111,10 +112,15 @@ class ArchiveService:
 
     def preview(self, archive: dict[str, Any]) -> dict[str, Any]:
         self.validate(archive)
+        metadata_counts = archive.get("counts", {})
         return {
             "created_at": archive.get("created_at", ""), "benchpup_version": archive.get("benchpup_version", ""),
             "archive_version": archive["archive_version"], "schema_version": archive.get("schema_version", ""),
-            "counts": {table: len(archive["data"].get(table, [])) for table in TABLES},
+            "counts": {
+                table: metadata_counts[table] if isinstance(metadata_counts.get(table), int)
+                else len(archive["data"].get(table, []))
+                for table in TABLES
+            },
             "warnings": [f"{table} missing; treating as empty" for table in TABLES if table not in archive["data"]],
         }
 
@@ -176,6 +182,7 @@ class ArchiveService:
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise ArchiveError("Restored archive contains invalid relationships")
+        self.last_restore_report = report
         return report
 
     def replace(self, archive: dict[str, Any], benchpup_version: str) -> Path:
@@ -188,7 +195,8 @@ class ArchiveService:
         try:
             restored_database = EngineDatabase(temporary)
             restored_database.migrate()
-            ArchiveService(restored_database).merge(archive)
+            temporary_service = ArchiveService(restored_database)
+            self.last_restore_report = temporary_service.merge(archive)
             restored_database.migrate()
             with restored_database.connection() as connection:
                 if connection.execute("PRAGMA foreign_key_check").fetchone():

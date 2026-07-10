@@ -207,7 +207,17 @@ class CliPolishTests(unittest.TestCase):
         app.input = lambda _: next(answers)
         app.restore_data()
         self.assertEqual(app.benchmarks.runs.list(), [])
-        self.assertTrue(any("Archive created:" in line for line in output))
+        self.assertTrue(any("Restore Archive" in line for line in output))
+        self.assertTrue(any("Backup completed successfully" in line for line in output))
+
+    def test_backup_default_creates_project_backups_folder(self):
+        directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)
+        answers = iter([""])
+        app = TerminalApp(Path(directory.name) / "data" / "benchmarks.db", input_fn=lambda _: next(answers), output_fn=lambda _: None)
+        self.addCleanup(lambda: [handler.close() for handler in app.logger.handlers])
+        app.backup_data()
+        backups = Path(directory.name) / "backups"
+        self.assertEqual(len(list(backups.glob("benchpup-backup-*.json"))), 1)
 
     def test_export_creates_missing_parent_after_confirmation_and_shows_final_path(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)

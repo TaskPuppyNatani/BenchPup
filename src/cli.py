@@ -39,8 +39,15 @@ class AttachmentDraft(TypedDict):
 BACK_WORDS = {"b", "back"}
 CANCEL_WORDS = {"c", "cancel"}
 QUIT_WORDS = {"q", "quit", "exit"}
-APP_VERSION = "0.3.5-Alpha"
+APP_VERSION = "0.3.7-Alpha"
 MENU_WIDTH = 56
+ARCHIVE_LABELS = {
+    "benchmark_sessions": "Sessions", "model_profiles": "Models", "hardware_profiles": "Hardware Profiles",
+    "benchmark_definitions": "Benchmark Definitions", "prompt_templates": "Prompt Templates",
+    "benchmark_runs": "Benchmark Runs", "review_scores": "Review Scores", "run_attachments": "Attachments",
+    "scoreboard_import_batches": "Scoreboard Batches", "scoreboard_entries": "Scoreboard Entries",
+    "export_profiles": "Export Profiles",
+}
 
 
 class TerminalApp:
@@ -822,7 +829,13 @@ class TerminalApp:
                 self.output(f"Could not open HTML report: {error}")
 
     def backup_data(self) -> None:
-        default = self.benchmarks.database.path.parent / f"benchpup-backup-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.json"
+        backup_directory = self.benchmarks.database.path.parent.parent / "backups"
+        try:
+            backup_directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            self.output(f"Backup failed: could not create backups folder: {error}")
+            return
+        default = backup_directory / f"benchpup-backup-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.json"
         path = self.prompt_path("Backup destination", default=str(default), preserve_trailing_separator=True)
         if not isinstance(path, str):
             return
@@ -834,8 +847,13 @@ class TerminalApp:
         try:
             saved = self.archives.export(output_path, APP_VERSION)
             preview = self.archives.preview(self.archives.load(saved))
-            self.output(f"Backup archive v{preview['archive_version']} schema v{preview['schema_version']} written to {saved}")
-            self.output("Record counts: " + ", ".join(f"{table}={count}" for table, count in preview["counts"].items()))
+            self.output("\n✓ Backup completed successfully\n")
+            self.output(f"Location:\n{saved}\n")
+            self.output(f"Archive Version: {preview['archive_version']}")
+            self.output(f"Schema Version: {preview['schema_version']}")
+            self.output(f"BenchPup Version: {preview['benchpup_version']}")
+            self.output(f"Archive Size: {self._format_file_size(saved.stat().st_size)}")
+            self._show_archive_counts(preview["counts"])
         except ArchiveError as error:
             self.output(f"Backup failed: {error}")
 
@@ -849,8 +867,12 @@ class TerminalApp:
         except ArchiveError as error:
             self.output(f"Restore cancelled: {error}")
             return
-        self.output(f"Archive created: {preview['created_at']} | BenchPup: {preview['benchpup_version']} | archive v{preview['archive_version']} | schema v{preview['schema_version']}")
-        self.output("Record counts: " + ", ".join(f"{table}={count}" for table, count in preview["counts"].items()))
+        self.output("\nRestore Archive\n---------------")
+        self.output(f"Created: {preview['created_at']}")
+        self.output(f"BenchPup Version: {preview['benchpup_version']}")
+        self.output(f"Archive Version: {preview['archive_version']}")
+        self.output(f"Schema Version: {preview['schema_version']}")
+        self._show_archive_counts(preview["counts"])
         for warning in preview["warnings"]:
             self.output(f"Warning: {warning}")
         action = self.ask("1) Preview only  2) Merge into current database  3) Replace current database  C) Cancel", navigation=True)
@@ -859,22 +881,43 @@ class TerminalApp:
         try:
             if action == "2":
                 report = self.archives.merge(archive)
-                self.output("Merge complete: " + ", ".join(
-                    f"{table} created={report.created[table]} skipped={report.skipped[table]} updated={report.updated[table]} failed={report.failed[table]}"
-                    for table in TABLES
-                ))
+                self._show_restore_summary("Merge", report)
             elif action == "3":
                 confirmation = self.ask("Type RESTORE to replace the current database", navigation=True)
                 if confirmation != "RESTORE":
                     self.output("Replace restore cancelled.")
                     return
                 safety = self.archives.replace(archive, APP_VERSION)
-                self.output(f"Replace restore complete. Safety backup: {safety}")
+                self._show_restore_summary("Replace", self.archives.last_restore_report, safety)
             else:
                 self.output("Choose 1, 2, 3, or C.")
         except ArchiveError as error:
             self.logger.exception("Archive restore failed")
             self.output(f"Restore failed; no partial changes were written: {error}")
+
+    @staticmethod
+    def _format_file_size(size: int) -> str:
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / (1024 * 1024):.1f} MB"
+
+    def _show_archive_counts(self, counts: Mapping[str, int]) -> None:
+        self.output("\nContents")
+        for table in TABLES:
+            self.output(f"{ARCHIVE_LABELS[table]:.<26}{counts.get(table, 0):>6}")
+
+    def _show_restore_summary(self, mode: str, report, safety_backup: Path | None = None) -> None:
+        assert report is not None
+        self.output("\n✓ Restore completed successfully\n")
+        self.output(f"Mode: {mode}\n")
+        self.output(f"{'Entity':<26}{'Created':>8}{'Skipped':>8}{'Updated':>8}{'Failed':>8}")
+        for table in TABLES:
+            self.output(
+                f"{ARCHIVE_LABELS[table]:<26}{report.created[table]:>8}{report.skipped[table]:>8}"
+                f"{report.updated[table]:>8}{report.failed[table]:>8}"
+            )
+        if safety_backup:
+            self.output(f"\nSafety backup created:\n{safety_backup}")
 
     def help(self) -> None:
         self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
