@@ -194,7 +194,7 @@ class CsvImportService:
                         continue
                 rows.append(row)
                 row_numbers.append(row_number)
-        return ImportPreview(headings, resolved, rows, unknown, row_numbers, skipped_rows)
+        return ImportPreview(list(headings), resolved, rows, unknown, row_numbers, skipped_rows)
 
     def mapping_profiles(self) -> list[tuple[int, str, dict[str, str | None]]]:
         with self.benchmarks.database.connection() as connection:
@@ -288,7 +288,9 @@ class CsvImportService:
                 columns = self.benchmarks.runs.columns
                 cursor = connection.execute(f"INSERT INTO benchmark_runs ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})", [values[column] for column in columns])
                 if score:
-                    score.run_id = cursor.lastrowid
+                    run_id = cursor.lastrowid
+                    assert run_id is not None, "Benchmark run insert did not return an ID"
+                    score.run_id = run_id
                     score_values = self.benchmarks.scores._values(score)
                     score_columns = self.benchmarks.scores.columns
                     connection.execute(f"INSERT INTO review_scores ({', '.join(score_columns)}) VALUES ({', '.join('?' for _ in score_columns)})", [score_values[column] for column in score_columns])

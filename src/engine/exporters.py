@@ -13,7 +13,9 @@ def export_benchmark_runs_csv(service: BenchmarkService, path: str | Path) -> Pa
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     rows = []
     for run in service.runs.list():
-        _, score, _ = service.get_run(run.id)
+        run_id = run.id
+        assert run_id is not None, "Persisted benchmark run is missing its ID"
+        _, score, _ = service.get_run(run_id)
         rows.append({**run.model_snapshot, **run.benchmark_snapshot, "prompt_name": run.prompt_name,
                      "prompt_text": run.prompt_text, "raw_model_output": run.raw_model_output,
                      **({key: value for key, value in score.__dict__.items() if key not in {"id", "run_id"}} if score else {})})
@@ -73,8 +75,16 @@ def export_scoreboard_html(catalog: CatalogService, path: str | Path) -> Path:
         values = sorted({str(record[field]) for record in records if record[field] not in (None, "")})
         return "".join(f'<option value="{text(value)}">{text(value)}</option>' for value in values)
 
-    scores = [(numeric(record["score"]), record["model_name"]) for record in records if numeric(record["score"]) is not None]
-    speeds = [(numeric(record["tokens_per_second"]), record["model_name"]) for record in records if numeric(record["tokens_per_second"]) is not None]
+    scores: list[tuple[float, str]] = []
+    speeds: list[tuple[float, str]] = []
+    for record in records:
+        model_name = str(record["model_name"])
+        score = numeric(record["score"])
+        speed = numeric(record["tokens_per_second"])
+        if score is not None:
+            scores.append((score, model_name))
+        if speed is not None:
+            speeds.append((speed, model_name))
     highest = max(scores, default=(None, "-"))
     fastest = max(speeds, default=(None, "-"))
     average_score = sum(score for score, _ in scores) / len(scores) if scores else None
@@ -253,7 +263,9 @@ def export_jsonl_training_data(service: BenchmarkService, path: str | Path) -> P
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as output:
         for run in service.runs.list():
-            _, score, _ = service.get_run(run.id)
+            run_id = run.id
+            assert run_id is not None, "Persisted benchmark run is missing its ID"
+            _, score, _ = service.get_run(run_id)
             output.write(json.dumps({"instruction": "Review this model output and evaluate its quality.", "input": {"model": run.model_snapshot.get("model_name", ""), "benchmark_file": run.benchmark_snapshot.get("benchmark_file", ""), "prompt": run.prompt_text, "raw_model_output": run.raw_model_output}, "response": {"overall": score.overall_score if score else None, "verdict": score.verdict if score else ""}}) + "\n")
     return path
 
