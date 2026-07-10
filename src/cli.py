@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import replace
+from pathlib import Path
+from typing import Callable
+
+from engine.database import EngineDatabase
+from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment
+from engine.services import BenchmarkService, CatalogService
+
+BACK, CANCEL, MAIN = object(), object(), object()
+BACK_WORDS = {"b", "back"}
+CANCEL_WORDS = {"c", "cancel"}
+QUIT_WORDS = {"q", "quit", "exit"}
+APP_VERSION = "0.2 Alpha"
+MENU_WIDTH = 56
+
+
+class TerminalApp:
+    """A forgiving terminal interface over the Phase 1 service layer."""
+    def __init__(self, database_path: str | Path, input_fn: Callable[[str], str] = input, output_fn: Callable[[str], None] = print):
+        database = EngineDatabase(database_path)
+        database.migrate()
+        self.catalog = CatalogService(database)
+        self.benchmarks = BenchmarkService(database, self.catalog)
+        self.input, self.output = input_fn, output_fn
+        self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
+        log_path = Path(database_path).parent.parent / "logs" / "error.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.logger = logging.getLogger(f"llm_benchmarker.{id(self)}")
+        self.logger.setLevel(logging.ERROR)
+        self.logger.addHandler(logging.FileHandler(log_path, encoding="utf-8"))
+
+    @staticmethod
+    def normalized(value: str) -> str:
+        return value.strip().lower()
+
+    def ask(self, label: str, *, navigation: bool = False, default: str | None = None) -> str | object:
+        suffix = f" [{default}]" if default not in (None, "") else ""
+        try:
+            raw = self.input(f"{label}{suffix}: ")
+        except KeyboardInterrupt:
+            self.output("\nReturning to the main menu.")
+            return MAIN
+        value = raw.strip()
+        command = value.lower()
+        if navigation:
+            if command in BACK_WORDS: return BACK
+            if command in CANCEL_WORDS: return CANCEL
+            if command in QUIT_WORDS: return MAIN
+        return default if value == "" and default is not None else value
+
+    def pause(self) -> None:
+        try: self.input("Press Enter to continue...")
+        except KeyboardInterrupt: self.output("")
+
+    def ask_float(self, label: str, *, default: float | None = None, navigation: bool = False) -> float | None | object:
+        while True:
+            value = self.ask(label, navigation=navigation, default=str(default) if default is not None else None)
+            if value in (BACK, CANCEL, MAIN): return value
+            if value == "": return None
+            try: return float(value)
+            except (TypeError, ValueError): self.output(f'"{value}" is not a valid number. Please enter a number or leave it blank.')
+
+    def ask_id(self, label: str = "Run ID", *, navigation: bool = True) -> int | object:
+        while True:
+            value = self.ask(label, navigation=navigation)
+            if value in (BACK, CANCEL, MAIN): return value
+            if isinstance(value, str) and value.isdigit() and int(value) > 0: return int(value)
+            self.output(f'"{value}" is not a valid {label}. Please enter a numeric ID or B to go back.')
+
+    def pick(self, label: str, choices: tuple[str, ...], default: str, *, navigation: bool = False) -> str | object:
+        lookup = {item.lower(): item for item in choices}
+        while True:
+            value = self.ask(f"{label} [{'/'.join(choices)}]", navigation=navigation, default=default)
+            if value in (BACK, CANCEL, MAIN): return value
+            selected = lookup.get(str(value).lower())
+            if selected: return selected
+            self.output("Choose one of the listed values.")
+
+    def yes_no(self, label: str, *, default: bool = False, navigation: bool = False) -> bool | object:
+        hint = "Y/n" if default else "y/N"
+        while True:
+            value = self.ask(f"{label} [{hint}]", navigation=navigation)
+            if value in (BACK, CANCEL, MAIN): return value
+            command = str(value).lower()
+            if not command: return default
+            if command in {"y", "yes"}: return True
+            if command in {"n", "no"}: return False
+            self.output("Please answer yes or no.")
+
+    def _form(self, fields: list[tuple[str, str, str | float | None, str]]) -> dict | object:
+        """Collect simple text/number fields; navigation works from every prompt."""
+        values = {}
+        for name, label, default, kind in fields:
+            value = self.ask_float(label, default=default, navigation=True) if kind == "float" else self.ask(label, navigation=True, default=default if isinstance(default, str) else None)
+            if value in (BACK, CANCEL, MAIN): return value
+            values[name] = value
+        return values
+
+    def choose_catalog(self, title: str, repository, create, key: str, *, optional: bool, current_id: int | None = None) -> int | None | object:
+        while True:
+            items = repository.list()
+            self.output(f"\n{title}")
+            for item in items: self.output(f"{item.id}) {item.name if hasattr(item, 'name') else item.title}")
+            suggested = current_id or self.last_used[key]
+            options = "N) Create new  B) Back  C) Cancel  Q) Main menu"
+            if suggested: options += f"  Enter) Use #{suggested}"
+            elif optional: options += "  Enter) None"
+            value = self.ask(options, navigation=True)
+            if value is BACK: return BACK
+            if value is CANCEL: return CANCEL
+            if value is MAIN: return MAIN
+            if value == "" and suggested and repository.get(suggested): return suggested
+            if value == "" and optional: return None
+            if isinstance(value, str) and value.lower() == "n":
+                created = create()
+                if created in (BACK, CANCEL, MAIN): return created
+                if created: self.last_used[key] = created.id; return created.id
+                continue
+            if isinstance(value, str) and value.isdigit() and repository.get(int(value)):
+                self.last_used[key] = int(value); return int(value)
+            self.output("Choose a listed numeric ID, N to create, or B to go back.")
+
+    def create_session(self) -> BenchmarkSession | object | None:
+        values = self._form([("title", "Session title", None, "text"), ("description", "Description", "", "text"), ("started_at", "Started at (ISO, optional)", "", "text"), ("completed_at", "Completed at (ISO, optional)", "", "text"), ("notes", "Notes", "", "text")])
+        if values in (BACK, CANCEL, MAIN): return values
+        if not values["title"]: self.output("A session title is required."); return None
+        return self.catalog.sessions.create(BenchmarkSession(**values, started_at=values["started_at"] or None, completed_at=values["completed_at"] or None))
+
+    def create_model_profile(self) -> ModelProfile | object | None:
+        values = self._form([("name", "Profile name", None, "text"), ("model_name", "Model name", None, "text"), ("backend", "Backend", "Other", "text"), ("model_family", "Model family", "", "text"), ("model_size", "Model size", "", "text"), ("quantization", "Quantization", "", "text"), ("temperature", "Temperature", None, "float"), ("tokens_per_second", "Tokens per second", None, "float")])
+        if values in (BACK, CANCEL, MAIN): return values
+        if not values["name"] or not values["model_name"]: self.output("Profile name and model name are required."); return None
+        return self.catalog.model_profiles.create(ModelProfile(**values))
+
+    def create_definition(self) -> BenchmarkDefinition | object | None:
+        values = self._form([("name", "Benchmark name", None, "text"), ("file_path", "Benchmark file path", None, "text")])
+        if values in (BACK, CANCEL, MAIN): return values
+        if not values["name"] or not values["file_path"]: self.output("Benchmark name and file path are required."); return None
+        benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
+        if benchmark_type in (BACK, CANCEL, MAIN): return benchmark_type
+        rest = self._form([("default_prompt", "Default prompt (optional)", "", "text"), ("tags", "Tags (optional)", "", "text")])
+        if rest in (BACK, CANCEL, MAIN): return rest
+        return self.catalog.benchmark_definitions.create(BenchmarkDefinition(**values, benchmark_type=benchmark_type, **rest))
+
+    def create_prompt_template(self) -> PromptTemplate | object | None:
+        values = self._form([("name", "Prompt template name", None, "text"), ("version", "Prompt version", None, "text"), ("prompt_text", "Prompt text", None, "text")])
+        if values in (BACK, CANCEL, MAIN): return values
+        if not all(values.values()): self.output("Template name, version, and prompt text are required."); return None
+        benchmark_type = self.pick("Benchmark type", BENCHMARK_TYPES, "code_review", navigation=True)
+        if benchmark_type in (BACK, CANCEL, MAIN): return benchmark_type
+        notes = self.ask("Notes", navigation=True, default="")
+        if notes in (BACK, CANCEL, MAIN): return notes
+        return self.catalog.prompt_templates.create(PromptTemplate(**values, prompt_hash=hashlib.sha256(values["prompt_text"].encode("utf-8")).hexdigest(), benchmark_type=benchmark_type, notes=notes))
+
+    def create_hardware_profile(self) -> HardwareProfile | object | None:
+        values = self._form([("name", "Hardware profile name", None, "text"), ("cpu", "CPU", "", "text"), ("gpu", "GPU", "", "text"), ("vram_gb", "VRAM GB", None, "float"), ("ram_gb", "RAM GB", None, "float"), ("operating_system", "Operating system", "", "text"), ("versions", "Backend versions (LM Studio=0.3, optional)", "", "text"), ("notes", "Notes", "", "text")])
+        if values in (BACK, CANCEL, MAIN): return values
+        if not values["name"]: self.output("A hardware profile name is required."); return None
+        versions = {part.split("=", 1)[0].strip(): part.split("=", 1)[1].strip() for part in values.pop("versions").split(",") if "=" in part}
+        return self.catalog.hardware_profiles.create(HardwareProfile(**values, backend_versions=versions))
+
+    def collect_score(self, current: ReviewScore | None = None) -> ReviewScore | object:
+        self.output("\nReview score (B=back, C=cancel, Q=main menu)")
+        accuracy = self.ask_float("Accuracy score (0-5)", default=current.accuracy_score if current else None, navigation=True)
+        if accuracy in (BACK, CANCEL, MAIN): return accuracy
+        hallucination = self.pick("Hallucination level", LEVELS, current.hallucination_level if current else "Medium", navigation=True)
+        reliability = self.pick("Reliability level", LEVELS, current.reliability_level if current else "Medium", navigation=True)
+        if hallucination in (BACK, CANCEL, MAIN) or reliability in (BACK, CANCEL, MAIN): return hallucination if hallucination in (BACK, CANCEL, MAIN) else reliability
+        values = self._form([("depth_score", "Depth score (0-5)", current.depth_score if current else None, "float"), ("signal_noise_score", "Signal/noise score (0-5)", current.signal_noise_score if current else None, "float"), ("actionability_score", "Actionability score (0-5)", current.actionability_score if current else None, "float"), ("seniority_score", "Seniority score (0-5)", current.seniority_score if current else None, "float"), ("overall_score", "Overall score (0-5)", current.overall_score if current else None, "float"), ("strengths", "Strengths", current.strengths if current else "", "text"), ("weaknesses", "Weaknesses", current.weaknesses if current else "", "text"), ("verdict", "Verdict", current.verdict if current else "", "text"), ("notes", "Notes", current.notes if current else "", "text")])
+        if values in (BACK, CANCEL, MAIN): return values
+        return ReviewScore(run_id=current.run_id if current else 0, id=current.id if current else None, accuracy_score=accuracy, hallucination_level=hallucination, reliability_level=reliability, **values)
+
+    def collect_attachments(self, draft: list[dict]) -> object | None:
+        while True:
+            answer = self.yes_no("Add attachment metadata", navigation=True)
+            if answer in (BACK, CANCEL, MAIN): return answer
+            if not answer: return None
+            attachment_type = self.pick("Attachment type", ATTACHMENT_TYPES, "other", navigation=True)
+            if attachment_type in (BACK, CANCEL, MAIN): return attachment_type
+            values = self._form([("file_path", "File path", None, "text"), ("original_filename", "Original filename", None, "text"), ("notes", "Attachment notes", "", "text")])
+            if values in (BACK, CANCEL, MAIN): return values
+            if not values["file_path"] or not values["original_filename"]: self.output("File path and filename are required."); continue
+            draft.append({"attachment_type": attachment_type, **values})
+
+    def add_run_wizard(self) -> None:
+        state: dict = {"attachments": []}
+        steps = [
+            ("session_id", lambda: self.choose_catalog("Session", self.catalog.sessions, self.create_session, "session", optional=True, current_id=state.get("session_id"))),
+            ("model_profile_id", lambda: self.choose_catalog("Model profile", self.catalog.model_profiles, self.create_model_profile, "model", optional=False, current_id=state.get("model_profile_id"))),
+            ("benchmark_definition_id", lambda: self.choose_catalog("Benchmark definition", self.catalog.benchmark_definitions, self.create_definition, "benchmark", optional=False, current_id=state.get("benchmark_definition_id"))),
+            ("prompt_template_id", lambda: self.choose_catalog("Prompt template", self.catalog.prompt_templates, self.create_prompt_template, "prompt", optional=False, current_id=state.get("prompt_template_id"))),
+            ("hardware_profile_id", lambda: self.choose_catalog("Hardware profile", self.catalog.hardware_profiles, self.create_hardware_profile, "hardware", optional=True, current_id=state.get("hardware_profile_id"))),
+            ("raw_model_output", lambda: self.ask("Raw model output", navigation=True, default=state.get("raw_model_output", ""))),
+            ("score", lambda: self.collect_score(state.get("score"))),
+            ("attachments", lambda: self.attachment_step(state["attachments"])),
+        ]
+        index = 0
+        while index < len(steps):
+            key, action = steps[index]; value = action()
+            if value is MAIN or value is CANCEL: self.output("Wizard cancelled."); return
+            if value is BACK: index = max(0, index - 1); continue
+            state[key] = value; index += 1
+        self.review_and_save(state, steps)
+
+    def attachment_step(self, draft: list[dict]) -> list[dict] | object:
+        result = self.collect_attachments(draft)
+        return draft if result is None else result
+
+    def review_and_save(self, state: dict, steps: list) -> None:
+        while True:
+            self.show_draft(state)
+            selected = self.ask("S) Save  E) Edit  C) Cancel  Q) Main menu", navigation=True)
+            if selected in (CANCEL, MAIN): self.output("Wizard cancelled."); return
+            if selected is BACK: continue
+            choice = self.normalized(str(selected))
+            if choice in {"s", "save"}:
+                try:
+                    template = self.catalog.prompt_templates.get(state["prompt_template_id"])
+                    run = BenchmarkRun(raw_model_output=state["raw_model_output"], prompt_name=template.name, session_id=state["session_id"], model_profile_id=state["model_profile_id"], benchmark_definition_id=state["benchmark_definition_id"], prompt_template_id=state["prompt_template_id"], hardware_profile_id=state["hardware_profile_id"])
+                    saved, _ = self.benchmarks.save_run(run, state["score"])
+                    for attachment in state["attachments"]: self.benchmarks.add_attachment(RunAttachment(run_id=saved.id, **attachment))
+                    self.output("✓ Benchmark saved."); return
+                except ValueError: self.output("The benchmark could not be saved. Check the entered values and try again.")
+            elif choice in {"e", "edit"}:
+                section = self.ask_id("Section number", navigation=True)
+                if section in (CANCEL, MAIN): return
+                if section is BACK: continue
+                if not 1 <= section <= len(steps): self.output("Choose a section from 1 to 8."); continue
+                index = section - 1
+                while index < len(steps):
+                    key, action = steps[index]; value = action()
+                    if value in (CANCEL, MAIN): return
+                    if value is BACK: index = max(0, index - 1); continue
+                    state[key] = value; index += 1
+            elif choice in {"", "c", "cancel"}: self.output("Wizard cancelled."); return
+            else: self.output("Choose Save, Edit, Cancel, or Main menu.")
+
+    def show_draft(self, state: dict) -> None:
+        model = self.catalog.model_profiles.get(state["model_profile_id"])
+        definition = self.catalog.benchmark_definitions.get(state["benchmark_definition_id"])
+        template = self.catalog.prompt_templates.get(state["prompt_template_id"])
+        self.output("\nReview benchmark run")
+        self.output(f"Model: {model.name} | Benchmark: {definition.name} | Prompt: {template.name} v{template.version}")
+        self.output(f"Raw output: {state['raw_model_output'][:120]}")
+        self.output(f"Attachments: {len(state['attachments'])} | Overall score: {state['score'].overall_score}")
+
+    def list_runs(self) -> None:
+        runs = self.benchmarks.runs.list()
+        if not runs: self.output("No benchmark runs found."); self.pause(); return
+        for run in runs:
+            score = self.benchmarks.get_run(run.id)[1]
+            self.output(f"#{run.id} | {run.model_snapshot.get('model_name', 'Unknown')} | {run.benchmark_snapshot.get('name') or run.benchmark_snapshot.get('file_path', 'Unknown')} | overall={score.overall_score if score else '-'}")
+        self.pause()
+
+    def view_run(self, run_id: int) -> None:
+        run, score, attachments = self.benchmarks.get_run(run_id)
+        if not run: self.output("Run not found."); self.pause(); return
+        self.output(f"\nRun #{run.id}\nRaw model output:\n{run.raw_model_output}")
+        self.output("\nSnapshots:\n" + json.dumps({"model": run.model_snapshot, "benchmark": run.benchmark_snapshot, "prompt": run.prompt_snapshot, "hardware": run.hardware_snapshot}, indent=2))
+        self.output("\nReview:\n" + (json.dumps(score.__dict__, indent=2) if score else "No review score."))
+        if attachments: self.output("Attachments:\n" + "\n".join(f"- {a.attachment_type}: {a.file_path}" for a in attachments))
+        self.pause()
+
+    def edit_run(self, run_id: int) -> None:
+        run, score, _ = self.benchmarks.get_run(run_id)
+        if not run: self.output("Run not found."); self.pause(); return
+        while True:
+            selected = self.ask("Edit: 1) Output  2) Prompt  3) Score  4) Attachment  B) Back", navigation=True)
+            if selected in (CANCEL, MAIN): return
+            if selected is BACK: return
+            choice = self.normalized(str(selected))
+            if choice in {"b", "back", "q", "quit", "exit"}: return
+            if choice in {"1", "output"}:
+                value = self.ask("Raw model output", navigation=True, default=run.raw_model_output)
+                if value in (CANCEL, MAIN, BACK): continue
+                run = self.benchmarks.update_run(replace(run, raw_model_output=value)); self.output("✓ Run updated.")
+            elif choice in {"2", "prompt"}:
+                value = self.ask("Prompt text", navigation=True, default=run.prompt_text)
+                if value in (CANCEL, MAIN, BACK): continue
+                run = self.benchmarks.update_run(replace(run, prompt_text=value)); self.output("✓ Run updated.")
+            elif choice in {"3", "score"}:
+                new_score = self.collect_score(score)
+                if new_score not in (BACK, CANCEL, MAIN): score = self.benchmarks.update_score(new_score) if score else self.benchmarks.scores.create(replace(new_score, run_id=run.id)); self.output("✓ Review score updated.")
+            elif choice in {"4", "attachment"}: self.collect_attachments_after_save(run.id)
+            else: self.output("Choose output, prompt, score, attachment, or back.")
+
+    def collect_attachments_after_save(self, run_id: int) -> None:
+        draft: list[dict] = []
+        result = self.collect_attachments(draft)
+        if result is None:
+            for attachment in draft: self.benchmarks.add_attachment(RunAttachment(run_id=run_id, **attachment))
+            if draft: self.output("✓ Attachment metadata saved.")
+
+    def delete_run(self, run_id: int) -> None:
+        run, _, _ = self.benchmarks.get_run(run_id)
+        if not run: self.output("Run not found."); self.pause(); return
+        self.output(f"Delete benchmark #{run.id}?\nModel: {run.model_snapshot.get('model_name', 'Unknown')}\nBenchmark: {run.benchmark_snapshot.get('file_path', 'Unknown')}")
+        confirmation = self.ask("Type DELETE to confirm", navigation=True)
+        if confirmation in (BACK, CANCEL, MAIN) or str(confirmation).upper() != "DELETE": self.output("Delete cancelled."); return
+        self.benchmarks.delete_run(run_id); self.output("✓ Run deleted.")
+
+    def catalog_screen(self, title: str, repository, create) -> None:
+        """A small, focused catalog screen for one reusable record type."""
+        while True:
+            self.output(f"\n{title}\n{'-' * len(title)}")
+            items = repository.list()
+            if items:
+                for item in items: self.output(f"{item.id}) {item.name if hasattr(item, 'name') else item.title}")
+            else:
+                self.output("No records found.")
+            choice = self.ask("N) New  B) Back", navigation=True)
+            if choice in (BACK, CANCEL, MAIN): return
+            if self.normalized(str(choice)) not in {"n", "new"}:
+                self.output("Choose N to create a record or B to return.")
+                continue
+            try:
+                item = create()
+                if item not in (BACK, CANCEL, MAIN, None): self.output(f"✓ {type(item).__name__} created.")
+            except ValueError:
+                self.output("The record could not be created. Check the entered values and try again.")
+
+    def not_available(self, name: str, phase: str) -> None:
+        self.output(f"{name} will be available in {phase}.")
+        self.pause()
+
+    def help(self) -> None:
+        self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
+        self.pause()
+
+    def show_main_menu(self) -> None:
+        runs = len(self.benchmarks.runs.list())
+        models = len(self.catalog.model_profiles.list())
+        sessions = len(self.catalog.sessions.list())
+        database_name = self.benchmarks.database.path.name
+        border = "=" * MENU_WIDTH
+        self.output(f"\n{border}")
+        self.output("Local LLM Benchmark Recorder".center(MENU_WIDTH))
+        self.output(f"Version {APP_VERSION}".center(MENU_WIDTH))
+        self.output(f"{border}\n")
+        self.output(f"Database : {database_name}\nRuns     : {runs}\nModels   : {models}\nSessions : {sessions}\nVersion  : {APP_VERSION}\n")
+        self.output(" Runs\n ----\n 1) Add Run\n 2) List Runs\n 3) View Run\n 4) Edit Run\n 5) Delete Run\n")
+        self.output(" Reference Data\n --------------\n 6) Sessions\n 7) Models\n 8) Benchmarks\n 9) Prompt Templates\n10) Hardware Profiles\n")
+        self.output(" Data\n ----\n11) Import\n12) Export\n")
+        self.output(" Help\n ----\nH) Help\nS) Settings\nQ) Quit\n")
+        self.output(border)
+
+    def run(self) -> None:
+        commands = {
+            "1": "add", "add": "add", "2": "list", "list": "list", "3": "view", "view": "view",
+            "4": "edit", "edit": "edit", "5": "delete", "delete": "delete",
+            "6": "sessions", "session": "sessions", "sessions": "sessions",
+            "7": "models", "model": "models", "models": "models", "profile": "models",
+            "8": "benchmarks", "benchmark": "benchmarks", "benchmarks": "benchmarks", "definition": "benchmarks",
+            "9": "prompts", "prompt": "prompts", "prompts": "prompts", "template": "prompts",
+            "10": "hardware", "hardware": "hardware",
+            "11": "import", "import": "import", "12": "export", "export": "export",
+            "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
+        }
+        while True:
+            self.show_main_menu()
+            raw = self.ask("Choose an option")
+            command = self.normalized(str(raw))
+            if command in QUIT_WORDS: return
+            command = commands.get(command)
+            try:
+                if command == "add": self.add_run_wizard()
+                elif command == "list": self.list_runs()
+                elif command in {"view", "edit", "delete"}:
+                    run_id = self.ask_id("Run ID")
+                    if run_id is MAIN: continue
+                    if run_id in (BACK, CANCEL): continue
+                    {"view": self.view_run, "edit": self.edit_run, "delete": self.delete_run}[command](run_id)
+                elif command == "sessions": self.catalog_screen("Sessions", self.catalog.sessions, self.create_session)
+                elif command == "models": self.catalog_screen("Model Profiles", self.catalog.model_profiles, self.create_model_profile)
+                elif command == "benchmarks": self.catalog_screen("Benchmark Definitions", self.catalog.benchmark_definitions, self.create_definition)
+                elif command == "prompts": self.catalog_screen("Prompt Templates", self.catalog.prompt_templates, self.create_prompt_template)
+                elif command == "hardware": self.catalog_screen("Hardware Profiles", self.catalog.hardware_profiles, self.create_hardware_profile)
+                elif command == "import": self.not_available("Import", "Phase 3")
+                elif command == "export": self.not_available("Export", "Phase 4")
+                elif command == "settings": self.not_available("Settings", "a future phase")
+                elif command == "help": self.help()
+                else: self.output("Choose a menu number or command. Type H for help.")
+            except KeyboardInterrupt:
+                self.output("\nReturning to the main menu.")
+            except Exception:
+                self.logger.exception("Unexpected CLI error")
+                self.output("An unexpected error occurred.\nSee logs/error.log for details.")
