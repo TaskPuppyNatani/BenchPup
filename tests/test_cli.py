@@ -158,10 +158,48 @@ class CliPolishTests(unittest.TestCase):
         app.import_screen()
         import_action.assert_called_once_with()
 
-        app, _ = self.app_with(iter(["i", "b"]))
+        app, _ = self.app_with(iter(["4", "b"]))
         import_action = Mock()
-        app.catalog_screen("Prompt Templates", app.catalog.prompt_templates, app.create_prompt_template, import_action)
+        app.import_prompt_template_file = import_action
+        app.prompt_templates_screen()
         import_action.assert_called_once_with()
+
+    def test_prompt_templates_screen_uses_a_vertical_menu_without_old_command_bar(self):
+        app, output = self.app_with(iter(["b"]))
+        app.prompt_templates_screen()
+        rendered = "\n".join(output)
+        self.assertIn("1) List Templates\n2) View Template\n3) New Template", rendered)
+        self.assertIn("4) Import Template From File\n5) Edit Template\n6) Export Template\n7) Delete Template", rendered)
+        self.assertIn("B) Back\nQ) Back / Quit\nQA) Quit BenchPup completely", rendered)
+        self.assertNotIn("N) New  I) Import raw prompt file", rendered)
+
+    def test_prompt_templates_numbered_actions_reuse_existing_handlers(self):
+        app, output = self.app_with(iter(["1", "", "2", "1", "3", "4", "5", "1", "6", "1", "7", "1", "b"]))
+        text = "Prompt"
+        template = app.catalog.prompt_templates.create(PromptTemplate(name="One", version="1", prompt_text=text, prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review"))
+        assert template.id is not None
+        app.create_prompt_template = Mock(return_value=None)
+        app.import_prompt_template_file = Mock()
+        app.view_prompt_template = Mock()
+        app.edit_prompt_template = Mock()
+        app.export_prompt_template = Mock()
+        app.delete_prompt_template = Mock()
+        app.prompt_templates_screen()
+        rendered = "\n".join(output)
+        self.assertIn("1) One v1 (code_review)", rendered)
+        app.create_prompt_template.assert_called_once_with()
+        app.import_prompt_template_file.assert_called_once_with()
+        for handler in (app.view_prompt_template, app.edit_prompt_template, app.export_prompt_template, app.delete_prompt_template):
+            handler.assert_called_once_with(template.id)
+
+    def test_prompt_template_submenus_return_locally_and_quit_all_propagates(self):
+        app, _ = self.app_with(iter(["q"]))
+        self.assertIs(app.select_prompt_template(), BACK)
+        app, _ = self.app_with(iter(["b"]))
+        app.prompt_templates_screen()
+        app, _ = self.app_with(iter(["QA"]))
+        with self.assertRaises(QuitApplication):
+            app.prompt_templates_screen()
 
     def test_import_prompt_file_preserves_raw_markdown_and_uses_filename_stem(self):
         directory = tempfile.TemporaryDirectory(); self.addCleanup(directory.cleanup)

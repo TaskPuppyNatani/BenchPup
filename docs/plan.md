@@ -90,6 +90,21 @@ Next:
 - scoreboard and benchmark-run reports
 - report templates
 
+
+### Phase 4.2A
+
+Goal:
+Convert BenchPup from append-only menus into a full-screen, screen-based CLI.
+
+Core behavior:
+- Every menu is its own screen.
+- Entering a screen clears the previous one.
+- Only the active screen is visible.
+- B and Q return one level.
+- QA exits globally.
+- Long detail views may scroll naturally, but menus do not stack.
+
+
 ### Phase 4.3 — JSONL Dataset Builder
 
 Planned:

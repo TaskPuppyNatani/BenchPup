@@ -420,7 +420,8 @@ class TerminalApp:
         )
         self.output("\nPrompt Text\n-----------")
         self.output(template.prompt_text)
-        self.ask("Press Enter to continue", navigation=True, default="")
+        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.ask("Choose an option", navigation=True, default="")
 
     def edit_prompt_template(self, template_id: int) -> None:
         template = self.catalog.prompt_templates.get(template_id)
@@ -510,20 +511,51 @@ class TerminalApp:
             self.catalog.prompt_templates.delete(template_id)
             self.output("Prompt template deleted.")
 
+    def list_prompt_templates_screen(self) -> None:
+        self.output("\nPrompt Templates\n----------------")
+        templates = self.catalog.prompt_templates.list()
+        if templates:
+            for number, template in enumerate(templates, start=1):
+                self.output(f"{number}) {template.name} v{template.version} ({template.benchmark_type})")
+        else:
+            self.output("No prompt templates found.")
+        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.ask("Choose an option", navigation=True, default="")
+
+    def select_prompt_template(self) -> int | NavigationSignal:
+        self.output("\nSelect Template\n---------------")
+        templates = self.catalog.prompt_templates.list()
+        if not templates:
+            self.output("No prompt templates found.")
+            self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.ask("Choose an option", navigation=True, default="")
+            return BACK
+        for number, template in enumerate(templates, start=1):
+            self.output(f"{number}) {template.name} v{template.version} ({template.benchmark_type})")
+        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        while True:
+            choice = self.ask("Select template number", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return BACK
+            selected = self.normalized(choice)
+            if selected.isdigit() and 1 <= int(selected) <= len(templates):
+                template_id = templates[int(selected) - 1].id
+                assert template_id is not None, "Persisted prompt template is missing its ID"
+                return template_id
+            self.output(f"Choose a template number from 1 to {len(templates)}, or B to return.")
+
     def prompt_templates_screen(self) -> None:
         while True:
             self.output("\nPrompt Templates\n----------------")
-            templates = self.catalog.prompt_templates.list()
-            if templates:
-                for template in templates:
-                    self.output(f"{template.id}) {template.name} v{template.version} ({template.benchmark_type})")
-            else:
-                self.output("No prompt templates found.")
-            choice = self.ask("N) New  I) Import raw prompt file  V) View template  E) Edit template  X) Export template  D) Delete template  B) Back  Q) Back / Quit  QA) Quit BenchPup completely", navigation=True)
+            self.output("1) List Templates\n2) View Template\n3) New Template\n4) Import Template From File\n5) Edit Template\n6) Export Template\n7) Delete Template\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            choice = self.ask("Choose an option", navigation=True)
             if choice in (BACK, CANCEL, MAIN):
                 return
             command = self.normalized(str(choice))
-            if command in {"n", "new"}:
+            if command == "1":
+                self.list_prompt_templates_screen()
+                continue
+            if command == "3":
                 try:
                     created = self.create_prompt_template()
                     if created not in (BACK, CANCEL, MAIN, None):
@@ -531,20 +563,20 @@ class TerminalApp:
                 except ValueError:
                     self.output("The prompt template could not be created. Check the entered values and try again.")
                 continue
-            if command in {"i", "import"}:
+            if command == "4":
                 self.import_prompt_template_file()
                 continue
             actions: dict[str, Callable[[int], None]] = {
-                "v": self.view_prompt_template, "view": self.view_prompt_template,
-                "e": self.edit_prompt_template, "edit": self.edit_prompt_template,
-                "x": self.export_prompt_template, "export": self.export_prompt_template,
-                "d": self.delete_prompt_template, "delete": self.delete_prompt_template,
+                "2": self.view_prompt_template,
+                "5": self.edit_prompt_template,
+                "6": self.export_prompt_template,
+                "7": self.delete_prompt_template,
             }
             action = actions.get(command)
             if action is None:
-                self.output("Choose N, I, V, E, X, D, or B.")
+                self.output("Choose a number from 1 to 7, or B to return.")
                 continue
-            template_id = self.ask_id("Prompt template ID")
+            template_id = self.select_prompt_template()
             if isinstance(template_id, int):
                 action(template_id)
 
