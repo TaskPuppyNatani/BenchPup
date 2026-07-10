@@ -181,6 +181,52 @@ class ReviewScore:
 
 
 @dataclass
+class ScoreboardImportBatch:
+    name: str
+    source_file: str
+    imported_at: str = field(default_factory=now)
+    notes: str = ""
+    created_at: str = field(default_factory=now)
+    updated_at: str = field(default_factory=now)
+    is_deleted: bool = False
+    id: int | None = None
+
+    def validate(self) -> None:
+        require(self.name, "name"); require(self.source_file, "source_file")
+
+
+@dataclass
+class ScoreboardEntry:
+    model_name: str
+    temperature: float | None = None
+    moe_experts: str = ""
+    context_length: int | None = None
+    tokens_per_second: float | None = None
+    review_quality: str = ""
+    score: float | None = None
+    hallucination_level: str = ""
+    consistency: str = ""
+    reliability_score: str = ""
+    verdict: str = ""
+    notes: str = ""
+    notes_extra: str = ""
+    source_file: str = ""
+    imported_at: str = field(default_factory=now)
+    created_at: str = field(default_factory=now)
+    updated_at: str = field(default_factory=now)
+    is_deleted: bool = False
+    import_batch_id: int | None = None
+    id: int | None = None
+
+    def validate(self) -> None:
+        require(self.model_name, "model_name")
+        for value, name in ((self.temperature, "temperature"), (self.tokens_per_second, "tokens_per_second"),
+                            (self.score, "score")):
+            if value is not None and value < 0: raise ValueError(f"{name} must be non-negative")
+        if self.context_length is not None and self.context_length <= 0: raise ValueError("context_length must be positive")
+
+
+@dataclass
 class RunAttachment:
     run_id: int
     attachment_type: str

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import csv
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable
@@ -10,6 +11,8 @@ from typing import Callable
 from engine.database import EngineDatabase
 from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment
 from engine.services import BenchmarkService, CatalogService
+from engine.importers import CsvImportService, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
+from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv
 
 BACK, CANCEL, MAIN = object(), object(), object()
 BACK_WORDS = {"b", "back"}
@@ -26,6 +29,7 @@ class TerminalApp:
         database.migrate()
         self.catalog = CatalogService(database)
         self.benchmarks = BenchmarkService(database, self.catalog)
+        self.importer = CsvImportService(self.benchmarks)
         self.input, self.output = input_fn, output_fn
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
         log_path = Path(database_path).parent.parent / "logs" / "error.log"
@@ -328,6 +332,170 @@ class TerminalApp:
         self.output(f"{name} will be available in {phase}.")
         self.pause()
 
+    def show_import_mapping(self, preview) -> None:
+        self.output("\nDetected columns:")
+        for heading in preview.headings:
+            target = preview.mapping[heading]
+            marker = "✓" if target else "–"
+            self.output(f"{marker} {heading:<20} -> {target or 'ignored'}")
+
+    def edit_import_mapping(self, preview, mapping_fields=MAPPING_FIELDS) -> dict[str, str | None] | object:
+        mapping = dict(preview.mapping)
+        while True:
+            self.output("\nEdit mapping")
+            for number, heading in enumerate(preview.headings, start=1):
+                self.output(f"{number}) {heading} -> {mapping[heading] or 'ignored'}")
+            choice = self.ask("Column number, A) Skip all unknown, D) Done", navigation=True)
+            if choice in (BACK, CANCEL, MAIN): return choice
+            command = self.normalized(str(choice))
+            if command == "d": return mapping
+            if command == "a":
+                for heading in preview.unknown_headings: mapping[heading] = None
+                self.output("All unknown columns will be ignored.")
+                continue
+            if not command.isdigit() or not 1 <= int(command) <= len(preview.headings):
+                self.output("Choose a listed column number, A, or D.")
+                continue
+            heading = preview.headings[int(command) - 1]
+            self.output(f"\nColumn: {heading}")
+            for number, field in enumerate(mapping_fields, start=1): self.output(f"{number}) {field}")
+            self.output("0) Ignore this column")
+            while True:
+                field_choice = self.ask("Choose field", navigation=True)
+                if field_choice in (BACK, CANCEL, MAIN): return field_choice
+                selected = self.normalized(str(field_choice))
+                if selected.isdigit() and 0 <= int(selected) <= len(mapping_fields):
+                    mapping[heading] = None if selected == "0" else mapping_fields[int(selected) - 1]
+                    break
+                self.output(f"Enter a number from 0 to {len(mapping_fields)}.")
+
+    def choose_mapping_profile(self) -> dict[str, str | None] | object | None:
+        profiles = self.importer.mapping_profiles()
+        if not profiles: return None
+        use_profile = self.yes_no("Use saved mapping profile", navigation=True)
+        if use_profile in (BACK, CANCEL, MAIN): return use_profile
+        if not use_profile: return None
+        for number, (_, name, _) in enumerate(profiles, start=1): self.output(f"{number}) {name}")
+        while True:
+            choice = self.ask("Choose mapping profile", navigation=True)
+            if choice in (BACK, CANCEL, MAIN): return choice
+            selected = self.normalized(str(choice))
+            if selected.isdigit() and 1 <= int(selected) <= len(profiles): return profiles[int(selected) - 1][2]
+            self.output("Choose a listed mapping profile number.")
+
+    def save_mapping_profile(self, mapping: dict[str, str | None]) -> object | None:
+        save_profile = self.yes_no("Save this mapping as a profile", navigation=True)
+        if save_profile in (BACK, CANCEL, MAIN): return save_profile
+        if not save_profile: return None
+        names = ("My Spreadsheet", "Reddit Format", "Simple CSV", "Custom")
+        for number, name in enumerate(names, start=1): self.output(f"{number}) {name}")
+        while True:
+            choice = self.ask("Profile name", navigation=True)
+            if choice in (BACK, CANCEL, MAIN): return choice
+            selected = self.normalized(str(choice))
+            if selected.isdigit() and 1 <= int(selected) <= len(names):
+                name = names[int(selected) - 1]
+                if name == "Custom":
+                    name = self.ask("Custom profile name", navigation=True)
+                    if name in (BACK, CANCEL, MAIN): return name
+                    if not str(name).strip(): self.output("Enter a profile name."); continue
+                self.importer.save_mapping_profile(str(name), mapping)
+                self.output(f'Saved mapping profile "{name}".')
+                return None
+            self.output("Choose a number from 1 to 4.")
+
+    @staticmethod
+    def apply_default_benchmark(rows: list[dict[str, str]], benchmark: str) -> None:
+        if benchmark:
+            for row in rows:
+                if not row.get("benchmark_file", ""): row["benchmark_file"] = benchmark
+
+    def import_screen(self) -> None:
+        choice = self.ask("Import: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) Auto-detect CSV type", navigation=True)
+        if choice in (BACK, CANCEL, MAIN): return
+        import_type = {"1": "runs", "2": "scoreboard", "3": "auto"}.get(self.normalized(str(choice)))
+        if not import_type: self.output("Choose 1, 2, or 3."); return
+        self.import_csv(import_type)
+
+    def import_csv(self, import_type: str = "auto") -> None:
+        path = self.ask("CSV file path", navigation=True)
+        if path in (BACK, CANCEL, MAIN): return
+        try:
+            preview = self.importer.preview(str(path))
+        except (OSError, csv.Error) as error:
+            self.output(f"Could not read CSV: {error}")
+            return
+        run_fields = {"benchmark_file", "prompt_text", "raw_model_output"}
+        summary_import = import_type == "scoreboard" or (import_type == "auto" and not run_fields <= set(preview.mapping.values()))
+        if summary_import: preview = self.importer.preview(str(path), summary=True)
+        profile_mapping = self.choose_mapping_profile()
+        if profile_mapping in (BACK, CANCEL, MAIN): return
+        if profile_mapping is not None: preview = self.importer.preview(str(path), profile_mapping, summary=summary_import)
+        while True:
+            self.show_import_mapping(preview)
+            prompt = ("This CSV appears to be a model-summary/leaderboard file, not per-benchmark runs.\nImport as scoreboard entries? Y) Import  E) Edit mapping  C) Cancel"
+                      if summary_import else "Continue with this mapping? Y) Import  E) Edit mapping  C) Cancel")
+            choice = self.ask(prompt, navigation=True, default="y")
+            if choice in (CANCEL, MAIN, BACK): return
+            command = self.normalized(str(choice))
+            if command in {"y", "import"}: break
+            if command in {"e", "edit"}:
+                mapping = self.edit_import_mapping(preview, SUMMARY_MAPPING_FIELDS if summary_import else MAPPING_FIELDS)
+                if mapping in (BACK, CANCEL, MAIN): return
+                preview = self.importer.preview(str(path), mapping, summary=summary_import)
+                saved = self.save_mapping_profile(mapping)
+                if saved in (BACK, CANCEL, MAIN): return
+                continue
+            self.output("Choose Y to import, E to edit the mapping, or C to cancel.")
+        if not summary_import:
+            blank_benchmarks = sum(not row.get("benchmark_file", "") for row in preview.rows)
+            if blank_benchmarks:
+                default_benchmark = self.ask(f"Benchmark is blank for {blank_benchmarks} row(s). Default benchmark (optional)", navigation=True)
+                if default_benchmark in (BACK, CANCEL, MAIN): return
+                self.apply_default_benchmark(preview.rows, str(default_benchmark))
+        self.output(f"\nPreview: {len(preview.rows)} row(s)")
+        for number, row in enumerate(preview.rows[:5], start=1):
+            score = row.get("score", "-") if summary_import else row.get("overall_score", "-")
+            self.output(f"{number}) model={row.get('model_name', '')!r}, benchmark={row.get('benchmark_file', '') if not summary_import else 'summary'!r}, score={score!r}, hallucination={row.get('hallucination_level', '-')!r}, reliability={row.get('reliability_level', '-')!r}, notes={row.get('notes', '')[:50]!r}")
+        if len(preview.rows) > 5: self.output(f"... plus {len(preview.rows) - 5} more row(s)")
+        if summary_import:
+            proceed = self.yes_no("Import these scoreboard entries", navigation=True)
+            if proceed is not True: return
+            batch_name = self.ask("Optional scoreboard import batch name (blank uses filename and import date)", navigation=True)
+            if batch_name in (BACK, CANCEL, MAIN): return
+            try:
+                result = self.importer.import_scoreboard_entries(preview.rows, str(path), str(batch_name) or None)
+                self.output(f"Imported {result.imported} scoreboard entry row(s).")
+            except ValueError as error:
+                self.output(f"Import cancelled: {error}. No rows were written.")
+            return
+        incomplete = sum(not row.get("prompt_text", "") or not row.get("raw_model_output", "") for row in preview.rows)
+        if incomplete: self.output(f"Warning: {incomplete} row(s) have blank prompt or output; they can be imported as historical data but may be incomplete for JSONL training export.")
+        proceed = self.yes_no("Import these previewed rows", navigation=True)
+        if proceed is not True: return
+        policy = self.ask("Duplicates: S) Skip  R) Replace  K) Keep", navigation=True, default="s")
+        if policy in (BACK, CANCEL, MAIN): return
+        duplicate_policy = {"s": "skip", "skip": "skip", "r": "replace", "replace": "replace", "k": "keep", "keep": "keep"}.get(self.normalized(str(policy)))
+        if not duplicate_policy:
+            self.output("Choose Skip, Replace, or Keep."); return
+        try:
+            result = self.importer.import_rows(preview.rows, duplicate_policy)
+            self.output(f"Imported {result.imported}; skipped {result.skipped}; replaced {result.replaced}; duplicates detected {result.duplicates}.")
+        except ValueError as error:
+            self.output(f"Import cancelled: {error}. No rows were written.")
+
+    def export_screen(self) -> None:
+        choice = self.ask("Export: 1) Benchmark Runs CSV  2) Scoreboard CSV  3) JSONL training data  4) Markdown report", navigation=True)
+        if choice in (BACK, CANCEL, MAIN): return
+        exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown)}
+        selected = exporters.get(self.normalized(str(choice)))
+        if not selected: self.output("Choose 1, 2, 3, or 4."); return
+        path = self.ask(f"Destination for {selected[0]}", navigation=True)
+        if path in (BACK, CANCEL, MAIN): return
+        exporter = selected[1]
+        saved = exporter(self.catalog if selected[0] == "Scoreboard CSV" else self.benchmarks, str(path)) if selected[0] != "Markdown report" else exporter(self.benchmarks, self.catalog, str(path))
+        self.output(f"Exported {selected[0]} to {saved}.")
+
     def help(self) -> None:
         self.output("Commands: add, list, view, edit, delete, reference data, quit.\nUse B/back to return, C/cancel to abandon a wizard, and Q/quit/exit for the main menu.")
         self.pause()
@@ -380,8 +548,8 @@ class TerminalApp:
                 elif command == "benchmarks": self.catalog_screen("Benchmark Definitions", self.catalog.benchmark_definitions, self.create_definition)
                 elif command == "prompts": self.catalog_screen("Prompt Templates", self.catalog.prompt_templates, self.create_prompt_template)
                 elif command == "hardware": self.catalog_screen("Hardware Profiles", self.catalog.hardware_profiles, self.create_hardware_profile)
-                elif command == "import": self.not_available("Import", "Phase 3")
-                elif command == "export": self.not_available("Export", "Phase 4")
+                elif command == "import": self.import_screen()
+                elif command == "export": self.export_screen()
                 elif command == "settings": self.not_available("Settings", "a future phase")
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")

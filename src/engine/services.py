@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any
 
 from .database import EngineDatabase
-from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, now
+from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now
 from .repositories import Repository
 
 
@@ -19,6 +19,8 @@ class CatalogService:
         self.benchmark_definitions = Repository(database, "benchmark_definitions", BenchmarkDefinition, bool_fields={"is_active"})
         self.prompt_templates = Repository(database, "prompt_templates", PromptTemplate, bool_fields={"is_active"})
         self.export_profiles = Repository(database, "export_profiles", ExportProfile, json_fields={"field_selection", "filter_json"})
+        self.scoreboard_entries = Repository(database, "scoreboard_entries", ScoreboardEntry, bool_fields={"is_deleted"})
+        self.scoreboard_import_batches = Repository(database, "scoreboard_import_batches", ScoreboardImportBatch, bool_fields={"is_deleted"})
 
 
 class BenchmarkService:

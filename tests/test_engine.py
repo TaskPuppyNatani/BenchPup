@@ -28,7 +28,7 @@ class EngineTests(unittest.TestCase):
         with self.database.connection() as connection:
             version = connection.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()["version"]
             tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-        self.assertEqual(version, 1)
+        self.assertEqual(version, 4)
         self.assertTrue({"benchmark_sessions", "prompt_templates", "hardware_profiles", "run_attachments"} <= tables)
 
     def test_legacy_mvp_runs_are_migrated(self):

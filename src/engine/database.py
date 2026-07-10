@@ -60,6 +60,26 @@ CREATE INDEX IF NOT EXISTS idx_runs_created_at ON benchmark_runs(created_at);
 CREATE INDEX IF NOT EXISTS idx_runs_session ON benchmark_runs(session_id);
 CREATE INDEX IF NOT EXISTS idx_runs_deleted ON benchmark_runs(is_deleted);
 CREATE INDEX IF NOT EXISTS idx_attachments_run ON run_attachments(run_id);
+"""), (2, """
+CREATE TABLE IF NOT EXISTS import_mapping_profiles (
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, mapping_json TEXT NOT NULL,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+"""), (3, """
+CREATE TABLE IF NOT EXISTS scoreboard_entries (
+ id INTEGER PRIMARY KEY, model_name TEXT NOT NULL, temperature REAL, moe_experts TEXT NOT NULL DEFAULT '', context_length INTEGER,
+ tokens_per_second REAL, review_quality TEXT NOT NULL DEFAULT '', score REAL,
+ hallucination_level TEXT NOT NULL DEFAULT '', consistency TEXT NOT NULL DEFAULT '', reliability_score TEXT NOT NULL DEFAULT '',
+ verdict TEXT NOT NULL DEFAULT '', notes TEXT NOT NULL DEFAULT '', notes_extra TEXT NOT NULL DEFAULT '', source_file TEXT NOT NULL DEFAULT '',
+ imported_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1)));
+CREATE INDEX IF NOT EXISTS idx_scoreboard_created_at ON scoreboard_entries(created_at);
+"""), (4, """
+CREATE TABLE IF NOT EXISTS scoreboard_import_batches (
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL, source_file TEXT NOT NULL, imported_at TEXT NOT NULL,
+ notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1)));
+ALTER TABLE scoreboard_entries ADD COLUMN import_batch_id INTEGER REFERENCES scoreboard_import_batches(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_scoreboard_batch ON scoreboard_entries(import_batch_id);
 """)]
 
 
