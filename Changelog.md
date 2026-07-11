@@ -8,12 +8,17 @@ All notable changes to BenchPup will be documented in this file.
 - Global QA (Quit All) command
 - prompt_toolkit-based path completion
 - Improved CLI navigation documentation
+- JSONL Dataset Builder for detailed BenchmarkRun records only
+- Dataset filters, duplicate policy, and configurable sensitive-text redaction
+- Dataset JSONL v1 validation, companion manifests, and pair verification
+- Screen-based dataset preview, build, overwrite confirmation, and validation workflows
 
 ### Improved
 - Windows path prompt reliability
 - Backup/restore workflow
 - Restore summary formatting
 - Help screen navigation
+- Dataset export safety through structured staged-write outcomes
 
 ### Fixed
 - Windows path prompt rendering
@@ -21,7 +26,7 @@ All notable changes to BenchPup will be documented in this file.
 - CLI navigation consistency
 
 ### Quality
-- 69 passing unit tests
+- 145 passing unit tests
 - 0 Pyright errors / warnings
 
 ## [0.4.0-alpha] - 2026-07-10
