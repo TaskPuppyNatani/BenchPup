@@ -72,7 +72,7 @@ Completed:
 
 ### Phase 4.1 Polish
 
-In progress:
+Completed:
 
 - default backups to `<project_root>/backups/`
 - create the folder automatically
@@ -84,6 +84,7 @@ In progress:
 Next:
 
 - enhanced Markdown reports
+- reporting enhancements
 - session reports
 - model leaderboards
 - hardware summaries
@@ -93,43 +94,44 @@ Next:
 
 ### Phase 4.2A
 
-Goal:
-Convert BenchPup from append-only menus into a full-screen, screen-based CLI.
-
-Core behavior:
+Completed:
 - Every menu is its own screen.
 - Entering a screen clears the previous one.
 - Only the active screen is visible.
-- B and Q return one level.
-- QA exits globally.
+- B returns one level.
+- Q is the Main-screen quit command.
+- QA exits globally from shared input helpers.
 - Long detail views may scroll naturally, but menus do not stack.
 
 
 ### Phase 4.3 — JSONL Dataset Builder
 
-Planned:
+Completed:
 
-- curated training-data export
-- score/verdict filters
-- sensitive-text redaction
-- duplicate detection
-- dataset manifest
-- validation and preview
+- reusable DatasetBuilder engine API
+- curated JSONL v1 export from detailed BenchmarkRun records only
+- eligibility, warnings, filters, duplicate accounting, and redaction
+- preview, build, explicit overwrite confirmation, and existing-dataset validation
+- companion manifest generation and dataset/manifest pair verification
+- staged output and structured write results
+- screen-based, session-local Dataset Builder configuration
 
 ### Phase 4.4 — Statistics and Comparison
 
-Planned:
+Next after reporting enhancements:
 
 - descriptive statistics
-- model comparison
+- model comparisons
 - session comparison
 - trend reports
 - richer HTML charts
+- leaderboards
 
 ## Phase 5 — GUI
 
-Implement a PySide6 dark-mode desktop application that reuses the existing
-engine and design language.
+Implement a PySide6 dark-mode desktop application only after the reporting,
+statistics, leaderboard, and model-comparison engine/reporting phases are
+complete. It will reuse the existing engine and design language.
 
 ## Phase 6 — Advanced Research Features
 

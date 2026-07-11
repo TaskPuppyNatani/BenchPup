@@ -48,7 +48,7 @@ Backup and restore use a dedicated versioned format:
   "format": "benchpup_archive",
   "archive_version": 1,
   "created_at": "2026-07-10T00:00:00Z",
-  "benchpup_version": "0.4.0-alpha",
+    "benchpup_version": "0.4.1-Alpha",
   "schema_version": 5,
   "counts": {},
   "data": {
@@ -82,22 +82,113 @@ Archive guarantees:
 - exact-duplicate skipping
 - friendly rejection of malformed or unsupported archives
 
-## Training JSONL
+## JSONL Dataset Builder
 
-Training JSONL v1 is sourced only from detailed `BenchmarkRun` records.
-`ScoreboardEntry`, import batches, attachments, and binary data are excluded.
-Each UTF-8 line is a JSON object with `instruction`, `input`, `response`, and
-`metadata`; metadata includes `format_version: 1`, BenchPup/schema versions,
-recorded time, snapshots, and optional local `source_run_id` provenance.
+The Dataset Builder produces curated training JSONL v1 from detailed
+`BenchmarkRun` records only. `ScoreboardEntry`, scoreboard import batches,
+attachments, and binary data never enter this pipeline.
 
-Records are excluded for `soft_deleted`, `missing_raw_output`,
-`missing_review_score`, or `missing_training_context`. Missing optional
-metadata is warning-only. Exact duplicate skipping uses normalized source
-prompt/output/review content before redaction. Post-redaction collisions are
-reported as warnings. Redaction never mutates source records.
+### JSONL v1 Contract
 
-Exports use safe staged replacement: validated temporary JSONL and manifest
-files are written first, then finalized separately. This is not a single
-two-file atomic filesystem transaction. The companion manifest records record,
-exclusion, duplicate, collision, redaction, filter, version, timestamp, and
-SHA-256 details.
+Each nonblank UTF-8 line is exactly one JSON object with these top-level keys:
+
+```json
+{
+  "instruction": "Evaluate the following benchmark result.",
+  "input": {
+    "model": {},
+    "benchmark": {},
+    "prompt_template": {},
+    "prompt_text": "",
+    "raw_model_output": ""
+  },
+  "response": {
+    "accuracy": null,
+    "hallucination": "",
+    "reliability": "",
+    "depth": null,
+    "signal_to_noise": null,
+    "actionability": null,
+    "seniority": null,
+    "overall": null,
+    "strengths": "",
+    "weaknesses": "",
+    "verdict": "",
+    "notes": ""
+  },
+  "metadata": {
+    "backend": "",
+    "sampling": {},
+    "tokens_per_second": null,
+    "hardware": {},
+    "recorded_at": "",
+    "benchpup_version": "0.4.1-Alpha",
+    "schema_version": 5,
+    "format_version": 1,
+    "source_run_id": 123
+  }
+}
+```
+
+`source_run_id` is optional local provenance. It is included by default and
+can be omitted for shareable datasets. Run snapshots are authoritative for the
+model, benchmark, prompt, and hardware context.
+
+### Eligibility, Warnings, and Filters
+
+The engine excludes records with stable reason codes:
+
+- `soft_deleted`
+- `missing_output`
+- `missing_review`
+- `invalid_review`
+- `missing_model_context`
+- `missing_benchmark_context`
+- `missing_prompt_context`
+- `filtered_out`
+- `not_benchmark_run` (a defensive rejection of non-run objects)
+
+Warning-only codes are `missing_hardware`, `missing_session`,
+`missing_backend`, `missing_sampling`, and `missing_optional_scores`.
+Warnings do not mutate or exclude otherwise eligible source records.
+
+Session-local CLI filters support minimum overall score, maximum hallucination,
+minimum reliability, verdict, benchmark type, model, session, date range,
+prompt template, hardware profile, include/exclude run IDs, and duplicate
+policy. `DatasetFilters` also supports optional provenance for API callers.
+Source objects remain unchanged throughout preview, redaction, validation, and
+export.
+
+### Duplicates and Redaction
+
+The builder calculates source-content duplicate keys before redaction. Exact
+source-content duplicates are skipped by default, with deterministic first-run
+retention by run ID; they can be retained explicitly. Fingerprint duplicates
+and near duplicates are counted for review but retained. Post-redaction
+collisions are warning-only because distinct source records can safely become
+identical after redaction.
+
+Redaction can apply literal terms, paths, usernames, email addresses,
+hostnames/IP addresses, and validated custom regular expressions. The preview
+reports total and per-rule redaction counts. Redaction transforms only export
+records, never persisted BenchmarkRun, ReviewScore, or snapshot data.
+
+### Validation, Manifest, and Staged Output
+
+`DatasetBuilder.validate_dataset()` validates every nonblank JSONL line and
+reports line-numbered JSON or shape errors. Blank lines are allowed.
+`validate_manifest()` validates the companion manifest, and
+`verify_dataset_manifest_pair()` verifies record count and JSONL SHA-256.
+Missing manifests are reported separately from invalid manifests.
+
+The companion `<dataset>.jsonl.manifest.json` records the dataset filename,
+record and exclusion counts, source duplicate count, post-redaction collision
+count, redaction count, selected filters, BenchPup/schema versions, creation
+timestamp, format version, and JSONL SHA-256.
+
+Output uses safe staged replacement: both temporary files are written and
+validated before finalization. JSONL and manifest replacement cannot be one
+filesystem transaction, so failures are returned as structured statuses:
+`success`, `overwrite_required`, `validation_failed`, `temp_write_failed`,
+`temp_cleanup_failed`, `jsonl_finalize_failed`, or
+`partial_finalization`. Existing output is never silently overwritten.

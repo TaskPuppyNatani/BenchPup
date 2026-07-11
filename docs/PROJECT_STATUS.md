@@ -2,11 +2,11 @@
 
 ## Current Version
 
-**0.4.0 Alpha**
+**0.4.1 Alpha**
 
 ## Current Test Status
 
-**57 passing**
+**145 passing**
 
 ## Completed
 
@@ -32,30 +32,25 @@
 - [x] Automatic pre-restore safety backup
 - [x] Archive compatibility and validation
 - [x] Pylance cleanup
-
-## In Progress
-
-- [x] Phase 4.1 polish
-- [x] use `<project_root>/backups/` as the default destination
-- [x] automatically create the backups folder
-- [x] remove temporary path-completion and hardware-import diagnostics
-- [x] add polished backup and restore completion summaries
+- [x] Phase 4.3 JSONL Dataset Builder
+- [x] Dataset eligibility, filters, duplicate accounting, and redaction
+- [x] JSONL v1 validation and manifest verification
+- [x] Dataset preview, staged build, overwrite confirmation, and validation CLI workflows
 
 ## Next
 
-- [ ] Markdown reports
+- [ ] Reporting enhancements and Markdown reports
+- [ ] Statistics
 - [ ] Leaderboards
-- [ ] Session reports
-- [ ] Hardware reports
+- [ ] Model comparisons
+- [ ] Session and hardware reports
 
 ## Planned
 
-- [ ] JSONL dataset builder
-- [ ] Statistics
-- [ ] Charts
+- [ ] Richer HTML charts
 - [ ] Benchmark comparison
 - [ ] Session comparison
-- [ ] PySide6 GUI
+- [ ] PySide6 GUI after reporting and statistics engine phases
 - [ ] Knowledge base
 - [ ] AI lab notebook
 - [ ] Plugin system

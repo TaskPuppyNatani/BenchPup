@@ -109,7 +109,7 @@ CLI / future PySide6 GUI
         |       lshw --short
         |
         +-- Reporting subsystem
-        |     CSV, Markdown, JSONL, standalone HTML
+        |     CSV, Markdown, Dataset JSONL, standalone HTML
         |
         +-- Archive subsystem
               Versioned JSON export
@@ -145,3 +145,29 @@ Merge restore remaps IDs in dependency order and rolls back on failure.
 Replace restore creates a safety backup, restores into a temporary database,
 runs migrations and foreign-key checks, opens it through the normal database
 layer, and swaps only after all checks succeed.
+
+## Dataset Builder Architecture
+
+`engine.datasets.DatasetBuilder` is the reusable training-data boundary for
+both the CLI and the future GUI. Its public operations are:
+
+- `preview(runs, filters, redaction_config)`
+- `build_records(...)`
+- `write_dataset(...)`
+- `validate_dataset(path)`
+- `validate_manifest(path)`
+- `verify_dataset_manifest_pair(jsonl_path, manifest_path)`
+
+The engine owns eligibility classification, warning collection, filters,
+source-content/fingerprint/near-duplicate accounting, redaction, JSONL v1
+transformation, manifest construction, staged output, and validation. It
+returns structured preview, validation, and write results rather than printing
+or depending on terminal state. Source database objects are never changed by
+the builder.
+
+The screen-based CLI owns only session-local `DatasetFilters` and
+`RedactionConfig` state, vertical configuration screens, path selection,
+confirmation, and presentation of engine results. Preview, build, and existing
+dataset validation all call the DatasetBuilder directly; the CLI does not
+reimplement eligibility, hashing, JSON parsing, duplicate detection, or file
+writing.
