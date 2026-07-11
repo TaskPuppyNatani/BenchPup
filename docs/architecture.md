@@ -1,5 +1,76 @@
 # BenchPup Architecture
 
+# Architecture Principles
+
+## Core Engine First
+
+BenchPup supports multiple user interfaces.
+
+The Core Engine is the single source of truth for all business logic.
+
+The CLI, GUI, and any future interfaces (Web, API, scripting, etc.) must reuse
+the Core Engine rather than implementing their own logic.
+
+Responsibilities are divided as follows:
+
+### Core Engine
+
+Responsible for:
+
+- Validation
+- CRUD operations
+- Repository access
+- Statistics
+- Reports
+- Imports
+- Exports
+- Backup
+- Restore
+- Dataset generation
+- Business rules
+
+The Core Engine must not depend on any specific user interface.
+
+### CLI
+
+Responsible only for:
+
+- Screen rendering
+- Keyboard navigation
+- Menus
+- User prompts
+- Progress display
+
+The CLI must never duplicate business logic.
+
+### GUI
+
+Responsible only for:
+
+- Windows
+- Dialogs
+- Widgets
+- Tables
+- Charts
+- Drag & Drop
+- Visualization
+
+The GUI must never duplicate business logic.
+
+### Future Interfaces
+
+Future interfaces such as a Web UI, REST API, or scripting interface should
+also call the Core Engine rather than implementing their own logic.
+
+## Design Goal
+
+Every feature should be implemented once in the Core Engine.
+
+The CLI and GUI are two different front ends over the same engine.
+
+Adding a new interface should require little more than a new presentation layer.
+
+
 ## Domain Data Classes
 
 ```text
