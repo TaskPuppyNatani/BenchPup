@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -102,7 +102,7 @@ class CliPolishTests(unittest.TestCase):
         self.assertIn("Data\n----\n11) Import", menu)
         self.assertIn("13) Scoreboard", menu)
         self.assertIn("Scoreboard entries : 0", menu)
-        self.assertIn("Q) Back / Quit", menu)
+        self.assertIn("Q) Quit", menu)
         self.assertIn("QA) Quit BenchPup completely", menu)
         self.assertIn("Help\n----\nH) Help", menu)
         self.assertIn(f"Version {APP_VERSION}", menu)
@@ -117,6 +117,16 @@ class CliPolishTests(unittest.TestCase):
         title_center = title.index("BenchPup") + len("BenchPup") / 2
         version_center = version.index("Version") + len(f"Version {APP_VERSION}") / 2
         self.assertLessEqual(abs(title_center - version_center), 0.5)
+
+    def test_shared_renderer_frames_header_after_interactive_clear(self):
+        app, output = self.app_with(iter([]))
+        app.interactive_input = True
+        with patch("cli.sys.stdout.isatty", return_value=True), patch("cli.os.system") as clear:
+            app.render_screen("Settings", "Body")
+        divider = "=" * 56
+        self.assertEqual(output[:4], [divider, "BenchPup".center(56), f"Version {APP_VERSION}".center(56), divider])
+        self.assertEqual(output[-1], divider)
+        clear.assert_called_once()
 
     def test_keyboard_interrupt_at_main_menu_exits_without_reprompting(self):
         calls = iter([KeyboardInterrupt()])
@@ -170,7 +180,8 @@ class CliPolishTests(unittest.TestCase):
         rendered = "\n".join(output)
         self.assertIn("1) List Templates\n2) View Template\n3) New Template", rendered)
         self.assertIn("4) Import Template From File\n5) Edit Template\n6) Export Template\n7) Delete Template", rendered)
-        self.assertIn("B) Back\nQ) Back / Quit\nQA) Quit BenchPup completely", rendered)
+        self.assertIn("B) Back\nQA) Quit BenchPup completely", rendered)
+        self.assertNotIn("Q) Back / Quit", rendered)
         self.assertNotIn("N) New  I) Import raw prompt file", rendered)
 
     def test_prompt_templates_numbered_actions_reuse_existing_handlers(self):

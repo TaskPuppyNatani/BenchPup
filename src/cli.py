@@ -115,13 +115,16 @@ class TerminalApp:
         if self.interactive_input and sys.stdout.isatty():
             os.system("cls" if os.name == "nt" else "clear")
         else:
-            self.output("\n" + "=" * MENU_WIDTH)
+            self.output("")
+        self.output("=" * MENU_WIDTH)
         self.output("BenchPup".center(MENU_WIDTH))
         self.output(f"Version {APP_VERSION}".center(MENU_WIDTH))
         self.output("=" * MENU_WIDTH)
         self.output(f"\n{title}\n{'-' * len(title)}")
         if content:
             self.output(content)
+        self.output("")
+        self.output("=" * MENU_WIDTH)
 
     def prompt_path(self, label: str, *, must_exist: bool = False, extensions: tuple[str, ...] = (), default: str | None = None, preserve_trailing_separator: bool = False, blank_cancels: bool = False, directory_only: bool = False, reject_boolean_paths: bool = False) -> str | NavigationSignal | None:
         """Prompt for a filesystem path while preserving non-interactive input behavior."""
@@ -433,7 +436,7 @@ class TerminalApp:
         )
         self.output("\nPrompt Text\n-----------")
         self.output(template.prompt_text)
-        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.output("\nB) Back\nQA) Quit BenchPup completely")
         self.ask("Choose an option", navigation=True, default="")
 
     def edit_prompt_template(self, template_id: int) -> None:
@@ -532,7 +535,7 @@ class TerminalApp:
                 self.output(f"{number}) {template.name} v{template.version} ({template.benchmark_type})")
         else:
             self.output("No prompt templates found.")
-        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.output("\nB) Back\nQA) Quit BenchPup completely")
         self.ask("Choose an option", navigation=True, default="")
 
     def select_prompt_template(self) -> int | NavigationSignal:
@@ -540,12 +543,12 @@ class TerminalApp:
         templates = self.catalog.prompt_templates.list()
         if not templates:
             self.output("No prompt templates found.")
-            self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.output("\nB) Back\nQA) Quit BenchPup completely")
             self.ask("Choose an option", navigation=True, default="")
             return BACK
         for number, template in enumerate(templates, start=1):
             self.output(f"{number}) {template.name} v{template.version} ({template.benchmark_type})")
-        self.output("\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.output("\nB) Back\nQA) Quit BenchPup completely")
         while True:
             choice = self.ask("Select template number", navigation=True)
             if isinstance(choice, NavigationSignal):
@@ -559,7 +562,7 @@ class TerminalApp:
 
     def prompt_templates_screen(self) -> None:
         while True:
-            self.render_screen("Prompt Templates", "1) List Templates\n2) View Template\n3) New Template\n4) Import Template From File\n5) Edit Template\n6) Export Template\n7) Delete Template\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.render_screen("Prompt Templates", "1) List Templates\n2) View Template\n3) New Template\n4) Import Template From File\n5) Edit Template\n6) Export Template\n7) Delete Template\n\nB) Back\nQA) Quit BenchPup completely")
             choice = self.ask("Choose an option", navigation=True)
             if choice in (BACK, CANCEL, MAIN):
                 return
@@ -834,7 +837,7 @@ class TerminalApp:
         run, score, _ = self.benchmarks.get_run(run_id)
         if not run: self.output("Run not found."); self.pause(); return
         while True:
-            self.render_screen("Edit Run", "1) Output\n2) Prompt\n3) Score\n4) Attachment\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.render_screen("Edit Run", "1) Output\n2) Prompt\n3) Score\n4) Attachment\n\nB) Back\nQA) Quit BenchPup completely")
             selected = self.ask("Choose an option", navigation=True)
             if selected in (CANCEL, MAIN): return
             if selected is BACK: return
@@ -924,7 +927,7 @@ class TerminalApp:
 
     def scoreboard_screen(self) -> None:
         while True:
-            self.render_screen("Scoreboard", "Historical summary imports\n\n1) List Entries\n2) View Entry\n3) List Import Batches\n4) View Entries by Batch\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.render_screen("Scoreboard", "Historical summary imports\n\n1) List Entries\n2) View Entry\n3) List Import Batches\n4) View Entries by Batch\n\nB) Back\nQA) Quit BenchPup completely")
             choice = self.ask("Choose an option", navigation=True)
             if choice in (BACK, CANCEL, MAIN):
                 return
@@ -957,7 +960,7 @@ class TerminalApp:
             else:
                 self.output("No records found.")
             action_hint = "\nI) Import raw prompt file" if import_action is not None else ""
-            self.output(f"\nN) New{action_hint}\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.output(f"\nN) New{action_hint}\nB) Back\nQA) Quit BenchPup completely")
             choice = self.ask("Choose an option", navigation=True)
             if choice in (BACK, CANCEL, MAIN): return
             if import_action is not None and self.normalized(str(choice)) in {"i", "import"}:
@@ -1005,7 +1008,7 @@ class TerminalApp:
     def settings_screen(self) -> None:
         while True:
             current = self.settings.get_default_working_directory()
-            self.render_screen("Settings", f"Default Working Directory\nCurrent: {current if current is not None else 'Not configured'}\n\n1) Set Default Working Directory\n2) Clear Default Working Directory\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            self.render_screen("Settings", f"Default Working Directory\nCurrent: {current if current is not None else 'Not configured'}\n\n1) Set Default Working Directory\n2) Clear Default Working Directory\n\nB) Back\nQA) Quit BenchPup completely")
             choice = self.ask("Choose an option", navigation=True)
             if choice in (BACK, CANCEL, MAIN):
                 return
@@ -1101,7 +1104,7 @@ class TerminalApp:
                 if not row.get("benchmark_file", ""): row["benchmark_file"] = benchmark
 
     def import_screen(self) -> None:
-        self.render_screen("Import", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) Auto-detect CSV Type\n4) Hardware Profile\n5) Prompt Template File\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Import", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) Auto-detect CSV Type\n4) Hardware Profile\n5) Prompt Template File\n\nB) Back\nQA) Quit BenchPup completely")
         choice = self.ask("Choose an option", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
         command = self.normalized(str(choice))
@@ -1187,7 +1190,7 @@ class TerminalApp:
             self.output(f"Import cancelled: {error}. No rows were written.")
 
     def export_screen(self) -> None:
-        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n\nB) Back\nQA) Quit BenchPup completely")
         choice = self.ask("Choose an option", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
         exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
@@ -1213,7 +1216,7 @@ class TerminalApp:
                 self.output(f"Could not open HTML report: {error}")
 
     def backup_data(self) -> None:
-        self.render_screen("Backup BenchPup Data", "B) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Backup BenchPup Data", "B) Back\nQA) Quit BenchPup completely")
         backup_directory = self.benchmarks.database.path.parent.parent / "backups"
         try:
             backup_directory.mkdir(parents=True, exist_ok=True)
@@ -1243,7 +1246,7 @@ class TerminalApp:
             self.output(f"Backup failed: {error}")
 
     def restore_data(self) -> None:
-        self.render_screen("Restore BenchPup Data", "B) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Restore BenchPup Data", "B) Back\nQA) Quit BenchPup completely")
         path = self.prompt_path("Archive file", must_exist=True, extensions=(".json",))
         if not isinstance(path, str):
             return
@@ -1261,7 +1264,7 @@ class TerminalApp:
         self._show_archive_counts(preview["counts"])
         for warning in preview["warnings"]:
             self.output(f"Warning: {warning}")
-        self.output("\n1) Preview Only\n2) Merge into Current Database\n3) Replace Current Database\nC) Cancel\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.output("\n1) Preview Only\n2) Merge into Current Database\n3) Replace Current Database\nC) Cancel\nQA) Quit BenchPup completely")
         action = self.ask("Choose an option", navigation=True)
         if not isinstance(action, str) or action in {"", "1"}:
             return
@@ -1311,7 +1314,7 @@ class TerminalApp:
             "Navigation\n"
             "Q   Back / Cancel current screen\n"
             "QA  Quit BenchPup completely\n"
-            "    Also: qa, quit all, quit a (case-insensitive; extra spaces allowed).\n\nB) Back\nQ) Back / Quit\nQA) Quit BenchPup completely")
+            "    Also: qa, quit all, quit a (case-insensitive; extra spaces allowed).\n\nB) Back\nQA) Quit BenchPup completely")
         self.pause()
 
     def show_main_menu(self) -> None:
@@ -1320,7 +1323,7 @@ class TerminalApp:
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
-        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n\nHelp\n----\nH) Help\nS) Settings\nQ) Back / Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
 
     def run(self) -> None:
         try:
