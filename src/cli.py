@@ -5,16 +5,17 @@ import json
 import logging
 import csv
 import os
+import re
 import sys
 import webbrowser
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
 from prompt_toolkit import prompt as toolkit_prompt
 from prompt_toolkit.completion import PathCompleter
 
-from engine.database import EngineDatabase
+from engine.database import EngineDatabase, MIGRATIONS
 from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardImportBatch, now
 from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
@@ -24,6 +25,7 @@ from engine.path_completion import normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
 from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
 from engine.settings import DefaultWorkingDirectorySettings
+from engine.datasets import DatasetBuilder, DatasetFilters, RedactionConfig, DatasetOutputError
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -70,6 +72,7 @@ class TerminalApp:
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
         self.archives = ArchiveService(database)
+        self.datasets = DatasetBuilder(self.benchmarks, benchpup_version=APP_VERSION, schema_version=max(version for version, _ in MIGRATIONS))
         self.settings = DefaultWorkingDirectorySettings(database_path)
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
@@ -189,6 +192,7 @@ class TerminalApp:
             "JSONL training data": ("training_data.jsonl", None),
             "Markdown report": ("report.md", None),
             "BenchPup Backup": ("benchpup-backup.json", ".json"),
+            "JSONL Dataset": ("dataset.jsonl", ".jsonl"),
         }
         default_filename, extension = defaults.get(export_name, ("report.md", None))
         output_path = resolve_export_destination(destination, default_filename=default_filename, extension=extension)
@@ -1247,6 +1251,305 @@ class TerminalApp:
             except OSError as error:
                 self.output(f"Could not open HTML report: {error}")
 
+    @staticmethod
+    def _dataset_filter_value(value: object) -> str:
+        if value is None or value == "" or value == frozenset():
+            return "Not set"
+        if isinstance(value, frozenset):
+            return ", ".join(str(item) for item in sorted(value))
+        return str(value)
+
+    def _dataset_optional_float(self, label: str, current: float | None) -> float | None | NavigationSignal:
+        while True:
+            value = self.ask(f"{label} (blank clears; current: {self._dataset_filter_value(current)})", navigation=True)
+            if isinstance(value, NavigationSignal):
+                return value
+            if not value:
+                return None
+            try:
+                return float(value)
+            except ValueError:
+                self.output(f'"{value}" is not a valid number.')
+
+    def _select_dataset_choice(self, title: str, choices: tuple[str, ...], current: str | None) -> str | None | NavigationSignal:
+        lines = [f"Current: {self._dataset_filter_value(current)}", ""]
+        lines.extend(f"{number}) {item}" for number, item in enumerate(choices, start=1))
+        lines.extend((f"{len(choices) + 1}) Clear filter", "", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return choice
+            command = self.normalized(choice)
+            if command.isdigit() and 1 <= int(command) <= len(choices):
+                return choices[int(command) - 1]
+            if command == str(len(choices) + 1):
+                return None
+            self.output(f"Choose a number from 1 to {len(choices) + 1}, or B to return.")
+
+    def _select_dataset_catalog(self, title: str, items: list[Any], label: Callable[[Any], str], current_id: int | None) -> int | None | NavigationSignal:
+        lines = [f"Current: {self._dataset_filter_value(current_id)}", ""]
+        lines.extend(f"{number}) {label(item)}" for number, item in enumerate(items, start=1))
+        lines.extend((f"{len(items) + 1}) Clear filter", "", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return choice
+            command = self.normalized(choice)
+            if command.isdigit() and 1 <= int(command) <= len(items):
+                item_id = items[int(command) - 1].id
+                assert item_id is not None, f"Persisted {title} record is missing its ID"
+                return item_id
+            if command == str(len(items) + 1):
+                return None
+            self.output(f"Choose a number from 1 to {len(items) + 1}, or B to return.")
+
+    def _configure_dataset_date_range(self, filters: DatasetFilters) -> DatasetFilters:
+        self.render_screen("Date Range", f"Current start: {self._dataset_filter_value(filters.date_from)}\nCurrent end: {self._dataset_filter_value(filters.date_to)}\n\nB) Back\nQA) Quit BenchPup completely")
+        start = self.ask("Start date (ISO YYYY-MM-DD; blank clears)", navigation=True)
+        if isinstance(start, NavigationSignal):
+            return filters
+        end = self.ask("End date (ISO YYYY-MM-DD; blank clears)", navigation=True)
+        if isinstance(end, NavigationSignal):
+            return filters
+        try:
+            start_date = date.fromisoformat(start) if start else None
+            end_date = date.fromisoformat(end) if end else None
+        except ValueError:
+            self.output("Dates must use ISO format YYYY-MM-DD.")
+            return filters
+        if start_date is not None and end_date is not None and start_date > end_date:
+            self.output("Start date must be on or before end date.")
+            return filters
+        return replace(filters, date_from=start_date, date_to=end_date)
+
+    def _configure_dataset_run_ids(self, filters: DatasetFilters, *, include: bool) -> DatasetFilters:
+        title = "Include Run IDs" if include else "Exclude Run IDs"
+        current = filters.include_run_ids if include else filters.exclude_run_ids
+        self.render_screen(title, f"Current: {self._dataset_filter_value(current)}\n\nEnter comma-separated positive IDs. Blank clears the filter.\n\nB) Back\nQA) Quit BenchPup completely")
+        raw = self.ask("Run IDs", navigation=True)
+        if isinstance(raw, NavigationSignal):
+            return filters
+        if not raw:
+            values = frozenset()
+        else:
+            try:
+                values = frozenset(int(part.strip()) for part in raw.split(","))
+                if not values or any(value <= 0 for value in values):
+                    raise ValueError
+            except ValueError:
+                self.output("Enter comma-separated positive whole-number run IDs, or leave the field blank to clear it.")
+                return filters
+        return replace(filters, include_run_ids=values) if include else replace(filters, exclude_run_ids=values)
+
+    def dataset_filters_screen(self, filters: DatasetFilters) -> DatasetFilters:
+        while True:
+            content = "\n".join((
+                f"1) Minimum Overall Score [{self._dataset_filter_value(filters.min_overall)}]",
+                f"2) Maximum Hallucination Level [{self._dataset_filter_value(filters.max_hallucination)}]",
+                f"3) Minimum Reliability Level [{self._dataset_filter_value(filters.min_reliability)}]",
+                f"4) Verdict [{self._dataset_filter_value(filters.verdict)}]",
+                f"5) Benchmark Type [{self._dataset_filter_value(filters.benchmark_type)}]",
+                f"6) Model [{self._dataset_filter_value(filters.model)}]",
+                f"7) Session [{self._dataset_filter_value(filters.session_id)}]",
+                f"8) Date Range [{self._dataset_filter_value(filters.date_from)} to {self._dataset_filter_value(filters.date_to)}]",
+                f"9) Prompt Template [{self._dataset_filter_value(filters.prompt_template_id)}]",
+                f"10) Hardware Profile [{self._dataset_filter_value(filters.hardware_profile_id)}]",
+                f"11) Include Run IDs [{self._dataset_filter_value(filters.include_run_ids)}]",
+                f"12) Exclude Run IDs [{self._dataset_filter_value(filters.exclude_run_ids)}]",
+                f"13) Duplicate Policy [{'Retain exact duplicates' if filters.keep_source_duplicates else 'Skip exact duplicates'}]",
+                "14) Reset Filters",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Dataset Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                value = self._dataset_optional_float("Minimum overall score", filters.min_overall)
+                if not isinstance(value, NavigationSignal): filters = replace(filters, min_overall=value)
+            elif command in {"2", "3"}:
+                title = "Maximum Hallucination Level" if command == "2" else "Minimum Reliability Level"
+                current = filters.max_hallucination if command == "2" else filters.min_reliability
+                value = self._select_dataset_choice(title, LEVELS, current)
+                if not isinstance(value, NavigationSignal):
+                    filters = replace(filters, max_hallucination=value) if command == "2" else replace(filters, min_reliability=value)
+            elif command == "4":
+                value = self.ask("Verdict contains (blank clears)", navigation=True)
+                if isinstance(value, str): filters = replace(filters, verdict=value)
+            elif command == "5":
+                value = self._select_dataset_choice("Benchmark Type", BENCHMARK_TYPES, filters.benchmark_type or None)
+                if not isinstance(value, NavigationSignal): filters = replace(filters, benchmark_type=value or "")
+            elif command == "6":
+                item_id = self._select_dataset_catalog("Select Model", self.catalog.model_profiles.list(), lambda item: f"{item.name} ({item.model_name})", None)
+                if isinstance(item_id, int):
+                    model = self.catalog.model_profiles.get(item_id)
+                    if model is not None: filters = replace(filters, model=model.model_name)
+                elif item_id is None: filters = replace(filters, model="")
+            elif command == "7":
+                value = self._select_dataset_catalog("Select Session", self.catalog.sessions.list(), lambda item: item.title, filters.session_id)
+                if not isinstance(value, NavigationSignal): filters = replace(filters, session_id=value)
+            elif command == "8": filters = self._configure_dataset_date_range(filters)
+            elif command == "9":
+                value = self._select_dataset_catalog("Select Prompt Template", self.catalog.prompt_templates.list(), lambda item: f"{item.name} v{item.version}", filters.prompt_template_id)
+                if not isinstance(value, NavigationSignal): filters = replace(filters, prompt_template_id=value)
+            elif command == "10":
+                value = self._select_dataset_catalog("Select Hardware Profile", self.catalog.hardware_profiles.list(), lambda item: item.name, filters.hardware_profile_id)
+                if not isinstance(value, NavigationSignal): filters = replace(filters, hardware_profile_id=value)
+            elif command == "11": filters = self._configure_dataset_run_ids(filters, include=True)
+            elif command == "12": filters = self._configure_dataset_run_ids(filters, include=False)
+            elif command == "13":
+                value = self._select_dataset_choice("Duplicate Policy", ("Skip exact source duplicates", "Retain exact source duplicates"), "Retain exact source duplicates" if filters.keep_source_duplicates else "Skip exact source duplicates")
+                if not isinstance(value, NavigationSignal) and value is not None: filters = replace(filters, keep_source_duplicates=value.startswith("Retain"))
+            elif command == "14": filters = DatasetFilters()
+            else: self.output("Choose a number from 1 to 14, or B to return.")
+
+    def _configure_redaction_terms(self, redaction: RedactionConfig, *, regex: bool) -> RedactionConfig:
+        title = "Custom Regex Patterns" if regex else "Literal Terms"
+        values = redaction.regex_patterns if regex else redaction.literals
+        while True:
+            lines = [f"{number}) {value}" for number, value in enumerate(values, start=1)] or ["No rules configured."]
+            lines.extend(("", "1) Add", "2) Remove", "3) Reset", "", "B) Back", "QA) Quit BenchPup completely"))
+            self.render_screen(title, "\n".join(lines))
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal): return redaction
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Regex pattern" if regex else "Literal term", navigation=True)
+                if not isinstance(value, str) or not value: continue
+                if regex:
+                    try: re.compile(value)
+                    except re.error as error:
+                        self.output(f"Invalid custom regex: {error}"); continue
+                values = (*values, value)
+            elif command == "2":
+                if not values:
+                    self.output("There are no rules to remove."); continue
+                remove = self.ask("Rule number to remove", navigation=True)
+                if not isinstance(remove, str) or not remove.isdigit() or not 1 <= int(remove) <= len(values):
+                    self.output("Choose a listed rule number."); continue
+                values = tuple(value for number, value in enumerate(values, start=1) if number != int(remove))
+            elif command == "3": values = ()
+            else:
+                self.output("Choose 1, 2, 3, or B to return."); continue
+            redaction = replace(redaction, regex_patterns=values) if regex else replace(redaction, literals=values)
+
+    def _configure_redaction_toggle(self, label: str, enabled: bool) -> bool | NavigationSignal:
+        self.render_screen(label, f"Current: {'Enabled' if enabled else 'Disabled'}\n\n1) Enable\n2) Disable\n\nB) Back\nQA) Quit BenchPup completely")
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal): return choice
+            if self.normalized(choice) == "1": return True
+            if self.normalized(choice) == "2": return False
+            self.output("Choose 1, 2, or B to return.")
+
+    def dataset_redaction_preview(self, filters: DatasetFilters, redaction: RedactionConfig) -> None:
+        preview = self.datasets.preview(filters, redaction)
+        rule_counts = ", ".join(f"{rule}: {count}" for rule, count in sorted(preview.redaction_counts.items())) or "None"
+        samples = []
+        for number, record in enumerate(preview.records[:3], start=1):
+            output = str(record["input"]["raw_model_output"]).replace("\n", " ")
+            samples.append(f"Sample {number}: {output[:180]}")
+        content = "\n".join((
+            f"Eligible records: {len(preview.records)}",
+            f"Redactions: {preview.redactions}",
+            f"Redactions by rule: {rule_counts}",
+            f"Post-redaction collisions: {preview.post_redaction_collisions}",
+            "",
+            *(samples or ["No eligible records to preview."]),
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        ))
+        self.render_screen("Redaction Preview", content)
+        self.ask("Choose an option", navigation=True)
+
+    def dataset_redaction_screen(self, filters: DatasetFilters, redaction: RedactionConfig) -> RedactionConfig:
+        while True:
+            content = "\n".join((
+                f"1) Literal Terms [{len(redaction.literals)} configured]",
+                f"2) Paths [{'Enabled' if redaction.redact_paths else 'Disabled'}]",
+                f"3) Usernames [{'Enabled' if redaction.redact_usernames else 'Disabled'}]",
+                f"4) Email Addresses [{'Enabled' if redaction.redact_email else 'Disabled'}]",
+                f"5) Hostnames and IP Addresses [{'Enabled' if redaction.redact_hosts_ips else 'Disabled'}]",
+                f"6) Custom Regex Patterns [{len(redaction.regex_patterns)} configured]",
+                "7) Preview Redactions",
+                "8) Reset Redaction Rules",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Redaction", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal): return redaction
+            command = self.normalized(choice)
+            if command == "1": redaction = self._configure_redaction_terms(redaction, regex=False)
+            elif command in {"2", "3", "4", "5"}:
+                field = {"2": "redact_paths", "3": "redact_usernames", "4": "redact_email", "5": "redact_hosts_ips"}[command]
+                value = self._configure_redaction_toggle({"redact_paths": "Paths", "redact_usernames": "Usernames", "redact_email": "Email Addresses", "redact_hosts_ips": "Hostnames and IP Addresses"}[field], bool(getattr(redaction, field)))
+                if not isinstance(value, NavigationSignal): redaction = replace(redaction, **{field: value})
+            elif command == "6": redaction = self._configure_redaction_terms(redaction, regex=True)
+            elif command == "7": self.dataset_redaction_preview(filters, redaction)
+            elif command == "8": redaction = RedactionConfig()
+            else: self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _dataset_preview_screen(self, filters: DatasetFilters, redaction: RedactionConfig) -> NavigationSignal | None:
+        preview = self.datasets.preview(filters, redaction)
+        content = "\n".join((
+            f"Eligible: {len(preview.records)}",
+            f"Excluded: {sum(preview.excluded.values())}",
+            f"Warnings: {sum(preview.warnings.values())}",
+            f"Source duplicates: {preview.source_duplicates}",
+            f"Fingerprint duplicates: {preview.fingerprint_duplicates}",
+            f"Near duplicates: {preview.near_duplicates}",
+            f"Post-redaction collisions: {preview.post_redaction_collisions}",
+            f"Redactions: {preview.redactions}",
+            f"Exclusions: {preview.excluded or 'None'}",
+            f"Warnings: {preview.warnings or 'None'}",
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        ))
+        self.render_screen("Dataset Preview", content)
+        choice = self.ask("Choose an option", navigation=True)
+        return choice if isinstance(choice, NavigationSignal) else None
+
+    def dataset_builder_screen(self) -> None:
+        filters, redaction = DatasetFilters(), RedactionConfig()
+        while True:
+            self.render_screen("Dataset Builder", "1) Build JSONL Dataset\n2) Preview Eligible Runs\n3) Configure Filters\n4) Configure Redaction\n5) Validate Existing Dataset\n\nB) Back\nQA) Quit BenchPup completely")
+            choice = self.ask("Choose an option", navigation=True)
+            if choice in (BACK, CANCEL, MAIN): return
+            command = self.normalized(str(choice))
+            if command == "3": filters = self.dataset_filters_screen(filters); continue
+            if command == "4": redaction = self.dataset_redaction_screen(filters, redaction); continue
+            if command == "2": self._dataset_preview_screen(filters, redaction); continue
+            if command == "1":
+                preview = self.datasets.preview(filters, redaction)
+                if isinstance(self._dataset_preview_screen(filters, redaction), NavigationSignal): continue
+                path = self.prompt_path("Dataset destination", default="dataset.jsonl", preserve_trailing_separator=True)
+                if not isinstance(path, str): continue
+                output_path = self.prepare_export_destination(path, "JSONL Dataset")
+                if not isinstance(output_path, Path): continue
+                if output_path.exists() or output_path.with_suffix(output_path.suffix + ".manifest.json").exists():
+                    self.output("Dataset export cancelled; staged replacement does not overwrite existing files automatically."); continue
+                try:
+                    saved, manifest = self.datasets.write(output_path, preview, filters)
+                    self.output(f"Dataset written: {saved}\nManifest written: {manifest}")
+                except (OSError, DatasetOutputError, FileExistsError) as error: self.output(f"Dataset export failed: {error}")
+                continue
+            if command == "5":
+                path = self.prompt_path("Existing dataset JSONL", must_exist=True, extensions=(".jsonl",))
+                if isinstance(path, str):
+                    validation = self.datasets.validate_dataset(path)
+                    self.output(f"Valid JSONL v1 records: {validation.record_count}" if validation.state == "success" else f"Dataset validation failed: {validation.message}")
+                continue
+            self.output("Choose 1 to 5, or B to return.")
+
     def backup_data(self) -> None:
         self.render_screen("Backup BenchPup Data", "B) Back\nQA) Quit BenchPup completely")
         backup_directory = self.benchmarks.database.path.parent.parent / "backups"
@@ -1377,7 +1680,7 @@ class TerminalApp:
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
-        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
 
     def run(self) -> None:
         try:
@@ -1397,6 +1700,7 @@ class TerminalApp:
             "11": "import", "import": "import", "12": "export", "export": "export",
             "13": "scoreboard", "scoreboard": "scoreboard",
             "14": "backup", "backup": "backup", "15": "restore", "restore": "restore",
+            "16": "dataset", "dataset": "dataset",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -1425,6 +1729,7 @@ class TerminalApp:
                 elif command == "scoreboard": self.scoreboard_screen()
                 elif command == "backup": self.backup_data()
                 elif command == "restore": self.restore_data()
+                elif command == "dataset": self.dataset_builder_screen()
                 elif command == "settings": self.settings_screen()
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")

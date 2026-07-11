@@ -35,11 +35,11 @@
 
 ## In Progress
 
-- [ ] Phase 4.1 polish
-- [ ] use `<project_root>/backups/` as the default destination
-- [ ] automatically create the backups folder
-- [ ] remove temporary path-completion and hardware-import diagnostics
-- [ ] add polished backup and restore completion summaries
+- [x] Phase 4.1 polish
+- [x] use `<project_root>/backups/` as the default destination
+- [x] automatically create the backups folder
+- [x] remove temporary path-completion and hardware-import diagnostics
+- [x] add polished backup and restore completion summaries
 
 ## Next
 

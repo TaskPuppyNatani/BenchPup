@@ -84,7 +84,20 @@ Archive guarantees:
 
 ## Training JSONL
 
-Training JSONL remains sourced from detailed benchmark runs and can include
-prompt metadata, hardware metadata, session metadata, review scores, and a
-manifest. The future dataset builder should support filters, redaction,
-deduplication, validation, and preview.
+Training JSONL v1 is sourced only from detailed `BenchmarkRun` records.
+`ScoreboardEntry`, import batches, attachments, and binary data are excluded.
+Each UTF-8 line is a JSON object with `instruction`, `input`, `response`, and
+`metadata`; metadata includes `format_version: 1`, BenchPup/schema versions,
+recorded time, snapshots, and optional local `source_run_id` provenance.
+
+Records are excluded for `soft_deleted`, `missing_raw_output`,
+`missing_review_score`, or `missing_training_context`. Missing optional
+metadata is warning-only. Exact duplicate skipping uses normalized source
+prompt/output/review content before redaction. Post-redaction collisions are
+reported as warnings. Redaction never mutates source records.
+
+Exports use safe staged replacement: validated temporary JSONL and manifest
+files are written first, then finalized separately. This is not a single
+two-file atomic filesystem transaction. The companion manifest records record,
+exclusion, duplicate, collision, redaction, filter, version, timestamp, and
+SHA-256 details.
