@@ -25,7 +25,7 @@ from engine.path_completion import normalize_path, resolve_export_destination
 from engine.archive import ArchiveError, ArchiveService, TABLES
 from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
 from engine.settings import DefaultWorkingDirectorySettings
-from engine.datasets import DatasetBuilder, DatasetFilters, RedactionConfig, DatasetOutputError
+from engine.datasets import DatasetBuilder, DatasetFilters, DatasetWriteResult, DatasetWriteStatus, RedactionConfig
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -1497,19 +1497,66 @@ class TerminalApp:
             elif command == "8": redaction = RedactionConfig()
             else: self.output("Choose a number from 1 to 8, or B to return.")
 
-    def _dataset_preview_screen(self, filters: DatasetFilters, redaction: RedactionConfig) -> NavigationSignal | None:
-        preview = self.datasets.preview(filters, redaction)
+    def _dataset_configuration_summary(self, filters: DatasetFilters, redaction: RedactionConfig) -> tuple[str, ...]:
+        filter_values = (
+            ("Minimum overall", filters.min_overall), ("Maximum hallucination", filters.max_hallucination),
+            ("Minimum reliability", filters.min_reliability), ("Verdict", filters.verdict),
+            ("Benchmark type", filters.benchmark_type), ("Model", filters.model), ("Session ID", filters.session_id),
+            ("Date range", f"{filters.date_from or '-'} to {filters.date_to or '-'}" if filters.date_from or filters.date_to else ""),
+            ("Prompt template ID", filters.prompt_template_id), ("Hardware profile ID", filters.hardware_profile_id),
+            ("Include run IDs", filters.include_run_ids), ("Exclude run IDs", filters.exclude_run_ids),
+        )
+        active_filters = [f"{label}: {self._dataset_filter_value(value)}" for label, value in filter_values if value not in (None, "", frozenset())]
+        active_filters.append("Exact duplicates: retain" if filters.keep_source_duplicates else "Exact duplicates: skip")
+        enabled_rules = []
+        if redaction.literals: enabled_rules.append(f"literals ({len(redaction.literals)})")
+        if redaction.redact_paths: enabled_rules.append("paths")
+        if redaction.redact_usernames: enabled_rules.append("usernames")
+        if redaction.redact_email: enabled_rules.append("email addresses")
+        if redaction.redact_hosts_ips: enabled_rules.append("hostnames/IP addresses")
+        if redaction.regex_patterns: enabled_rules.append(f"custom regex ({len(redaction.regex_patterns)})")
+        return (
+            f"Active filters: {'; '.join(active_filters)}",
+            f"Active redaction: {', '.join(enabled_rules) if enabled_rules else 'None'}",
+        )
+
+    @staticmethod
+    def _dataset_count_lines(label: str, counts: dict[str, int]) -> list[str]:
+        if not counts:
+            return [f"{label}: None"]
+        return [f"{label}:", *(f"  {code}: {count}" for code, count in sorted(counts.items()))]
+
+    def _dataset_preview_screen(self, filters: DatasetFilters, redaction: RedactionConfig, *, preview: Any | None = None) -> NavigationSignal | None:
+        active_preview = self.datasets.preview(filters, redaction) if preview is None else preview
+        candidate_count = len(self.benchmarks.runs.list(include_deleted=True))
+        rule_counts = ", ".join(f"{rule}: {count}" for rule, count in sorted(active_preview.redaction_counts.items())) or "None"
+        record_lines = []
+        for number, record in enumerate(active_preview.records[:10], start=1):
+            model = record["input"]["model"].get("model_name", "Unknown model")
+            benchmark = record["input"]["benchmark"].get("name") or record["input"]["benchmark"].get("file_path", "Unknown benchmark")
+            output_length = len(str(record["input"]["raw_model_output"]))
+            record_lines.append(f"{number}) {model} — {benchmark} ({output_length} output characters)")
+        if len(active_preview.records) > len(record_lines):
+            record_lines.append(f"... plus {len(active_preview.records) - len(record_lines)} more eligible record(s).")
         content = "\n".join((
-            f"Eligible: {len(preview.records)}",
-            f"Excluded: {sum(preview.excluded.values())}",
-            f"Warnings: {sum(preview.warnings.values())}",
-            f"Source duplicates: {preview.source_duplicates}",
-            f"Fingerprint duplicates: {preview.fingerprint_duplicates}",
-            f"Near duplicates: {preview.near_duplicates}",
-            f"Post-redaction collisions: {preview.post_redaction_collisions}",
-            f"Redactions: {preview.redactions}",
-            f"Exclusions: {preview.excluded or 'None'}",
-            f"Warnings: {preview.warnings or 'None'}",
+            f"Total candidate runs: {candidate_count}",
+            f"Eligible records: {len(active_preview.records)}",
+            f"Excluded records: {sum(active_preview.excluded.values())}",
+            f"Warning count: {sum(active_preview.warnings.values())}",
+            f"Source-content duplicates: {active_preview.source_duplicates}",
+            f"Fingerprint duplicates: {active_preview.fingerprint_duplicates}",
+            f"Near duplicates: {active_preview.near_duplicates}",
+            f"Post-redaction collisions: {active_preview.post_redaction_collisions}",
+            f"Redactions: {active_preview.redactions}",
+            f"Redactions by rule: {rule_counts}",
+            "",
+            *self._dataset_count_lines("Exclusions", active_preview.excluded),
+            *self._dataset_count_lines("Warnings", active_preview.warnings),
+            "",
+            *self._dataset_configuration_summary(filters, redaction),
+            "",
+            "Eligible record summary:",
+            *(record_lines or ["No eligible records."]),
             "",
             "B) Back",
             "QA) Quit BenchPup completely",
@@ -1517,6 +1564,124 @@ class TerminalApp:
         self.render_screen("Dataset Preview", content)
         choice = self.ask("Choose an option", navigation=True)
         return choice if isinstance(choice, NavigationSignal) else None
+
+    def _dataset_write_result_screen(self, result: DatasetWriteResult, filters: DatasetFilters, redaction: RedactionConfig) -> NavigationSignal | None:
+        status_lines: dict[DatasetWriteStatus, tuple[str, str]] = {
+            DatasetWriteStatus.SUCCESS: ("Dataset Build Complete", "Dataset and manifest finalized successfully."),
+            DatasetWriteStatus.OVERWRITE_REQUIRED: ("Dataset Build Requires Confirmation", "An existing dataset or manifest requires explicit overwrite confirmation."),
+            DatasetWriteStatus.VALIDATION_FAILED: ("Dataset Build Validation Failed", "Temporary output did not validate; final files were not replaced."),
+            DatasetWriteStatus.TEMP_WRITE_FAILED: ("Dataset Build Temporary Write Failed", "Temporary output could not be written."),
+            DatasetWriteStatus.TEMP_CLEANUP_FAILED: ("Dataset Build Cleanup Failed", "The build did not complete and one or more temporary files remain."),
+            DatasetWriteStatus.JSONL_FINALIZE_FAILED: ("Dataset JSONL Finalization Failed", "The JSONL file was not finalized; the manifest was not finalized."),
+            DatasetWriteStatus.PARTIAL_FINALIZATION: ("Dataset Build Partially Finalized", "The JSONL finalized, but the complete dataset/manifest operation did not finish."),
+        }
+        title, explanation = status_lines[result.status]
+        lines = [explanation, "", f"JSONL path: {result.jsonl_path}", f"Manifest path: {result.manifest_path}"]
+        if result.record_count:
+            lines.append(f"Record count: {result.record_count}")
+        if result.sha256:
+            lines.append(f"SHA-256: {result.sha256}")
+        lines.extend((
+            f"JSONL finalized: {'Yes' if result.jsonl_finalized else 'No'}",
+            f"Manifest finalized: {'Yes' if result.manifest_finalized else 'No'}",
+            f"Temporary cleanup succeeded: {'Yes' if result.cleanup_succeeded else 'No'}",
+        ))
+        if result.message:
+            lines.append(f"Message: {result.message}")
+        if result.details:
+            lines.append(f"Details: {result.details}")
+        if result.remaining_temp_paths:
+            lines.append("Remaining temporary paths:")
+            lines.extend(f"  {path}" for path in result.remaining_temp_paths)
+        lines.extend(("", *self._dataset_configuration_summary(filters, redaction), "", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        choice = self.ask("Choose an option", navigation=True)
+        return choice if isinstance(choice, NavigationSignal) else None
+
+    def dataset_build_workflow(self, filters: DatasetFilters, redaction: RedactionConfig) -> None:
+        preview = self.datasets.preview(filters, redaction)
+        summary = "\n".join((
+            f"Eligible records ready to build: {len(preview.records)}",
+            f"Excluded records: {sum(preview.excluded.values())}",
+            f"Redactions: {preview.redactions}",
+            "",
+            *self._dataset_configuration_summary(filters, redaction),
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        ))
+        self.render_screen("Build JSONL Dataset", summary)
+        path = self.prompt_path("Dataset destination", default="dataset.jsonl", preserve_trailing_separator=True)
+        if not isinstance(path, str):
+            return
+        output_path = self.prepare_export_destination(path, "JSONL Dataset")
+        if not isinstance(output_path, Path):
+            return
+        manifest_path = output_path.with_suffix(output_path.suffix + ".manifest.json")
+        self.render_screen("Confirm Dataset Build", "\n".join((
+            f"JSONL path: {output_path}",
+            f"Manifest path: {manifest_path}",
+            f"Eligible record count: {len(preview.records)}",
+            "",
+            *self._dataset_configuration_summary(filters, redaction),
+            "",
+            "Write both staged output files?",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        )))
+        confirm = self.yes_no("Confirm dataset build", navigation=True)
+        if confirm is not True:
+            return
+        result = self.datasets.write_dataset(output_path, filters=filters, redaction_config=redaction)
+        if result.status is DatasetWriteStatus.OVERWRITE_REQUIRED:
+            overwrite = self.yes_no("Existing dataset or manifest found. Replace both only after staged validation", navigation=True)
+            if overwrite is not True:
+                self._dataset_write_result_screen(result, filters, redaction)
+                return
+            result = self.datasets.write_dataset(output_path, filters=filters, redaction_config=redaction, overwrite=True)
+        self._dataset_write_result_screen(result, filters, redaction)
+
+    def dataset_validate_workflow(self) -> None:
+        path = self.prompt_path("Existing dataset JSONL", must_exist=True, extensions=(".jsonl",))
+        if not isinstance(path, str):
+            return
+        jsonl_path = Path(path)
+        dataset_validation = self.datasets.validate_dataset(jsonl_path)
+        manifest_path = jsonl_path.with_suffix(jsonl_path.suffix + ".manifest.json")
+        manifest_validation = None
+        pair_validation = None
+        if manifest_path.exists():
+            manifest_validation = self.datasets.validate_manifest(manifest_path)
+            if dataset_validation.state == "success" and manifest_validation.state == "success":
+                pair_validation = self.datasets.verify_dataset_manifest_pair(jsonl_path, manifest_path)
+        else:
+            use_manifest = self.yes_no("No companion manifest found. Validate a manifest from another path", navigation=True)
+            if use_manifest is True:
+                supplied = self.prompt_path("Manifest file", must_exist=True, extensions=(".json",))
+                if isinstance(supplied, str):
+                    manifest_path = Path(supplied)
+                    manifest_validation = self.datasets.validate_manifest(manifest_path)
+                    if dataset_validation.state == "success" and manifest_validation.state == "success":
+                        pair_validation = self.datasets.verify_dataset_manifest_pair(jsonl_path, manifest_path)
+        lines = [f"Dataset: {'Valid' if dataset_validation.state == 'success' else 'Invalid'}"]
+        if dataset_validation.state == "success":
+            lines.extend((f"Record count: {dataset_validation.record_count}", "Blank lines are ignored during JSONL validation."))
+        elif dataset_validation.message:
+            lines.append(f"Dataset error: {dataset_validation.message}")
+        if manifest_validation is None:
+            lines.append("Manifest: Not supplied or not found.")
+        else:
+            lines.append(f"Manifest: {'Valid' if manifest_validation.state == 'success' else 'Invalid'}")
+            if manifest_validation.message:
+                lines.append(f"Manifest error: {manifest_validation.message}")
+            lines.append(f"Manifest path: {manifest_path}")
+        if pair_validation is not None:
+            lines.append(f"Dataset/manifest pair: {'Valid' if pair_validation.state == 'success' else 'Invalid'}")
+            if pair_validation.message:
+                lines.append(f"Pair error: {pair_validation.message}")
+        lines.extend(("", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen("Validate Existing Dataset", "\n".join(lines))
+        self.ask("Choose an option", navigation=True)
 
     def dataset_builder_screen(self) -> None:
         filters, redaction = DatasetFilters(), RedactionConfig()
@@ -1528,26 +1693,8 @@ class TerminalApp:
             if command == "3": filters = self.dataset_filters_screen(filters); continue
             if command == "4": redaction = self.dataset_redaction_screen(filters, redaction); continue
             if command == "2": self._dataset_preview_screen(filters, redaction); continue
-            if command == "1":
-                preview = self.datasets.preview(filters, redaction)
-                if isinstance(self._dataset_preview_screen(filters, redaction), NavigationSignal): continue
-                path = self.prompt_path("Dataset destination", default="dataset.jsonl", preserve_trailing_separator=True)
-                if not isinstance(path, str): continue
-                output_path = self.prepare_export_destination(path, "JSONL Dataset")
-                if not isinstance(output_path, Path): continue
-                if output_path.exists() or output_path.with_suffix(output_path.suffix + ".manifest.json").exists():
-                    self.output("Dataset export cancelled; staged replacement does not overwrite existing files automatically."); continue
-                try:
-                    saved, manifest = self.datasets.write(output_path, preview, filters)
-                    self.output(f"Dataset written: {saved}\nManifest written: {manifest}")
-                except (OSError, DatasetOutputError, FileExistsError) as error: self.output(f"Dataset export failed: {error}")
-                continue
-            if command == "5":
-                path = self.prompt_path("Existing dataset JSONL", must_exist=True, extensions=(".jsonl",))
-                if isinstance(path, str):
-                    validation = self.datasets.validate_dataset(path)
-                    self.output(f"Valid JSONL v1 records: {validation.record_count}" if validation.state == "success" else f"Dataset validation failed: {validation.message}")
-                continue
+            if command == "1": self.dataset_build_workflow(filters, redaction); continue
+            if command == "5": self.dataset_validate_workflow(); continue
             self.output("Choose 1 to 5, or B to return.")
 
     def backup_data(self) -> None:
