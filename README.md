@@ -31,6 +31,8 @@ build, and validate curated JSONL datasets from detailed BenchmarkRun records.
 ## Requirements
 
 Python 3.11+
+pyreadline3>=3.5.4; sys_platform == "win32"
+prompt_toolkit>=3.0.0
 
 ## Running
 
