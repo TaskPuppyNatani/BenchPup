@@ -1,37 +1,147 @@
-# Local LLM Benchmark Recorder roadmap
+# BenchPup Roadmap
 
 ## Phase 0 — Architecture
 
 Define the database schema, domain models, import/export contracts, CLI flow,
-GUI wireframe, and training dataset contract. No new application code belongs
-in this phase.
+GUI wireframe, and training dataset contract.
 
-## Phase 1 — Core engine
+**Status: Complete**
 
-Build SQLite migrations/versioning and UI-independent CRUD services for
-sessions, model profiles, benchmark definitions, prompt templates, hardware
-profiles, runs, review scores, and run attachments. Add search and statistics.
-Undo/redo remains planned, but must not block the basic CRUD workflow.
+## Phase 1 — Core Engine
+
+Build SQLite migrations/versioning and UI-independent CRUD services for all
+first-class entities, with validation, search foundations, and historical
+snapshots.
+
+**Status: Complete**
 
 ## Phase 2 — CLI
 
-Add the complete interactive menu on top of the engine.
+Add the complete interactive CLI with catalog management, benchmark workflows,
+validation, navigation, remembered defaults, path autocomplete, import/export,
+and backup/restore flows.
+
+**Status: Complete**
 
 ## Phase 3 — Import
 
-Import Google Sheets CSV exports with field mapping, preview, and duplicate
-detection.
+Completed:
 
-## Phase 4 — Export
+- Benchmark Runs CSV import
+- Scoreboard CSV import
+- CSV type auto-detection
+- heading normalization and mapping
+- preview and transactional validation
+- duplicate handling
+- scoreboard import batches
+- MSInfo32, DXDiag, and `lshw --short` hardware import
+- UTF-8, UTF-8 BOM, and UTF-16 BOM handling
 
-Add CSV, Markdown, JSON, JSONL, leaderboard, and curated training exports.
+**Status: Complete**
+
+## Phase 3.5 — Reporting Preview and CLI Power Features
+
+Completed:
+
+- interactive standalone Scoreboard HTML report
+- search, filters, sorting, expandable rows, and summary cards
+- batch-aware grouping
+- Windows path autocomplete
+- improved export destination handling
+
+**Status: Complete**
+
+## Phase 4 — Reporting, Export, Backup, and Restore
+
+### Phase 4.1 — JSON Backup and Restore
+
+Completed:
+
+- versioned `benchpup_archive` JSON format
+- atomic UTF-8 archive export
+- preview with no writes
+- transactional merge restore
+- relationship ID remapping
+- exact-duplicate skipping
+- safe replace restore through a temporary database
+- automatic pre-restore safety backup
+- migrations and foreign-key validation before final swap
+- archive validation and round-trip tests
+
+**Status: Complete**
+
+### Phase 4.1 Polish
+
+Completed:
+
+- default backups to `<project_root>/backups/`
+- create the folder automatically
+- remove temporary console diagnostics
+- add polished backup and restore summaries
+
+### Phase 4.2 — Markdown Reports and Leaderboards
+
+Next:
+
+- enhanced Markdown reports
+- reporting enhancements
+- session reports
+- model leaderboards
+- hardware summaries
+- scoreboard and benchmark-run reports
+- report templates
+
+
+### Phase 4.2A
+
+Completed:
+- Every menu is its own screen.
+- Entering a screen clears the previous one.
+- Only the active screen is visible.
+- B returns one level.
+- Q is the Main-screen quit command.
+- QA exits globally from shared input helpers.
+- Long detail views may scroll naturally, but menus do not stack.
+
+
+### Phase 4.3 — JSONL Dataset Builder
+
+Completed:
+
+- reusable DatasetBuilder engine API
+- curated JSONL v1 export from detailed BenchmarkRun records only
+- eligibility, warnings, filters, duplicate accounting, and redaction
+- preview, build, explicit overwrite confirmation, and existing-dataset validation
+- companion manifest generation and dataset/manifest pair verification
+- staged output and structured write results
+- screen-based, session-local Dataset Builder configuration
+
+### Phase 4.4 — Statistics and Comparison
+
+Next after reporting enhancements:
+
+- descriptive statistics
+- model comparisons
+- session comparison
+- trend reports
+- richer HTML charts
+- leaderboards
 
 ## Phase 5 — GUI
 
-Implement a PySide6 dark-mode dashboard with recent runs, statistics, charts,
-and a leaderboard.
+Implement a PySide6 dark-mode desktop application only after the reporting,
+statistics, leaderboard, and model-comparison engine/reporting phases are
+complete. It will reuse the existing engine and design language.
 
-## Phase 6 — Advanced
+## Phase 6 — Advanced Research Features
 
-Add profiles, prompt libraries, benchmark templates, comparisons, trends,
-dataset builder, and plugins.
+Planned:
+
+- knowledge base
+- structured findings
+- AI lab notebook
+- advanced search
+- prompt library improvements
+- benchmark templates
+- trends
+- plugins

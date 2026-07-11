@@ -72,6 +72,7 @@ class ModelProfile:
 @dataclass
 class HardwareProfile:
     name: str
+    computer_name: str = ""
     cpu: str = ""
     gpu: str = ""
     vram_gb: float | None = None
@@ -79,6 +80,8 @@ class HardwareProfile:
     operating_system: str = ""
     backend_versions: dict[str, str] = field(default_factory=dict)
     notes: str = ""
+    import_source: str = ""
+    imported_at: str | None = None
     created_at: str = field(default_factory=now)
     updated_at: str = field(default_factory=now)
     id: int | None = None

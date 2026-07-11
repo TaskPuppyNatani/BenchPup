@@ -1,79 +1,194 @@
-# Phase 0 import, export, and training-format specification
+# BenchPup Import, Export, Archive, and Training Formats
 
-## Canonical record
+## Data Families
 
-All transports originate from the aggregate `BenchmarkRun` object. Field names
-are `snake_case`; UTF-8 is required; empty unknown values are `null` in JSON
-and blank in CSV. Text fields, including `raw_model_output`, are retained without
-truncation. Exports include associated session information, hardware metadata,
-prompt template name/version/hash, and attachment metadata when available.
+BenchPup stores two primary data shapes:
 
-## Import CSV
+1. `BenchmarkRun` for detailed per-test records
+2. `ScoreboardEntry` for historical model-summary records grouped by
+   `ScoreboardImportBatch`
 
-The importer reads a Google Sheets CSV export in UTF-8 (including BOM). It
-normalizes headings (case, whitespace, and selected aliases such as `Model Name`
-to `model_name`) then presents a mapping screen for unmapped headings. The user
-previews parsed rows and chooses skip/replace/keep for duplicate fingerprints.
-Import is transactional: a rejected validation row does not partially write.
+They remain separate first-class record types.
 
-## Exports
+## Encoding
 
-- **CSV:** one flattened row per run with session, hardware, and prompt-template
-  columns; attachment metadata is represented as a JSON column.
-- **JSON:** an array of canonical records, each with nested `session`,
-  `hardware`, `prompt_template`, and `attachments`; suitable for backup/integration.
-- **Markdown:** a report with run details and selected averages.
-- **JSONL:** one training record per line; suitable for dataset pipelines.
-- **Leaderboard:** Markdown/CSV aggregation by model, with run count, average,
-  median, and score distribution.
+- CSV imports: UTF-8 and UTF-8 BOM
+- Hardware text imports: UTF-8, UTF-8 BOM, UTF-16LE BOM, UTF-16BE BOM
+- Exports: UTF-8
 
-## Training JSONL contract
+## Imports
 
-One UTF-8 JSON object per line:
+Supported imports:
+
+- Benchmark Runs CSV
+- Scoreboard CSV
+- CSV auto-detection
+- MSInfo32
+- DXDiag
+- `lshw --short`
+- manual hardware entry
+
+CSV imports support normalization, mapping, preview, duplicate handling, and
+transactional validation.
+
+## Standard Exports
+
+- Benchmark Runs CSV
+- Scoreboard CSV with batch metadata
+- Markdown reports
+- JSONL training data from detailed benchmark runs
+- standalone interactive Scoreboard HTML
+
+## BenchPup Archive
+
+Backup and restore use a dedicated versioned format:
 
 ```json
 {
-  "instruction": "Review this model output and evaluate its quality.",
-  "input": {
-    "model": "Qwen 3.6 35B A3B",
-    "benchmark_file": "speech_server.py",
-    "benchmark_type": "code_review",
-    "prompt_template": {"name": "standard_review", "version": "2.1", "hash": "sha256:..."},
-    "prompt": "...",
-    "raw_model_output": "..."
-  },
-  "response": {
-    "accuracy": 5,
-    "hallucination": "Low",
-    "reliability": "High",
-    "overall": 4.8,
-    "strengths": "...",
-    "weaknesses": "...",
-    "verdict": "Excellent coding model...",
-    "notes": "..."
-  },
-  "metadata": {
-    "backend": "LM Studio",
-    "temperature": 0.3,
-    "tokens_per_second": 181,
-    "hardware": {
-      "name": "Primary workstation",
-      "cpu": "...",
-      "gpu": "...",
-      "vram_gb": 24,
-      "ram_gb": 64,
-      "operating_system": "Windows 11",
-      "backend_versions": {"LM Studio": "..."}
-    },
-    "session": {"id": 12, "title": "July coding benchmark batch"},
-    "recorded_at": "2026-07-09T00:00:00Z"
+  "format": "benchpup_archive",
+  "archive_version": 1,
+  "created_at": "2026-07-10T00:00:00Z",
+    "benchpup_version": "0.4.1-Alpha",
+  "schema_version": 5,
+  "counts": {},
+  "data": {
+    "benchmark_sessions": [],
+    "model_profiles": [],
+    "hardware_profiles": [],
+    "benchmark_definitions": [],
+    "prompt_templates": [],
+    "benchmark_runs": [],
+    "review_scores": [],
+    "run_attachments": [],
+    "scoreboard_import_batches": [],
+    "scoreboard_entries": [],
+    "export_profiles": []
   }
 }
 ```
 
-The dataset builder must filter soft-deleted runs, permit score/verdict-based
-quality thresholds, redact configured sensitive text, and emit a manifest with
-record count, selected filters, schema version, and creation timestamp.
-Attachments are excluded from training JSONL by default; when included in other
-exports they contain only metadata (`attachment_type`, `file_path`,
-`original_filename`, `notes`, `created_at`), never binary file contents.
+Archive guarantees:
+
+- UTF-8 JSON
+- metadata and per-entity counts
+- attachment metadata and paths only
+- no binary attachment contents
+- atomic export through a validated temporary file
+- preview with no writes
+- transactional merge
+- safe replace through a validated temporary database
+- automatic pre-restore safety backup
+- relationship ID remapping
+- exact-duplicate skipping
+- friendly rejection of malformed or unsupported archives
+
+## JSONL Dataset Builder
+
+The Dataset Builder produces curated training JSONL v1 from detailed
+`BenchmarkRun` records only. `ScoreboardEntry`, scoreboard import batches,
+attachments, and binary data never enter this pipeline.
+
+### JSONL v1 Contract
+
+Each nonblank UTF-8 line is exactly one JSON object with these top-level keys:
+
+```json
+{
+  "instruction": "Evaluate the following benchmark result.",
+  "input": {
+    "model": {},
+    "benchmark": {},
+    "prompt_template": {},
+    "prompt_text": "",
+    "raw_model_output": ""
+  },
+  "response": {
+    "accuracy": null,
+    "hallucination": "",
+    "reliability": "",
+    "depth": null,
+    "signal_to_noise": null,
+    "actionability": null,
+    "seniority": null,
+    "overall": null,
+    "strengths": "",
+    "weaknesses": "",
+    "verdict": "",
+    "notes": ""
+  },
+  "metadata": {
+    "backend": "",
+    "sampling": {},
+    "tokens_per_second": null,
+    "hardware": {},
+    "recorded_at": "",
+    "benchpup_version": "0.4.1-Alpha",
+    "schema_version": 5,
+    "format_version": 1,
+    "source_run_id": 123
+  }
+}
+```
+
+`source_run_id` is optional local provenance. It is included by default and
+can be omitted for shareable datasets. Run snapshots are authoritative for the
+model, benchmark, prompt, and hardware context.
+
+### Eligibility, Warnings, and Filters
+
+The engine excludes records with stable reason codes:
+
+- `soft_deleted`
+- `missing_output`
+- `missing_review`
+- `invalid_review`
+- `missing_model_context`
+- `missing_benchmark_context`
+- `missing_prompt_context`
+- `filtered_out`
+- `not_benchmark_run` (a defensive rejection of non-run objects)
+
+Warning-only codes are `missing_hardware`, `missing_session`,
+`missing_backend`, `missing_sampling`, and `missing_optional_scores`.
+Warnings do not mutate or exclude otherwise eligible source records.
+
+Session-local CLI filters support minimum overall score, maximum hallucination,
+minimum reliability, verdict, benchmark type, model, session, date range,
+prompt template, hardware profile, include/exclude run IDs, and duplicate
+policy. `DatasetFilters` also supports optional provenance for API callers.
+Source objects remain unchanged throughout preview, redaction, validation, and
+export.
+
+### Duplicates and Redaction
+
+The builder calculates source-content duplicate keys before redaction. Exact
+source-content duplicates are skipped by default, with deterministic first-run
+retention by run ID; they can be retained explicitly. Fingerprint duplicates
+and near duplicates are counted for review but retained. Post-redaction
+collisions are warning-only because distinct source records can safely become
+identical after redaction.
+
+Redaction can apply literal terms, paths, usernames, email addresses,
+hostnames/IP addresses, and validated custom regular expressions. The preview
+reports total and per-rule redaction counts. Redaction transforms only export
+records, never persisted BenchmarkRun, ReviewScore, or snapshot data.
+
+### Validation, Manifest, and Staged Output
+
+`DatasetBuilder.validate_dataset()` validates every nonblank JSONL line and
+reports line-numbered JSON or shape errors. Blank lines are allowed.
+`validate_manifest()` validates the companion manifest, and
+`verify_dataset_manifest_pair()` verifies record count and JSONL SHA-256.
+Missing manifests are reported separately from invalid manifests.
+
+The companion `<dataset>.jsonl.manifest.json` records the dataset filename,
+record and exclusion counts, source duplicate count, post-redaction collision
+count, redaction count, selected filters, BenchPup/schema versions, creation
+timestamp, format version, and JSONL SHA-256.
+
+Output uses safe staged replacement: both temporary files are written and
+validated before finalization. JSONL and manifest replacement cannot be one
+filesystem transaction, so failures are returned as structured statuses:
+`success`, `overwrite_required`, `validation_failed`, `temp_write_failed`,
+`temp_cleanup_failed`, `jsonl_finalize_failed`, or
+`partial_finalization`. Existing output is never silently overwritten.

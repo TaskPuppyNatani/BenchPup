@@ -26,3 +26,8 @@ build/
 .pytest_cache/
 
 .env
+
+backups/
+*.json
+
+

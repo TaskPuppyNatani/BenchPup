@@ -1,112 +1,173 @@
-# Phase 0 architecture
+# BenchPup Architecture
 
-## Domain data classes
+# Architecture Principles
+
+## Core Engine First
+
+BenchPup supports multiple user interfaces.
+
+The Core Engine is the single source of truth for all business logic.
+
+The CLI, GUI, and any future interfaces (Web, API, scripting, etc.) must reuse
+the Core Engine rather than implementing their own logic.
+
+Responsibilities are divided as follows:
+
+### Core Engine
+
+Responsible for:
+
+- Validation
+- CRUD operations
+- Repository access
+- Statistics
+- Reports
+- Imports
+- Exports
+- Backup
+- Restore
+- Dataset generation
+- Business rules
+
+The Core Engine must not depend on any specific user interface.
+
+### CLI
+
+Responsible only for:
+
+- Screen rendering
+- Keyboard navigation
+- Menus
+- User prompts
+- Progress display
+
+The CLI must never duplicate business logic.
+
+### GUI
+
+Responsible only for:
+
+- Windows
+- Dialogs
+- Widgets
+- Tables
+- Charts
+- Drag & Drop
+- Visualization
+
+The GUI must never duplicate business logic.
+
+### Future Interfaces
+
+Future interfaces such as a Web UI, REST API, or scripting interface should
+also call the Core Engine rather than implementing their own logic.
+
+## Design Goal
+
+Every feature should be implemented once in the Core Engine.
+
+The CLI and GUI are two different front ends over the same engine.
+
+Adding a new interface should require little more than a new presentation layer.
+
+
+## Domain Data Classes
 
 ```text
 ModelProfile
-  id, name, model_name, model_family, model_size, quantization, backend
-  temperature, top_p, top_k, min_p, thinking_enabled, flash_attention
-  moe_experts, context_length, tokens_per_second
-
 HardwareProfile
-  id, name, cpu, gpu, vram_gb, ram_gb, operating_system, backend_versions
-  notes, created_at, updated_at
-
 BenchmarkSession
-  id, title, description, started_at, completed_at, notes, created_at
-  updated_at, is_deleted
-
 BenchmarkDefinition
-  id, name, file_path, benchmark_type, default_prompt, tags, is_active
-
 PromptTemplate
-  id, name, version, prompt_text, prompt_hash, benchmark_type, notes
-  created_at, updated_at, is_active
-
 ReviewScore
-  id, run_id, accuracy_score, hallucination_level, reliability_level
-  depth_score, signal_noise_score, actionability_score, seniority_score
-  overall_score, strengths, weaknesses, verdict, notes
-
 BenchmarkRun
-  id, session_id?, model_profile_id?, benchmark_definition_id?
-  prompt_template_id?, hardware_profile_id?, model_snapshot, benchmark_snapshot
-  prompt_snapshot, hardware_snapshot, prompt_name, prompt_text, raw_model_output
-  review_score?, fingerprint, created_at, updated_at, is_deleted
-
 RunAttachment
-  id, run_id, attachment_type, file_path, original_filename, notes, created_at
-
+ScoreboardImportBatch
+ScoreboardEntry
 ExportProfile
-  id, name, format, field_selection, filter_json, destination, created_at
 ```
 
-`BenchmarkRun` owns model, prompt, benchmark, and hardware snapshots rather than
-relying solely on foreign keys. A `BenchmarkSession` groups related runs from a
-single test batch. `RunAttachment` is a child of a run and identifies external
-screenshots, logs, raw text, or other artifacts. `ReviewScore` is separate to
-keep context and subjective evaluation clear, while the engine returns an
-aggregate `BenchmarkRun` object for callers.
+`BenchmarkRun` owns model, prompt, benchmark, and hardware snapshots.
+`ScoreboardEntry` is a first-class historical summary record grouped through
+`ScoreboardImportBatch`.
 
-## Engine boundaries
+## Engine Boundaries
 
 ```text
-CLI / future PySide6 GUI / importer / exporter
-                  |
-             Application services
- Sessions | Profiles | Definitions | Templates | Hardware | Runs
- Attachments | Scores | Export | Undo/Redo | Search | Statistics
-                  |
-        Repositories + migration runner (SQLite)
-                  |
-             Domain data classes
+CLI / future PySide6 GUI
+        |
+        +-- Application services
+        |     Sessions, Profiles, Definitions, Templates, Hardware
+        |     Runs, Scores, Attachments, Scoreboard, Export, Archive
+        |     Search, Statistics
+        |
+        +-- Import subsystem
+        |     CSV mapping/import
+        |     Hardware parser registry
+        |       MSInfo32
+        |       DXDiag
+        |       lshw --short
+        |
+        +-- Reporting subsystem
+        |     CSV, Markdown, Dataset JSONL, standalone HTML
+        |
+        +-- Archive subsystem
+              Versioned JSON export
+              Validation and preview
+              Transactional merge
+              Safe replace
+              Pre-restore safety backup
+
+                    |
+            Repositories + migrations
+                    |
+                  SQLite
 ```
 
-Services accept and return data classes; they do not read input, print output,
-or know which user interface invoked them. Basic CRUD is the Phase 1 priority.
-Each later mutation will write one matching `change_history` event in the same
-database transaction. Undo applies the event's `before_json`; redo applies
-`after_json`. A new mutation after undo invalidates the redo branch.
+## Import Architecture
 
-## CLI flow (Phase 2)
+CSV import decodes supported encodings, normalizes headings, detects file type,
+auto-maps columns, previews records, validates transactionally, handles
+duplicates, and commits or rolls back.
 
-```mermaid
-flowchart TD
-  A[Start] --> B[Load settings and migrate database]
-  B --> C{Menu}
-  C -->|1 Add Run| D[Select profile and benchmark; collect run and review]
-  C -->|2 Continue| E[Load draft/latest run]
-  C -->|3 List| F[List and select run]
-  C -->|4 Search| G[Filter by model, benchmark, score, date, tag]
-  C -->|5 Edit| H[Edit selected run]
-  C -->|6 Delete| I[Confirm soft delete]
-  C -->|7 / 8| J[Undo or redo latest eligible change]
-  C -->|9 Export| K[Choose profile, format, and destination]
-  C -->|0 Settings| L[Manage profiles/defaults]
-  D --> C
-  E --> C
-  F --> C
-  G --> C
-  H --> C
-  I --> C
-  J --> C
-  K --> C
-  L --> C
-  C -->|Q Quit| M[Exit]
-```
+Hardware import uses a parser registry. Each parser exposes `source_name`,
+`can_parse(text)`, and `parse(text) -> HardwareProfileDraft`.
 
-## Future GUI wireframe (Phase 5)
+## Archive Architecture
 
-```text
-+---------------------------------------------------------------+
-| Local LLM Benchmark Recorder       [+ Add Run] [Export] [Settings] |
-+---------------------+-----------------------------------------+
-| Dashboard           | Recent benchmarks                       |
-| Runs                | Model        Benchmark       Overall   |
-| Models              | Qwen ...     speech_server     4.6     |
-| Benchmarks          | ...                                     |
-| Exports             +-----------------------------------------+
-|                     | Score trend          Leaderboard       |
-|                     | [line chart]         [ranked table]   |
-+---------------------+-----------------------------------------+
-```
+Export gathers all first-class entities, writes a temporary UTF-8 JSON file,
+validates it, and atomically replaces the destination.
+
+Preview performs no writes.
+
+Merge restore remaps IDs in dependency order and rolls back on failure.
+
+Replace restore creates a safety backup, restores into a temporary database,
+runs migrations and foreign-key checks, opens it through the normal database
+layer, and swaps only after all checks succeed.
+
+## Dataset Builder Architecture
+
+`engine.datasets.DatasetBuilder` is the reusable training-data boundary for
+both the CLI and the future GUI. Its public operations are:
+
+- `preview(runs, filters, redaction_config)`
+- `build_records(...)`
+- `write_dataset(...)`
+- `validate_dataset(path)`
+- `validate_manifest(path)`
+- `verify_dataset_manifest_pair(jsonl_path, manifest_path)`
+
+The engine owns eligibility classification, warning collection, filters,
+source-content/fingerprint/near-duplicate accounting, redaction, JSONL v1
+transformation, manifest construction, staged output, and validation. It
+returns structured preview, validation, and write results rather than printing
+or depending on terminal state. Source database objects are never changed by
+the builder.
+
+The screen-based CLI owns only session-local `DatasetFilters` and
+`RedactionConfig` state, vertical configuration screens, path selection,
+confirmation, and presentation of engine results. Preview, build, and existing
+dataset validation all call the DatasetBuilder directly; the CLI does not
+reimplement eligibility, hashing, JSON parsing, duplicate detection, or file
+writing.

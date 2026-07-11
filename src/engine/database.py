@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS scoreboard_import_batches (
  is_deleted INTEGER NOT NULL DEFAULT 0 CHECK(is_deleted IN (0, 1)));
 ALTER TABLE scoreboard_entries ADD COLUMN import_batch_id INTEGER REFERENCES scoreboard_import_batches(id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS idx_scoreboard_batch ON scoreboard_entries(import_batch_id);
+"""), (5, """
+ALTER TABLE hardware_profiles ADD COLUMN computer_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE hardware_profiles ADD COLUMN import_source TEXT NOT NULL DEFAULT '';
+ALTER TABLE hardware_profiles ADD COLUMN imported_at TEXT;
 """)]
 
 

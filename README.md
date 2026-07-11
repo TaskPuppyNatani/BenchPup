@@ -1,47 +1,32 @@
-# Local LLM Benchmark Recorder
+# BenchPup
 
-A local, dependency-free CLI for recording LLM coding benchmarks. Results live in
-SQLite and can be exported as CSV or JSONL training examples.
+BenchPup is a local, desktop-first benchmark recorder for evaluating LLM coding
+and code-review tasks. Detailed benchmark runs, historical scoreboard entries,
+profiles, prompts, and reviews are stored in SQLite.
 
-## Quick start
+## Current Status
+
+Version 0.4.1 Alpha.
+
+Completed:
+
+- interactive screen-based CLI
+- CSV and hardware-profile imports
+- scoreboard browsing and standalone HTML reporting
+- JSON backup and restore
+- curated JSONL Dataset Builder with filters, redaction, manifests, and validation
+
+Next: reporting enhancements, statistics, leaderboards, and model comparisons.
+The PySide6 GUI follows those engine/reporting phases.
+
+## Quick Start
 
 ```powershell
 python src/main.py
 ```
 
-Choose an action from the interactive menu. The database defaults to
-`data/benchmark.db`; exports go to `data/exports/`.
------------------------------------------------------------------------------------------------------
-# Local LLM Benchmark Recorder
-
-A desktop-first benchmark recording tool for evaluating local LLMs on coding and code-review tasks.
-
-## Features
-
-- SQLite database
-- Interactive CLI
-- Sessions
-- Model profiles
-- Hardware profiles
-- Prompt templates
-- Review scoring
-- Attachments
-- CSV import (planned)
-- JSONL export (planned)
-- PySide6 GUI (planned)
-
-## Current Status
-
-Version 0.2 Alpha
-
-Completed:
-- Phase 0
-- Phase 1
-- Phase 2
-- CLI Polish
-
-Current Development:
-Phase 3 - CSV Import
+Choose an action from the interactive menu. Use the Dataset Builder to preview,
+build, and validate curated JSONL datasets from detailed BenchmarkRun records.
 
 ## Requirements
 
