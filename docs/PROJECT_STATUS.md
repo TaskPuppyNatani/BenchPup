@@ -20,9 +20,9 @@
 - [x] CSV auto-detection
 - [x] Scoreboard import batches
 - [x] Hardware Profile import
-  - [x] MSInfo32
-  - [x] DXDiag
-  - [x] `lshw --short`
+- [x] MSInfo32
+- [x] DXDiag
+- [x] `lshw --short`
 - [x] Windows path autocomplete
 - [x] Interactive Scoreboard HTML viewer
 - [x] JSON backup export
@@ -36,10 +36,10 @@
 ## In Progress
 
 - [ ] Phase 4.1 polish
-  - [ ] use `<project_root>/backups/` as the default destination
-  - [ ] automatically create the backups folder
-  - [ ] remove temporary path-completion and hardware-import diagnostics
-  - [ ] add polished backup and restore completion summaries
+- [ ] use `<project_root>/backups/` as the default destination
+- [ ] automatically create the backups folder
+- [ ] remove temporary path-completion and hardware-import diagnostics
+- [ ] add polished backup and restore completion summaries
 
 ## Next
 
@@ -59,3 +59,20 @@
 - [ ] Knowledge base
 - [ ] AI lab notebook
 - [ ] Plugin system
+
+
+### CLI
+
+Status: Mature
+
+BenchPup now uses a screen-based CLI with:
+
+- [x] Dedicated screen navigation
+- [x] Vertical menus
+- [x] Shared renderer
+- [x] Global QA navigation
+- [x] Full prompt_toolkit integration
+- [x] Cross-platform screen redraw
+- [x] Consistent screen ownership
+
+The CLI is considered a permanent first-class interface and will coexist with the future PySide6 GUI.
