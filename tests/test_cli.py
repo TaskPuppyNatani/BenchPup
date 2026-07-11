@@ -30,12 +30,29 @@ class CliPolishTests(unittest.TestCase):
         app.catalog.prompt_templates.create(PromptTemplate(name="Review prompt", version="1.0", prompt_text=text, prompt_hash=hashlib.sha256(text.encode()).hexdigest(), benchmark_type="code_review"))
 
     def test_wizard_reviews_and_edits_before_save(self):
-        answers = iter(["", "1", "1", "1", "", "draft output", *score_answers(), "n", "e", "6", "final output", *score_answers(), "n", "s"])
+        answers = iter(["3", "1", "1", "1", "1", "1", "1", "3", "draft output", *score_answers(), "n", "2", "6", "final output", *score_answers(), "n", "1"])
         app, _ = self.app_with(answers); self.seed_catalog(app)
         app.add_run_wizard()
         runs = app.benchmarks.runs.list()
         self.assertEqual(len(runs), 1)
         self.assertEqual(runs[0].raw_model_output, "final output")
+
+    def test_run_catalog_choosers_render_vertical_actions(self):
+        app, output = self.app_with(iter(["c", "c", "c", "c", "c"]))
+        self.seed_catalog(app)
+        choosers = (
+            ("Session", app.catalog.sessions, app.create_session, "session", True),
+            ("Model profile", app.catalog.model_profiles, app.create_model_profile, "model", False),
+            ("Benchmark definition", app.catalog.benchmark_definitions, app.create_definition, "benchmark", False),
+            ("Prompt template", app.catalog.prompt_templates, app.create_prompt_template, "prompt", False),
+            ("Hardware profile", app.catalog.hardware_profiles, app.create_hardware_profile, "hardware", True),
+        )
+        for title, repository, create, key, optional in choosers:
+            self.assertIs(app.choose_catalog(title, repository, create, key, optional=optional), CANCEL)
+        rendered = "\n".join(output)
+        self.assertIn("1) Select Existing\n2) Create New\n3) Continue Without Session", rendered)
+        self.assertIn("1) Select Existing\n2) Create New\n\nB) Back\nC) Cancel Run\nQA) Quit BenchPup completely", rendered)
+        self.assertNotIn("N) Create new", rendered)
 
     def test_create_session_from_cli_does_not_pass_duplicate_timestamps(self):
         app, _ = self.app_with(iter(["July import", "Historical entries", "", "", "Imported from CSV"]))

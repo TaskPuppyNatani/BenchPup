@@ -263,27 +263,55 @@ class TerminalApp:
 
     def choose_catalog(self, title: str, repository: Any, create: Callable[[], Any], key: str, *, optional: bool, current_id: int | None = None) -> int | None | NavigationSignal:
         while True:
-            items = repository.list()
-            self.output(f"\n{title}")
-            for item in items: self.output(f"{item.id}) {item.name if hasattr(item, 'name') else item.title}")
-            suggested = current_id or self.last_used[key]
-            options = "N) Create new  B) Back  C) Cancel  Q) Main menu"
-            if suggested: options += f"  Enter) Use #{suggested}"
-            elif optional: options += "  Enter) None"
-            value = self.ask(options, navigation=True)
+            options = "1) Select Existing\n2) Create New"
+            if optional:
+                options += f"\n3) Continue Without {title}"
+            options += "\n\nB) Back\nC) Cancel Run\nQA) Quit BenchPup completely"
+            self.render_screen(title, options)
+            value = self.ask("Choose an option", navigation=True)
             if value is BACK: return BACK
             if value is CANCEL: return CANCEL
             if value is MAIN: return MAIN
-            if value == "" and suggested and repository.get(suggested): return suggested
-            if value == "" and optional: return None
-            if isinstance(value, str) and value.lower() == "n":
+            command = self.normalized(str(value))
+            if command == "1":
+                selected = self.select_catalog_record(title, repository)
+                if isinstance(selected, int):
+                    self.last_used[key] = selected
+                    return selected
+                if selected is BACK:
+                    continue
+                if selected in (CANCEL, MAIN):
+                    return selected
+                continue
+            if command == "2":
                 created = create()
                 if created in (BACK, CANCEL, MAIN): return created
                 if created: self.last_used[key] = created.id; return created.id
                 continue
-            if isinstance(value, str) and value.isdigit() and repository.get(int(value)):
-                self.last_used[key] = int(value); return int(value)
-            self.output("Choose a listed numeric ID, N to create, or B to go back.")
+            if command == "3" and optional:
+                return None
+            self.output("Choose a listed option, B to go back, or C to cancel the run.")
+
+    def select_catalog_record(self, title: str, repository: Any) -> int | NavigationSignal:
+        items = repository.list()
+        lines = []
+        for number, item in enumerate(items, start=1):
+            label = item.name if hasattr(item, "name") else item.title
+            lines.append(f"{number}) {label}")
+        if not lines:
+            lines.append("No records found.")
+        lines.extend(("", "B) Back", "C) Cancel Run", "QA) Quit BenchPup completely"))
+        self.render_screen(f"Select {title}", "\n".join(lines))
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if choice in (BACK, CANCEL, MAIN):
+                return choice
+            selected = self.normalized(str(choice))
+            if selected.isdigit() and 1 <= int(selected) <= len(items):
+                item_id = items[int(selected) - 1].id
+                assert item_id is not None, f"Persisted {title} is missing its ID"
+                return item_id
+            self.output(f"Choose a number from 1 to {len(items)}, B to go back, or C to cancel the run.")
 
     def create_session(self) -> BenchmarkSession | NavigationSignal | None:
         values: FormValues | NavigationSignal = self._form([("title", "Session title", None, "text"), ("description", "Description", "", "text"), ("started_at", "Started at (ISO, optional)", "", "text"), ("completed_at", "Completed at (ISO, optional)", "", "text"), ("notes", "Notes", "", "text")])
@@ -712,7 +740,7 @@ class TerminalApp:
             return
 
     def collect_score(self, current: ReviewScore | None = None) -> ReviewScore | NavigationSignal:
-        self.output("\nReview score (B=back, C=cancel, Q=main menu)")
+        self.render_screen("Review Score", "B) Back\nC) Cancel Run\nQA) Quit BenchPup completely")
         accuracy = self.ask_float("Accuracy score (0-5)", default=current.accuracy_score if current else None, navigation=True)
         if isinstance(accuracy, NavigationSignal): return accuracy
         hallucination = self.pick("Hallucination level", LEVELS, current.hallucination_level if current else "Medium", navigation=True)
@@ -773,12 +801,14 @@ class TerminalApp:
 
     def review_and_save(self, state: dict[str, Any], steps: list[tuple[str, Callable[[], Any]]]) -> None:
         while True:
+            self.render_screen("Review Run")
             self.show_draft(state)
-            selected = self.ask("S) Save  E) Edit  C) Cancel  Q) Main menu", navigation=True)
+            self.output("\n1) Save Run\n2) Edit a Section\n3) Cancel Run\n\nB) Back\nC) Cancel Run\nQA) Quit BenchPup completely")
+            selected = self.ask("Choose an option", navigation=True)
             if selected in (CANCEL, MAIN): self.output("Wizard cancelled."); return
             if selected is BACK: continue
             choice = self.normalized(str(selected))
-            if choice in {"s", "save"}:
+            if choice == "1":
                 try:
                     template = self.catalog.prompt_templates.get(state["prompt_template_id"])
                     assert template is not None
@@ -788,8 +818,9 @@ class TerminalApp:
                     for attachment in state["attachments"]: self.benchmarks.add_attachment(RunAttachment(run_id=saved.id, **attachment))
                     self.output("✓ Benchmark saved."); return
                 except ValueError: self.output("The benchmark could not be saved. Check the entered values and try again.")
-            elif choice in {"e", "edit"}:
-                section = self.ask_id("Section number", navigation=True)
+            elif choice == "2":
+                self.render_screen("Edit Run Section", "1) Session\n2) Model\n3) Benchmark\n4) Prompt Template\n5) Hardware Profile\n6) Raw Output\n7) Review Score\n8) Attachments\n\nB) Back\nC) Cancel Run\nQA) Quit BenchPup completely")
+                section = self.ask_id("Choose a section", navigation=True)
                 if section in (CANCEL, MAIN): return
                 if section is BACK: continue
                 if not isinstance(section, int): continue
@@ -801,7 +832,9 @@ class TerminalApp:
                     if value is BACK: index = max(0, index - 1); continue
                     state[key] = value; index += 1
             elif choice in {"", "c", "cancel"}: self.output("Wizard cancelled."); return
-            else: self.output("Choose Save, Edit, Cancel, or Main menu.")
+            elif choice in {"3", "c", "cancel"}:
+                self.output("Wizard cancelled."); return
+            else: self.output("Choose 1, 2, or 3.")
 
     def show_draft(self, state: Mapping[str, Any]) -> None:
         model = self.catalog.model_profiles.get(state["model_profile_id"])
@@ -842,7 +875,6 @@ class TerminalApp:
             if selected in (CANCEL, MAIN): return
             if selected is BACK: return
             choice = self.normalized(str(selected))
-            if choice in {"b", "back", "q", "quit", "exit"}: return
             if choice in {"1", "output"}:
                 value = self.ask("Raw model output", navigation=True, default=run.raw_model_output)
                 if value in (CANCEL, MAIN, BACK): continue
@@ -1317,6 +1349,28 @@ class TerminalApp:
             "    Also: qa, quit all, quit a (case-insensitive; extra spaces allowed).\n\nB) Back\nQA) Quit BenchPup completely")
         self.pause()
 
+    def select_run(self) -> int | NavigationSignal:
+        runs = self.benchmarks.runs.list()
+        lines = [
+            f"{number}) {run.model_snapshot.get('model_name', 'Unknown')} | "
+            f"{run.benchmark_snapshot.get('name') or run.benchmark_snapshot.get('file_path', 'Unknown')}"
+            for number, run in enumerate(runs, start=1)
+        ]
+        if not lines:
+            lines.append("No benchmark runs found.")
+        lines.extend(("", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen("Select Run", "\n".join(lines))
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if choice in (BACK, CANCEL, MAIN):
+                return BACK
+            selected = self.normalized(str(choice))
+            if selected.isdigit() and 1 <= int(selected) <= len(runs):
+                run_id = runs[int(selected) - 1].id
+                assert run_id is not None, "Persisted benchmark run is missing its ID"
+                return run_id
+            self.output(f"Choose a number from 1 to {len(runs)}, or B to return.")
+
     def show_main_menu(self) -> None:
         runs = len(self.benchmarks.runs.list())
         scoreboard_entries = len(self.catalog.scoreboard_entries.list())
@@ -1358,9 +1412,7 @@ class TerminalApp:
                 if command == "add": self.add_run_wizard()
                 elif command == "list": self.list_runs()
                 elif command in {"view", "edit", "delete"}:
-                    run_id = self.ask_id("Run ID")
-                    if run_id is MAIN: continue
-                    if run_id in (BACK, CANCEL): continue
+                    run_id = self.select_run()
                     if not isinstance(run_id, int): continue
                     {"view": self.view_run, "edit": self.edit_run, "delete": self.delete_run}[command](run_id)
                 elif command == "sessions": self.catalog_screen("Sessions", self.catalog.sessions, self.create_session)
