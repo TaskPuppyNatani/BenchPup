@@ -6,6 +6,17 @@ import json
 from pathlib import Path
 
 from .domain import now
+from .reporting import (
+    BenchmarkReportFilters,
+    ScoreboardReportFilters,
+    build_benchmark_run_report,
+    build_model_leaderboard,
+    build_scoreboard_report,
+    render_combined_markdown,
+    render_model_leaderboard_markdown,
+    render_scoreboard_markdown,
+    write_markdown_report,
+)
 from .services import BenchmarkService, CatalogService
 
 
@@ -271,8 +282,76 @@ def export_jsonl_training_data(service: BenchmarkService, path: str | Path) -> P
 
 
 def export_combined_markdown(service: BenchmarkService, catalog: CatalogService, path: str | Path) -> Path:
-    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["# BenchPup report", "", "## Benchmark runs", ""]
+    benchmark_report = build_benchmark_run_report(service=service, catalog=catalog)
+    scoreboard_report = build_scoreboard_report(catalog=catalog)
+    result = write_markdown_report(render_combined_markdown(benchmark_report, scoreboard_report), path, overwrite=True)
+    if not result.succeeded:
+        raise OSError(result.details or result.message)
+    return result.path
+
+
+def export_benchmark_runs_markdown(
+    service: BenchmarkService,
+    path: str | Path,
+    *,
+    filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+    include_prompt_text: bool = False,
+    include_raw_model_output: bool = False,
+    include_attachment_metadata: bool = False,
+) -> Path:
+    """Export the structured detailed BenchmarkRun report as Markdown."""
+
+    report = build_benchmark_run_report(
+        service=service,
+        filters=filters,
+        include_prompt_text=include_prompt_text,
+        include_raw_model_output=include_raw_model_output,
+        include_attachment_metadata=include_attachment_metadata,
+    )
+    result = write_markdown_report(report, path, overwrite=True)
+    if not result.succeeded:
+        raise OSError(result.details or result.message)
+    return result.path
+
+
+def export_scoreboard_markdown(
+    catalog: CatalogService,
+    path: str | Path,
+    *,
+    filters: ScoreboardReportFilters = ScoreboardReportFilters(),
+) -> Path:
+    """Export the structured historical ScoreboardEntry report as Markdown."""
+
+    report = build_scoreboard_report(catalog=catalog, filters=filters)
+    result = write_markdown_report(render_scoreboard_markdown(report), path, overwrite=True)
+    if not result.succeeded:
+        raise OSError(result.details or result.message)
+    return result.path
+
+
+def export_model_leaderboard_markdown(
+    service: BenchmarkService,
+    path: str | Path,
+    *,
+    filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+    include_model_details: bool = False,
+) -> Path:
+    """Export the model leaderboard foundation as Markdown."""
+
+    report = build_model_leaderboard(service=service, filters=filters)
+    result = write_markdown_report(
+        render_model_leaderboard_markdown(report, include_model_details=include_model_details),
+        path,
+        overwrite=True,
+    )
+    if not result.succeeded:
+        raise OSError(result.details or result.message)
+    return result.path
+
+
+def _legacy_combined_markdown(service: BenchmarkService, catalog: CatalogService, path: str | Path) -> Path:
+    path = Path(path)
+    lines: list[str] = []
     for run in service.runs.list(): lines.append(f"- {run.model_snapshot.get('model_name', 'Unknown')} — {run.benchmark_snapshot.get('benchmark_file', 'custom')}")
     lines += ["", "## Scoreboard", ""]
     batches = {batch.id: batch for batch in catalog.scoreboard_import_batches.list()}

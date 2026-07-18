@@ -171,3 +171,33 @@ confirmation, and presentation of engine results. Preview, build, and existing
 dataset validation all call the DatasetBuilder directly; the CLI does not
 reimplement eligibility, hashing, JSON parsing, duplicate detection, or file
 writing.
+
+## Reporting Engine Foundation
+
+`engine.reporting` is the UI-independent boundary for Phase 4.2A. Its public
+`ReportingService` and `build_*` APIs own record selection, aggregation,
+structured report results, and portable Markdown rendering for the two separate
+source families:
+
+- `BenchmarkRunAggregate` records combine a run with its `ReviewScore`, session,
+  and attachment metadata when available.
+- `ScoreboardEntryAggregate` records keep historical `ScoreboardEntry` values
+  separate and associate an optional `ScoreboardImportBatch`.
+
+`build_benchmark_run_report()` produces detailed model-grouped run reports;
+`build_scoreboard_report()` produces batch-grouped historical reports; and
+`build_model_leaderboard()` produces deterministic model rankings from detailed
+runs. `render_*_markdown()` functions are UI-independent. Prompt text, raw
+model output, and attachment metadata are opt-in, and attachment binary
+contents are never read by the reporting engine.
+
+Soft-deleted runs are excluded by default. Scoreboard entries whose entry or
+source batch is soft-deleted are also excluded by default. Numeric summaries
+ignore missing scores and missing tokens-per-second values rather than treating
+them as zero. Leaderboard ordering is average overall score descending, then
+scored-run count descending, median score descending, and model name ascending
+(case-insensitive, then original spelling).
+
+`write_markdown_report()` provides staged UTF-8 output with explicit overwrite
+protection and structured `ReportWriteResult` statuses. It never prompts or
+owns CLI destination selection.
