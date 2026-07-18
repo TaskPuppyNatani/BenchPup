@@ -201,3 +201,22 @@ scored-run count descending, median score descending, and model name ascending
 `write_markdown_report()` provides staged UTF-8 output with explicit overwrite
 protection and structured `ReportWriteResult` statuses. It never prompts or
 owns CLI destination selection.
+
+## Reporting CLI Integration
+
+The screen-based CLI exposes the reporting engine through `Data > Reports`.
+The Reports screen keeps detailed-run, historical-scoreboard, and leaderboard
+options in memory for the current CLI session only. It provides vertical
+catalog selectors for benchmark types, benchmarks, sessions, hardware
+profiles, models, and scoreboard import batches, plus snapshot-text filters
+where a catalog record is not required.
+
+`TerminalApp` owns only screen navigation, option editing, selection previews,
+destination autocomplete, confirmation, and presentation of structured
+results. `ReportingService` owns selection, aggregation, ranking, Markdown
+rendering, staged UTF-8 writing, and overwrite statuses. Prompt text, raw model
+output, and attachment metadata are excluded by default and are passed to the
+engine only when explicitly enabled. Attachment binary contents are never
+read. An existing report requires a second explicit overwrite confirmation;
+cancellation does not write a file. The existing legacy Export screen remains
+available separately.

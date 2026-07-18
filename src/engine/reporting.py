@@ -1069,6 +1069,27 @@ class ReportingService:
             generated_at=generated_at,
         )
 
+    def write_markdown_report(
+        self,
+        report: ReportDocument,
+        destination: str | Path,
+        *,
+        overwrite: bool = False,
+        include_model_details: bool = False,
+    ) -> ReportWriteResult:
+        """Render and stage a report through the application-facing facade.
+
+        Leaderboard detail sections are a rendering option, so the facade
+        accepts that option here rather than requiring a UI caller to render
+        Markdown itself.  The underlying writer still owns UTF-8 staging,
+        finalization, and overwrite protection.
+        """
+
+        if isinstance(report, ModelLeaderboardReport) and include_model_details:
+            rendered = render_model_leaderboard_markdown(report, include_model_details=True)
+            return write_markdown_report(rendered, destination, overwrite=overwrite)
+        return write_markdown_report(report, destination, overwrite=overwrite)
+
 
 def _render_header(metadata: ReportMetadata) -> list[str]:
     return [

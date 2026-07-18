@@ -39,6 +39,28 @@ transactional validation.
 - JSONL training data from detailed benchmark runs
 - standalone interactive Scoreboard HTML
 
+### Markdown report families
+
+The screen-based Reports workflow writes three Markdown report families through
+the reporting engine:
+
+- detailed `BenchmarkRun` reports, grouped by model
+- historical `ScoreboardEntry` reports, grouped by `ScoreboardImportBatch`
+- deterministic model leaderboards derived from detailed benchmark runs
+
+Report options are session-local. Benchmark reports can filter by benchmark
+type, benchmark, session, model, hardware profile, or hardware snapshot text.
+Scoreboard reports can filter by import batch and model text. Prompt text, raw
+model output, attachment metadata, and leaderboard detail sections are opt-in;
+attachment binary contents are never exported. Missing scores and speeds remain
+unavailable rather than being filled with zero.
+
+Reports use UTF-8 staged output. The CLI previews the structured selection or
+ranking result, asks for the destination using the existing path autocomplete,
+requires confirmation before writing, and requires a second confirmation to
+replace an existing file. Write failures are returned as structured statuses;
+the CLI presents them without exposing a traceback for expected errors.
+
 ## BenchPup Archive
 
 Backup and restore use a dedicated versioned format:
