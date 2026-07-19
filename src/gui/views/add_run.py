@@ -39,6 +39,22 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
 NOT_SELECTED = "Not selected"
 
 
+def _format_inference_value(value: Any) -> str:
+    if value is None or value == "":
+        return NOT_SELECTED
+    if isinstance(value, bool):
+        return "Enabled" if value else "Disabled"
+    return str(value)
+
+
+def _format_tokens_per_second(value: Any) -> str:
+    if value is None or value == "" or isinstance(value, bool):
+        return NOT_SELECTED
+    if isinstance(value, (int, float)):
+        return f"{float(value):.1f} tok/s"
+    return str(value)
+
+
 class OptionalScoreField(QWidget):
     """A numeric review field with a real, explicit unrecorded state."""
 
@@ -129,7 +145,8 @@ class AddRunWizard(QWizard):
         page = QWizardPage()
         page.setTitle("Context")
         page.setSubTitle("Choose existing catalog records when available. Every relationship may remain unselected for a manual run.")
-        layout = QVBoxLayout(page)
+        body = QWidget()
+        layout = QVBoxLayout(body)
         self.catalog_status = QLabel()
         self.catalog_status.setObjectName("catalogStatus")
         self.catalog_status.setWordWrap(True)
@@ -161,11 +178,41 @@ class AddRunWizard(QWizard):
         form.addRow("Prompt template", self.prompt_template_combo)
         form.addRow("Hardware profile", self.hardware_combo)
         layout.addLayout(form)
+
+        self.inference_values: dict[str, QLabel] = {}
+        inference_group = QGroupBox("Inference settings")
+        inference_group.setObjectName("inferenceSettings")
+        inference_form = QFormLayout(inference_group)
+        for key, label in (
+            ("backend", "Backend"),
+            ("thinking_enabled", "Thinking Mode"),
+            ("temperature", "Temperature"),
+            ("top_p", "Top-P"),
+            ("top_k", "Top-K"),
+            ("min_p", "Min-P"),
+            ("context_length", "Context Length"),
+            ("flash_attention", "Flash Attention"),
+            ("moe_experts", "MoE Experts"),
+            ("quantization", "Quantization"),
+            ("tokens_per_second", "Tokens/sec"),
+        ):
+            value = self._detail_label(label)
+            value.setObjectName(f"inference_{key}")
+            self.inference_values[key] = value
+            inference_form.addRow(label, value)
+        inference_note = QLabel(
+            "Values come from the selected Model Profile and are captured in the immutable run snapshot when the run is saved. Tokens/sec is display-only."
+        )
+        inference_note.setObjectName("fieldHint")
+        inference_note.setWordWrap(True)
+        inference_form.addRow("", inference_note)
+        layout.addWidget(inference_group)
         layout.addStretch(1)
 
         self.prompt_template_combo.currentIndexChanged.connect(self._prefill_from_template)
         self.benchmark_combo.currentIndexChanged.connect(self._prefill_from_benchmark)
-        return page
+        self.model_combo.currentIndexChanged.connect(self._refresh_inference_settings)
+        return self._scroll_page(page, body)
 
     def _build_prompt_page(self) -> QWizardPage:
         page = QWizardPage()
@@ -365,6 +412,7 @@ class AddRunWizard(QWizard):
             self._populate(self.prompt_template_combo, templates, lambda value: f"{value.name} v{value.version}", selected_id=previous["prompt"], preserve_selection=preserve_selection)
             self._populate(self.hardware_combo, hardware, lambda value: value.name, selected_id=previous["hardware"], preserve_selection=preserve_selection)
             self._refresh_benchmark_details()
+            self._refresh_inference_settings()
             self._update_prompt_resolution_hint()
             if not any((sessions, models, benchmarks, templates, hardware)):
                 self.catalog_status.setText("No catalog records are available. Manual/custom entry is supported; this workflow will not create catalog records automatically.")
@@ -438,6 +486,29 @@ class AddRunWizard(QWizard):
         self.benchmark_file_value.setText(definition.file_path)
         self.benchmark_type_value.setText(definition.benchmark_type)
         self.benchmark_default_prompt_value.setPlainText(definition.default_prompt)
+
+    def _refresh_inference_settings(self, *_args: object) -> None:
+        profile_id = self._selected_id(self.model_combo)
+        profile = self.context.catalog.get_model_profile(profile_id) if profile_id is not None else None
+        values: dict[str, str]
+        if profile is None:
+            values = {key: NOT_SELECTED for key in self.inference_values}
+        else:
+            values = {
+                "backend": _format_inference_value(profile.backend),
+                "thinking_enabled": _format_inference_value(profile.thinking_enabled),
+                "temperature": _format_inference_value(profile.temperature),
+                "top_p": _format_inference_value(profile.top_p),
+                "top_k": _format_inference_value(profile.top_k),
+                "min_p": _format_inference_value(profile.min_p),
+                "context_length": _format_inference_value(profile.context_length),
+                "flash_attention": _format_inference_value(profile.flash_attention),
+                "moe_experts": _format_inference_value(profile.moe_experts),
+                "quantization": _format_inference_value(profile.quantization),
+                "tokens_per_second": _format_tokens_per_second(profile.tokens_per_second),
+            }
+        for key, value in values.items():
+            self.inference_values[key].setText(value)
 
     def _effective_prompt_text(self, run: BenchmarkRun) -> str:
         definition_id = self._selected_id(self.benchmark_combo)

@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPlainTextEdit
 from engine.domain import BenchmarkRun, ModelProfile, ReviewScore
 from engine.reporting import BenchmarkRunAggregate
 from gui.context import GuiApplicationContext
-from gui.views.run_details import RunDetailsDialog
+from gui.views.run_details import RunDetailsDialog, _format_bool
 
 
 class GuiRunDetailsTests(unittest.TestCase):
@@ -109,6 +109,36 @@ class GuiRunDetailsTests(unittest.TestCase):
         self.assertIn("legacy_value", snapshots.toPlainText())  # type: ignore[union-attr]
         dialog.copy_prompt()
         self.assertEqual(QApplication.clipboard().text(), "legacy prompt")
+
+    def test_malformed_persisted_snapshot_json_is_rendered_without_rewriting(self) -> None:
+        saved, _ = self.context.benchmarks.save_run(BenchmarkRun(raw_model_output="output", prompt_text="prompt"))
+        raw_values = ("{malformed-model", "{malformed-benchmark", "{malformed-prompt", "{malformed-hardware")
+        with self.context.database.connection() as connection:
+            connection.execute(
+                "UPDATE benchmark_runs SET model_snapshot = ?, benchmark_snapshot = ?, prompt_snapshot = ?, hardware_snapshot = ? WHERE id = ?",
+                (*raw_values, saved.id),
+            )
+
+        dialog = RunDetailsDialog(self.context, saved.id or 0)
+        snapshots = dialog.findChild(QPlainTextEdit, "historicalSnapshots")
+        self.assertIsNotNone(snapshots)
+        snapshot_text = snapshots.toPlainText()  # type: ignore[union-attr]
+        for raw_value in raw_values:
+            self.assertIn(raw_value, snapshot_text)
+
+        with self.context.database.connection() as connection:
+            persisted = connection.execute(
+                "SELECT model_snapshot, benchmark_snapshot, prompt_snapshot, hardware_snapshot FROM benchmark_runs WHERE id = ?",
+                (saved.id,),
+            ).fetchone()
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual(tuple(persisted), raw_values)
+
+    def test_run_details_thinking_mode_accepts_legacy_integer_values(self) -> None:
+        self.assertEqual(_format_bool(1), "Enabled")
+        self.assertEqual(_format_bool(0), "Disabled")
+        self.assertEqual(_format_bool("1"), "Not recorded")
 
     def test_copy_empty_text_reports_friendly_status(self) -> None:
         dialog = RunDetailsDialog(

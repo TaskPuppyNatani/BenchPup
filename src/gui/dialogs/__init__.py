@@ -4,6 +4,7 @@ from .benchmark_editor import BenchmarkEditorDialog
 from .model_editor import ModelEditorDialog, OptionalNumericField
 from .hardware_profile_editor import BackendVersionsEditor, HardwareProfileEditorDialog
 from .prompt_template_editor import PromptTemplateEditorDialog
+from .review_editor import ReviewEditorDialog
 from .session_editor import SessionEditorDialog
 
 __all__ = (
@@ -13,5 +14,6 @@ __all__ = (
     "ModelEditorDialog",
     "OptionalNumericField",
     "PromptTemplateEditorDialog",
+    "ReviewEditorDialog",
     "SessionEditorDialog",
 )

@@ -211,7 +211,15 @@ class BenchmarkService:
     def __init__(self, database: EngineDatabase, catalog: CatalogService | None = None):
         self.database = database
         self.catalog = catalog or CatalogService(database)
-        self.runs = Repository(database, "benchmark_runs", BenchmarkRun, json_fields={"model_snapshot", "benchmark_snapshot", "prompt_snapshot", "hardware_snapshot"}, bool_fields={"is_deleted"})
+        snapshot_fields = {"model_snapshot", "benchmark_snapshot", "prompt_snapshot", "hardware_snapshot"}
+        self.runs = Repository(
+            database,
+            "benchmark_runs",
+            BenchmarkRun,
+            json_fields=snapshot_fields,
+            bool_fields={"is_deleted"},
+            tolerant_json_fields=snapshot_fields,
+        )
         self.scores = Repository(database, "review_scores", ReviewScore)
         self.attachments = Repository(database, "run_attachments", RunAttachment)
 
@@ -285,6 +293,13 @@ class BenchmarkService:
 
     def update_score(self, score: ReviewScore) -> ReviewScore:
         return self.scores.update(score)
+
+    def create_score(self, score: ReviewScore) -> ReviewScore:
+        """Create a review for an existing run through the typed service boundary."""
+
+        if self.runs.get(score.run_id) is None:
+            raise ValueError("run_id does not exist")
+        return self.scores.create(score)
 
     def delete_score(self, score_id: int) -> None:
         self.scores.delete(score_id)

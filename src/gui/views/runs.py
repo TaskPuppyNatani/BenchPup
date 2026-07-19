@@ -399,6 +399,7 @@ class RunsView(QWidget):
             return
         try:
             dialog = RunDetailsDialog(self.context, row.run_id, self)
+            dialog.review_saved.connect(lambda _run_id: self.refresh())
             dialog.exec()
         except Exception:
             self.context.logger.exception("Run details failed for run %s", row.run_id)

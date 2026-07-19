@@ -20,9 +20,18 @@ T = TypeVar("T", bound=RepositoryModel)
 
 
 class Repository(Generic[T]):
-    def __init__(self, database: EngineDatabase, table: str, model: type[T], json_fields: set[str] | None = None, bool_fields: set[str] | None = None):
+    def __init__(
+        self,
+        database: EngineDatabase,
+        table: str,
+        model: type[T],
+        json_fields: set[str] | None = None,
+        bool_fields: set[str] | None = None,
+        tolerant_json_fields: set[str] | None = None,
+    ):
         self.database, self.table, self.model = database, table, model
         self.json_fields, self.bool_fields = json_fields or set(), bool_fields or set()
+        self.tolerant_json_fields = tolerant_json_fields or set()
         self.columns = [field.name for field in fields(cast(Any, model)) if field.name != "id"]
 
     def _values(self, item: T) -> dict[str, Any]:
@@ -32,9 +41,21 @@ class Repository(Generic[T]):
         for name in self.bool_fields: values[name] = int(values[name])
         return values
 
+    @staticmethod
+    def _malformed_json_fallback(value: Any) -> dict[str, Any]:
+        status = "missing" if value is None or value == "" else "malformed"
+        return {"_snapshot_status": status, "_raw_snapshot": value}
+
     def _item(self, row: Any) -> T:
         values = dict(row)
-        for name in self.json_fields: values[name] = json.loads(values[name])
+        for name in self.json_fields:
+            raw_value = values[name]
+            try:
+                values[name] = json.loads(raw_value)
+            except (TypeError, ValueError):
+                if name not in self.tolerant_json_fields:
+                    raise
+                values[name] = self._malformed_json_fallback(raw_value)
         for name in self.bool_fields: values[name] = bool(values[name])
         return self.model(**values)
 

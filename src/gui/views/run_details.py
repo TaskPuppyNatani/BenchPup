@@ -6,13 +6,14 @@ import json
 import math
 from typing import Any
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
     QDialogButtonBox,
     QFrame,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..context import GuiApplicationContext
+from ..dialogs.review_editor import ReviewEditorDialog
 from ..models.runs import NOT_RECORDED, UNAVAILABLE, snapshot_label
 
 try:
@@ -56,6 +58,8 @@ def _format_speed(value: Any) -> str:
 def _format_bool(value: Any) -> str:
     if isinstance(value, bool):
         return "Enabled" if value else "Disabled"
+    if isinstance(value, int) and value in (0, 1):
+        return "Enabled" if value == 1 else "Disabled"
     return NOT_RECORDED
 
 
@@ -76,6 +80,8 @@ def _json_text(value: Any) -> str:
 
 class RunDetailsDialog(QDialog):
     """Complete run aggregate presented without mutation controls."""
+
+    review_saved = Signal(int)
 
     def __init__(
         self,
@@ -109,14 +115,17 @@ class RunDetailsDialog(QDialog):
         return aggregates[0]
 
     def _build_ui(self) -> None:
-        tabs = QTabWidget()
-        tabs.setObjectName("runDetailsTabs")
-        tabs.setAccessibleName("Run details sections")
-        tabs.addTab(self._summary_tab(), "Summary")
-        tabs.addTab(self._prompt_output_tab(), "Prompt and Output")
-        tabs.addTab(self._evaluation_tab(), "Evaluation")
-        tabs.addTab(self._snapshots_tab(), "Historical Snapshots")
-        tabs.addTab(self._metadata_tab(), "Metadata")
+        self.tabs = self._build_tabs()
+
+        actions = QHBoxLayout()
+        actions.addWidget(QLabel(f"Run #{self.run_id} evaluation"))
+        actions.addStretch(1)
+        self.edit_review_button = QPushButton("Edit Review")
+        self.edit_review_button.setObjectName("primaryButton")
+        self.edit_review_button.setAccessibleName("Edit Review")
+        self.edit_review_button.setToolTip("Create or update the ReviewScore without changing run snapshots")
+        self.edit_review_button.clicked.connect(self.edit_review)
+        actions.addWidget(self.edit_review_button)
 
         self.close_button = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         self.close_button.setAccessibleName("Close run details")
@@ -125,8 +134,20 @@ class RunDetailsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
-        layout.addWidget(tabs, 1)
+        layout.addLayout(actions)
+        layout.addWidget(self.tabs, 1)
         layout.addWidget(self.close_button)
+
+    def _build_tabs(self) -> QTabWidget:
+        tabs = QTabWidget()
+        tabs.setObjectName("runDetailsTabs")
+        tabs.setAccessibleName("Run details sections")
+        tabs.addTab(self._summary_tab(), "Summary")
+        tabs.addTab(self._prompt_output_tab(), "Prompt and Output")
+        tabs.addTab(self._evaluation_tab(), "Evaluation")
+        tabs.addTab(self._snapshots_tab(), "Historical Snapshots")
+        tabs.addTab(self._metadata_tab(), "Metadata")
+        return tabs
 
     @staticmethod
     def _scroll(widget: QWidget) -> QScrollArea:
@@ -169,25 +190,48 @@ class RunDetailsDialog(QDialog):
         benchmark = run.benchmark_snapshot if isinstance(run.benchmark_snapshot, dict) else {}
         hardware = run.hardware_snapshot if isinstance(run.hardware_snapshot, dict) else {}
         score = self.aggregate.score
-        form = self._form()
-        values = (
+        summary_group = QGroupBox("Run summary")
+        summary_form = self._form()
+        summary_values = (
             ("Recorded", run.created_at),
             ("Model", snapshot_label(model, "model_name", "name")),
             ("Benchmark", snapshot_label(benchmark, "name", "file_path", "benchmark_file")),
             ("Session", self.aggregate.session.title if self.aggregate.session else (NOT_RECORDED if run.session_id is None else UNAVAILABLE)),
             ("Prompt name", run.prompt_name or snapshot_label(run.prompt_snapshot, "name", default=NOT_RECORDED)),
             ("Hardware", snapshot_label(hardware, "name", "computer_name", "gpu", default=UNAVAILABLE)),
-            ("Backend", model.get("backend") if isinstance(model, dict) else None),
-            ("Tokens per second", _format_speed(model.get("tokens_per_second") if isinstance(model, dict) else None)),
-            ("Thinking", _format_bool(model.get("thinking_enabled") if isinstance(model, dict) else None)),
-            ("Context length", model.get("context_length") if isinstance(model, dict) else None),
             ("Overall score", _format_score(score.overall_score if score else None)),
         )
-        for label, value in values:
-            form.addRow(label, self._line_value(value))
+        for label, value in summary_values:
+            summary_form.addRow(label, self._line_value(value))
+        summary_group.setLayout(summary_form)
+
+        inference_group = QGroupBox("Inference settings")
+        inference_form = self._form()
+        inference_values = (
+            ("Backend", model.get("backend")),
+            ("Thinking Mode", _format_bool(model.get("thinking_enabled"))),
+            ("Temperature", model.get("temperature")),
+            ("Top-P", model.get("top_p")),
+            ("Top-K", model.get("top_k")),
+            ("Min-P", model.get("min_p")),
+            ("Context Length", model.get("context_length")),
+            ("Flash Attention", _format_bool(model.get("flash_attention"))),
+            ("MoE Experts", model.get("moe_experts")),
+            ("Quantization", model.get("quantization")),
+            ("Tokens/sec", _format_speed(model.get("tokens_per_second"))),
+        )
+        for label, value in inference_values:
+            inference_form.addRow(label, self._line_value(value))
+        inference_group.setLayout(inference_form)
+
         body = QWidget()
         body.setObjectName("runDetailsSummary")
-        body.setLayout(form)
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+        layout.addWidget(summary_group)
+        layout.addWidget(inference_group)
+        layout.addStretch(1)
         return self._scroll(body)
 
     def _prompt_output_tab(self) -> QWidget:
@@ -323,6 +367,25 @@ class RunDetailsDialog(QDialog):
             layout.addWidget(empty)
         layout.addStretch(1)
         return self._scroll(body)
+
+    def edit_review(self) -> None:
+        """Open the dedicated review editor and reload only the mutable review."""
+
+        try:
+            editor = ReviewEditorDialog(self.context, self.run_id, self)
+            if editor.exec() != QDialog.DialogCode.Accepted:
+                return
+            self.aggregate = self.load_aggregate(self.context, self.run_id)
+            layout = self.layout()
+            if not isinstance(layout, QVBoxLayout):
+                return
+            layout.removeWidget(self.tabs)
+            self.tabs.deleteLater()
+            self.tabs = self._build_tabs()
+            layout.insertWidget(1, self.tabs, 1)
+            self.review_saved.emit(self.run_id)
+        except Exception:
+            self.context.logger.exception("Review editor failed for run %s", self.run_id)
 
     def _copy_text(self, value: str, label: str) -> None:
         if not value:
