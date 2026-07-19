@@ -6,7 +6,7 @@
 
 ## Current Test Status
 
-**282 passing**
+**304 passing**
 
 ## Completed
 
@@ -59,6 +59,7 @@ Status: In progress.
 - [x] Phase 5B Runs browsing and Add Run workflow
 - [x] Phase 5C1 Sessions, Model Profiles, and Benchmark Definitions catalog GUI
 - [x] Phase 5C2 Prompt Templates and Hardware Profiles catalog GUI
+- [x] Phase 5C3 Benchmark Definitions GUI management
 
 Phase 5B adds a read-only Runs browser with search and filters, complete
 historical Run Details, and a review-before-save Add Run wizard. Catalog
@@ -83,6 +84,13 @@ and support active/inactive lifecycle changes. Hardware Profile editors preserve
 optional numeric values, structured backend-version mappings, and imported
 provenance metadata. Historical prompt and hardware snapshots remain unchanged
 after reusable catalog edits.
+
+Phase 5C3 completes the Benchmark Definitions GUI slice on top of the existing
+typed service contract. The page/editor preserve the live name, file path,
+benchmark type, default prompt, tags, and active state without GUI-only
+normalization. Add Run displays the selected definition context and resolves
+prompt text in the order explicit run text, selected PromptTemplate, then the
+definition default while preserving immutable benchmark snapshots.
 
 Run editing/deletion, import/export dialogs, report dialogs, Dataset Builder
 forms, packaging, and installers are not implemented in the GUI.

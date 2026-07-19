@@ -98,13 +98,15 @@ class BenchmarksView(CatalogPage):
     def add_record(self) -> None:
         dialog = BenchmarkEditorDialog(self.context, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.notify_changed("Benchmark Definition created successfully.")
+            saved_id = dialog.saved_record.id if dialog.saved_record is not None else None
+            self.notify_changed("Benchmark Definition created successfully.", select_id=saved_id)
         dialog.deleteLater()
 
     def open_editor(self, record: BenchmarkDefinition) -> None:
         dialog = BenchmarkEditorDialog(self.context, record, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.notify_changed("Benchmark Definition updated successfully.")
+            saved_id = dialog.saved_record.id if dialog.saved_record is not None else record.id
+            self.notify_changed("Benchmark Definition updated successfully.", select_id=saved_id)
         dialog.deleteLater()
 
     def lifecycle_label(self, record: BenchmarkDefinition) -> str:

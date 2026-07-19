@@ -24,6 +24,26 @@ def prompt_hash_for(prompt_text: str) -> str:
     return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
 
 
+def resolve_prompt_text(
+    explicit_prompt: str,
+    template_prompt: str = "",
+    default_prompt: str = "",
+) -> str:
+    """Resolve one run's prompt without conflating catalog prompt sources.
+
+    An explicitly entered run prompt wins, followed by the selected
+    ``PromptTemplate`` text and then the selected ``BenchmarkDefinition``
+    default prompt. Empty strings mean that source has no prompt; all other
+    text, including whitespace, is preserved exactly.
+    """
+
+    if explicit_prompt != "":
+        return explicit_prompt
+    if template_prompt != "":
+        return template_prompt
+    return default_prompt
+
+
 def now() -> str:
     return serialize_utc_timestamp(datetime.now(timezone.utc))
 

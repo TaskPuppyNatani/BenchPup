@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any, TypeVar
 
 from .database import EngineDatabase
-from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now, prompt_hash_for
+from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now, prompt_hash_for, resolve_prompt_text
 from .repositories import Repository
 
 _T = TypeVar("_T")
@@ -229,6 +229,11 @@ class BenchmarkService:
         if run.prompt_template_id and not template: raise ValueError("prompt_template_id does not exist")
         if run.hardware_profile_id and not hardware: raise ValueError("hardware_profile_id does not exist")
         if run.session_id and not self.catalog.sessions.get(run.session_id): raise ValueError("session_id does not exist")
+        resolved_prompt_text = resolve_prompt_text(
+            run.prompt_text,
+            template.prompt_text if template else "",
+            definition.default_prompt if definition else "",
+        )
         prompt_snapshot = dict(run.prompt_snapshot) if run.prompt_snapshot else (self._snapshot(template) if template else {})
         if template: prompt_snapshot["prompt_text"] = template.prompt_text
         updated = replace(run,
@@ -236,7 +241,7 @@ class BenchmarkService:
             benchmark_snapshot=run.benchmark_snapshot or (self._snapshot(definition) if definition else {}),
             prompt_snapshot=prompt_snapshot,
             hardware_snapshot=run.hardware_snapshot or (self._snapshot(hardware) if hardware else {}),
-            prompt_text=run.prompt_text or (template.prompt_text if template else ""),
+            prompt_text=resolved_prompt_text,
             updated_at=now())
         canonical = {"model": updated.model_snapshot, "benchmark": updated.benchmark_snapshot, "prompt": updated.prompt_snapshot, "hardware": updated.hardware_snapshot, "output": updated.raw_model_output}
         return replace(updated, fingerprint=hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest())

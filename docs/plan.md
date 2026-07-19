@@ -163,7 +163,7 @@ Completed:
 
 ## Phase 5 — GUI
 
-**Status: In progress — Phase 5C2 complete**
+**Status: In progress — Phase 5C3 complete**
 
 ### Phase 5A — PySide6 application shell
 
@@ -235,6 +235,23 @@ Completed:
   catalog operations
 - offscreen CRUD, lifecycle, provenance, import-parser round-trip, validation,
   cancellation, selection, navigation, and historical snapshot coverage
+
+### Phase 5C3 — Benchmark Definitions GUI management
+
+Completed:
+
+- Benchmark Definitions catalog listing, typed-service CRUD editing, active /
+  inactive visibility, lifecycle actions, refresh, empty/error states, and
+  selection preservation
+- Complete editor coverage for the existing name, file path, benchmark type,
+  default prompt, tags, and active fields without schema expansion or GUI-only
+  normalization
+- Add Run definition context for stored file/target, benchmark type, and
+  default prompt, with explicit run prompt, selected PromptTemplate, and
+  definition-default precedence centralized in the engine helper
+- Regression coverage for catalog round-trips, tags, cancellation and
+  validation failures, active selection rules, Add Run prompt precedence, and
+  immutable historical benchmark snapshots
 
 Remaining GUI workflow forms, imports/exports, reports, Dataset Builder,
 packaging, and other later Phase 5 slices remain out of scope.

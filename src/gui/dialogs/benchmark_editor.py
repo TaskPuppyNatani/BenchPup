@@ -19,10 +19,8 @@ from .base import CatalogEditorDialog
 
 
 BENCHMARK_TYPE_LABELS = {
-    "code_review": "Code review",
-    "code_generation": "Code generation",
-    "revision": "Revision",
-    "review_the_review": "Review the review",
+    value: value.replace("_", " ").capitalize()
+    for value in BENCHMARK_TYPES
 }
 
 

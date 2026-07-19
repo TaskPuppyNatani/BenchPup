@@ -182,6 +182,15 @@ provenance remain engine-owned values during editing. The two new pages reuse
 the shared catalog table/editor patterns, and Add Run consumes their typed
 active/available service lists.
 
+Phase 5C3 completes the Benchmark Definition management surface already
+registered by the Phase 5 shell. The page and editor continue to use the
+typed `CatalogService` contract for every write, preserve the domain's raw tag
+text and file paths, and expose only the existing live fields. Add Run shows
+the selected definition's file/target, type, and default prompt as read-only
+context. The UI-independent `resolve_prompt_text()` helper keeps prompt
+precedence explicit: an entered run prompt, then selected `PromptTemplate`
+text, then the definition default.
+
 The catalog pages never create records implicitly. After a successful catalog
 change, the page refreshes itself and notifies the main window so an open Add
 Run workflow can reload eligible selectors and Dashboard/Runs can refresh
@@ -205,7 +214,7 @@ catalog refresh, atomic review creation, snapshot preservation,
 theme/accessibility basics, and bounded shell smoke paths.
 Phase 5 remains in progress. Remaining GUI workflow slices are deferred; the
 CLI, importers, archive boundary, and historical run snapshots remain
-unchanged by Phase 5C2.
+unchanged by Phase 5C3.
 
 
 ## Domain Data Classes

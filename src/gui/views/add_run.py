@@ -29,10 +29,10 @@ from PySide6.QtWidgets import (
 from ..context import GuiApplicationContext
 
 try:
-    from ...engine.domain import LEVELS, BenchmarkRun, ReviewScore
+    from ...engine.domain import LEVELS, BenchmarkRun, ReviewScore, resolve_prompt_text
     from ...engine.services import is_database_integrity_error
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
-    from engine.domain import LEVELS, BenchmarkRun, ReviewScore  # type: ignore[no-redef]
+    from engine.domain import LEVELS, BenchmarkRun, ReviewScore, resolve_prompt_text  # type: ignore[no-redef]
     from engine.services import is_database_integrity_error  # type: ignore[no-redef]
 
 
@@ -143,9 +143,21 @@ class AddRunWizard(QWizard):
         self.benchmark_combo = self._selector("Benchmark definition")
         self.prompt_template_combo = self._selector("Prompt template")
         self.hardware_combo = self._selector("Hardware profile")
+        self.benchmark_file_value = self._detail_label("Benchmark file or target")
+        self.benchmark_type_value = self._detail_label("Benchmark type")
+        self.benchmark_default_prompt_value = QPlainTextEdit()
+        self.benchmark_default_prompt_value.setObjectName("benchmarkDefaultPromptValue")
+        self.benchmark_default_prompt_value.setAccessibleName("Benchmark definition default prompt")
+        self.benchmark_default_prompt_value.setReadOnly(True)
+        self.benchmark_default_prompt_value.setMinimumHeight(72)
+        self.benchmark_default_prompt_value.setMaximumHeight(132)
+        self.benchmark_default_prompt_value.setPlaceholderText("No benchmark definition selected")
         form.addRow("Session", self.session_combo)
         form.addRow("Model profile", self.model_combo)
         form.addRow("Benchmark definition", self.benchmark_combo)
+        form.addRow("Benchmark file or target", self.benchmark_file_value)
+        form.addRow("Benchmark type", self.benchmark_type_value)
+        form.addRow("Definition default prompt", self.benchmark_default_prompt_value)
         form.addRow("Prompt template", self.prompt_template_combo)
         form.addRow("Hardware profile", self.hardware_combo)
         layout.addLayout(form)
@@ -175,9 +187,14 @@ class AddRunWizard(QWizard):
         self.prompt_text_edit = QPlainTextEdit()
         self.prompt_text_edit.setObjectName("promptTextInput")
         self.prompt_text_edit.setAccessibleName("Exact prompt text")
-        self.prompt_text_edit.setPlaceholderText("Paste or type the exact prompt, or leave blank when a selected template supplies it.")
+        self.prompt_text_edit.setPlaceholderText("Paste or type the exact prompt, or leave blank when a selected template or benchmark default supplies it.")
         self.prompt_text_edit.setMinimumHeight(150)
         layout.addWidget(self.prompt_text_edit)
+        self.prompt_resolution_hint = QLabel()
+        self.prompt_resolution_hint.setObjectName("promptResolutionHint")
+        self.prompt_resolution_hint.setWordWrap(True)
+        self.prompt_resolution_hint.setAccessibleName("Prompt resolution guidance")
+        layout.addWidget(self.prompt_resolution_hint)
 
         layout.addWidget(QLabel("Raw model output"))
         self.raw_output_edit = QPlainTextEdit()
@@ -347,6 +364,8 @@ class AddRunWizard(QWizard):
             self._populate(self.benchmark_combo, benchmarks, lambda value: value.name, selected_id=previous["benchmark"], preserve_selection=preserve_selection)
             self._populate(self.prompt_template_combo, templates, lambda value: f"{value.name} v{value.version}", selected_id=previous["prompt"], preserve_selection=preserve_selection)
             self._populate(self.hardware_combo, hardware, lambda value: value.name, selected_id=previous["hardware"], preserve_selection=preserve_selection)
+            self._refresh_benchmark_details()
+            self._update_prompt_resolution_hint()
             if not any((sessions, models, benchmarks, templates, hardware)):
                 self.catalog_status.setText("No catalog records are available. Manual/custom entry is supported; this workflow will not create catalog records automatically.")
             else:
@@ -381,25 +400,69 @@ class AddRunWizard(QWizard):
                 combo.setCurrentIndex(index)
         combo.blockSignals(False)
 
+    @staticmethod
+    def _detail_label(label: str) -> QLabel:
+        value = QLabel(NOT_SELECTED)
+        value.setObjectName(label.lower().replace(" ", "_") + "_value")
+        value.setAccessibleName(label)
+        value.setTextFormat(Qt.TextFormat.PlainText)
+        value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard)
+        value.setWordWrap(True)
+        return value
+
     def _prefill_from_template(self, *_args: object) -> None:
         template_id = self._selected_id(self.prompt_template_combo)
         if template_id is None or not hasattr(self, "prompt_name_edit"):
+            self._update_prompt_resolution_hint()
             return
         template = self.context.catalog.get_prompt_template(template_id)
         if template is None:
+            self._update_prompt_resolution_hint()
             return
         if not self.prompt_name_edit.text().strip():
             self.prompt_name_edit.setText(template.name)
-        if not self.prompt_text_edit.toPlainText():
-            self.prompt_text_edit.setPlainText(template.prompt_text)
+        self._update_prompt_resolution_hint()
 
     def _prefill_from_benchmark(self, *_args: object) -> None:
+        self._refresh_benchmark_details()
+        self._update_prompt_resolution_hint()
+
+    def _refresh_benchmark_details(self) -> None:
         definition_id = self._selected_id(self.benchmark_combo)
-        if definition_id is None or not hasattr(self, "prompt_text_edit"):
+        definition = self.context.catalog.get_benchmark_definition(definition_id) if definition_id is not None else None
+        if definition is None:
+            self.benchmark_file_value.setText(NOT_SELECTED)
+            self.benchmark_type_value.setText(NOT_SELECTED)
+            self.benchmark_default_prompt_value.clear()
             return
-        definition = self.context.catalog.get_benchmark_definition(definition_id)
-        if definition is not None and definition.default_prompt and not self.prompt_text_edit.toPlainText():
-            self.prompt_text_edit.setPlainText(definition.default_prompt)
+        self.benchmark_file_value.setText(definition.file_path)
+        self.benchmark_type_value.setText(definition.benchmark_type)
+        self.benchmark_default_prompt_value.setPlainText(definition.default_prompt)
+
+    def _effective_prompt_text(self, run: BenchmarkRun) -> str:
+        definition_id = self._selected_id(self.benchmark_combo)
+        template_id = self._selected_id(self.prompt_template_combo)
+        definition = self.context.catalog.get_benchmark_definition(definition_id) if definition_id is not None else None
+        template = self.context.catalog.get_prompt_template(template_id) if template_id is not None else None
+        return resolve_prompt_text(
+            run.prompt_text,
+            template.prompt_text if template is not None else "",
+            definition.default_prompt if definition is not None else "",
+        )
+
+    def _update_prompt_resolution_hint(self, *_args: object) -> None:
+        if not hasattr(self, "prompt_text_edit") or not hasattr(self, "prompt_resolution_hint"):
+            return
+        run = self._build_run()
+        if run.prompt_text != "":
+            message = "The explicitly entered prompt text will be used for this run."
+        elif self._selected_id(self.prompt_template_combo) is not None:
+            message = "The selected Prompt Template will supply the prompt text unless you enter an explicit prompt above."
+        elif self._selected_id(self.benchmark_combo) is not None:
+            message = "The Benchmark Definition default prompt will supply the prompt text unless you enter an explicit prompt above."
+        else:
+            message = "Enter prompt text or select a Prompt Template or Benchmark Definition to supply it."
+        self.prompt_resolution_hint.setText(message)
 
     @staticmethod
     def _selected_id(combo: QComboBox) -> int | None:
@@ -413,6 +476,7 @@ class AddRunWizard(QWizard):
             field.textChanged.connect(self._mark_dirty)
         for field in (self.prompt_text_edit, self.raw_output_edit, self.strengths_edit, self.weaknesses_edit, self.notes_edit):
             field.textChanged.connect(self._mark_dirty)
+        self.prompt_text_edit.textChanged.connect(self._update_prompt_resolution_hint)
         self.record_review_checkbox.toggled.connect(self._mark_dirty)
         for field in self.score_fields.values():
             field.record_checkbox.toggled.connect(self._mark_dirty)
@@ -488,7 +552,7 @@ class AddRunWizard(QWizard):
             f"ReviewScore: {'will be recorded' if score is not None else 'not recorded'}\n"
             f"Overall score: {score.overall_score if score and score.overall_score is not None else NOT_SELECTED}"
         )
-        self.review_prompt_text.setPlainText(run.prompt_text)
+        self.review_prompt_text.setPlainText(self._effective_prompt_text(run))
         self.review_raw_output.setPlainText(run.raw_model_output)
 
     def _save(self) -> bool:
