@@ -41,12 +41,16 @@ transactional validation.
 
 ### Markdown report families
 
-The screen-based Reports workflow writes three Markdown report families through
+The screen-based Reports workflow writes five Markdown report families through
 the reporting engine:
 
 - detailed `BenchmarkRun` reports, grouped by model
 - historical `ScoreboardEntry` reports, grouped by `ScoreboardImportBatch`
 - deterministic model leaderboards derived from detailed benchmark runs
+- one-session reports with session identity, score summaries, distributions,
+  and deterministic run sections
+- hardware reports grouped by normalized historical `BenchmarkRun` hardware
+  snapshots
 
 Report options are session-local. Benchmark reports can filter by benchmark
 type, benchmark, session, model, hardware profile, or hardware snapshot text.
@@ -54,6 +58,35 @@ Scoreboard reports can filter by import batch and model text. Prompt text, raw
 model output, attachment metadata, and leaderboard detail sections are opt-in;
 attachment binary contents are never exported. Missing scores and speeds remain
 unavailable rather than being filled with zero.
+
+Session reports require a catalog-selected session and exclude soft-deleted
+sessions and runs by default. They include represented models, benchmarks, and
+hardware environments, score distributions, hallucination and reliability
+distributions, and average tokens per second where available. Hardware reports
+use normalized snapshot fields (profile name when captured, CPU, GPU, VRAM,
+RAM, operating system, backend versions, and other captured details) as the
+grouping key. Distinct snapshots remain distinct even when they reference the
+same linked profile; missing metadata is shown as `Unknown hardware` rather
+than discarded. Hardware group statistics give every eligible run equal
+weight.
+
+### Built-in report templates
+
+The engine exposes immutable `ReportTemplate` definitions and
+`ReportTemplateOptions` for `Concise`, `Standard`, and `Full Audit`.
+
+- Concise uses summary metadata and compact tables.
+- Standard includes normal tables and report details while keeping prompt
+  text, raw output, and attachment metadata excluded.
+- Full Audit enables the richer hardware/detail presentation, but the same
+  privacy-sensitive fields remain excluded until the user explicitly enables
+  them.
+
+Applying a template returns an isolated options object. Users may adjust those
+options before generation; report filters remain separate and are preserved
+when templates change. Internal template identifiers are not entered in the
+CLI. Built-in templates are not persisted through `ExportProfile` in this
+phase.
 
 Reports use UTF-8 staged output. The CLI previews the structured selection or
 ranking result, asks for the destination using the existing path autocomplete,

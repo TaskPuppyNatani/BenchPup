@@ -36,6 +36,20 @@ class ReportType(str, Enum):
     BENCHMARK_RUNS = "benchmark_runs"
     SCOREBOARD = "scoreboard"
     MODEL_LEADERBOARD = "model_leaderboard"
+    SESSION = "session"
+    SESSION_REPORT = "session"
+    SESSION_REPORTS = "session"
+    HARDWARE = "hardware"
+    HARDWARE_REPORT = "hardware"
+    HARDWARE_REPORTS = "hardware"
+
+
+class ReportTemplateId(str, Enum):
+    """Stable identifiers for the built-in presentation templates."""
+
+    CONCISE = "concise"
+    STANDARD = "standard"
+    FULL_AUDIT = "full_audit"
 
 
 class ReportWriteStatus(str, Enum):
@@ -45,6 +59,93 @@ class ReportWriteStatus(str, Enum):
     OVERWRITE_REQUIRED = "overwrite_required"
     TEMP_WRITE_FAILED = "temp_write_failed"
     FINALIZE_FAILED = "finalize_failed"
+
+
+@dataclass
+class ReportTemplateOptions:
+    """Mutable, isolated presentation and inclusion options for one report."""
+
+    template_id: str = ReportTemplateId.STANDARD.value
+    include_record_details: bool = True
+    include_model_details: bool = False
+    include_hardware_details: bool = False
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+
+
+@dataclass(frozen=True)
+class ReportTemplate:
+    """Immutable built-in report template definition."""
+
+    template_id: str
+    name: str
+    description: str
+    include_record_details: bool = True
+    include_model_details: bool = False
+    include_hardware_details: bool = False
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+
+    def apply(self) -> ReportTemplateOptions:
+        """Return a fresh options object without exposing the definition."""
+
+        return ReportTemplateOptions(
+            template_id=self.template_id,
+            include_record_details=self.include_record_details,
+            include_model_details=self.include_model_details,
+            include_hardware_details=self.include_hardware_details,
+            include_prompt_text=self.include_prompt_text,
+            include_raw_model_output=self.include_raw_model_output,
+            include_attachment_metadata=self.include_attachment_metadata,
+        )
+
+
+_BUILT_IN_REPORT_TEMPLATES: tuple[ReportTemplate, ...] = (
+    ReportTemplate(
+        ReportTemplateId.CONCISE.value,
+        "Concise",
+        "Summary metadata and compact report tables.",
+        include_record_details=False,
+        include_model_details=False,
+    ),
+    ReportTemplate(
+        ReportTemplateId.STANDARD.value,
+        "Standard",
+        "Summary, tables, verdicts, strengths, and weaknesses.",
+        include_record_details=True,
+        include_model_details=False,
+    ),
+    ReportTemplate(
+        ReportTemplateId.FULL_AUDIT.value,
+        "Full Audit",
+        "All standard details with opt-in prompt, output, and attachment metadata.",
+        include_record_details=True,
+        include_model_details=True,
+        include_hardware_details=True,
+    ),
+)
+
+
+def available_report_templates() -> tuple[ReportTemplate, ...]:
+    """Return immutable built-in definitions in their display order."""
+
+    return _BUILT_IN_REPORT_TEMPLATES
+
+
+def get_report_template(template: str | ReportTemplateId) -> ReportTemplate | None:
+    template_id = template.value if isinstance(template, ReportTemplateId) else str(template)
+    return next((item for item in _BUILT_IN_REPORT_TEMPLATES if item.template_id == template_id), None)
+
+
+def apply_report_template(template: str | ReportTemplateId | ReportTemplate) -> ReportTemplateOptions:
+    """Apply one built-in definition and return an independent options object."""
+
+    definition = template if isinstance(template, ReportTemplate) else get_report_template(template)
+    if definition is None:
+        raise ValueError(f"Unknown report template: {template}")
+    return definition.apply()
 
 
 def _freeze_value(value: Any) -> Any:
@@ -154,6 +255,7 @@ class ReportMetadata:
     record_count: int
     generated_at: str = field(default_factory=now)
     filters: Mapping[str, str] = field(default_factory=dict)
+    template_id: str = ReportTemplateId.STANDARD.value
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "filters", cast(Mapping[str, str], _freeze_mapping(self.filters)))
@@ -449,6 +551,157 @@ class BenchmarkRunReport:
 
 
 @dataclass(frozen=True)
+class SessionReport:
+    """Structured report for one benchmark session and its eligible runs."""
+
+    metadata: ReportMetadata
+    session: SessionReportSummary
+    summary: ScoreStatistics
+    records: tuple[BenchmarkRunReportItem, ...]
+    represented_models: tuple[str, ...] = ()
+    represented_benchmarks: tuple[str, ...] = ()
+    represented_hardware: tuple[str, ...] = ()
+    average_tokens_per_second: float | None = None
+    hallucination_distribution: Mapping[str, int] = field(default_factory=dict)
+    reliability_distribution: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hallucination_distribution", cast(Mapping[str, int], _freeze_mapping(self.hallucination_distribution)))
+        object.__setattr__(self, "reliability_distribution", cast(Mapping[str, int], _freeze_mapping(self.reliability_distribution)))
+
+    @property
+    def run_count(self) -> int:
+        return self.summary.count
+
+    @property
+    def session_id(self) -> int | None:
+        return self.session.id
+
+    @property
+    def scored_run_count(self) -> int:
+        return self.summary.scored_count
+
+    @property
+    def average_overall_score(self) -> float | None:
+        return self.summary.average
+
+    @property
+    def median_overall_score(self) -> float | None:
+        return self.summary.median
+
+    @property
+    def minimum_overall_score(self) -> float | None:
+        return self.summary.minimum
+
+    @property
+    def maximum_overall_score(self) -> float | None:
+        return self.summary.maximum
+
+    @property
+    def score_distribution(self) -> Mapping[float, int]:
+        return self.summary.score_distribution
+
+
+@dataclass(frozen=True)
+class HardwareReportGroup:
+    """Aggregated runs sharing one normalized historical hardware snapshot."""
+
+    key: str
+    hardware: HardwareReportSummary | None
+    records: tuple[BenchmarkRunReportItem, ...]
+    summary: ScoreStatistics
+    represented_models: tuple[str, ...] = ()
+    represented_benchmarks: tuple[str, ...] = ()
+    average_tokens_per_second: float | None = None
+    hallucination_distribution: Mapping[str, int] = field(default_factory=dict)
+    reliability_distribution: Mapping[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "hallucination_distribution", cast(Mapping[str, int], _freeze_mapping(self.hallucination_distribution)))
+        object.__setattr__(self, "reliability_distribution", cast(Mapping[str, int], _freeze_mapping(self.reliability_distribution)))
+
+    @property
+    def label(self) -> str:
+        return _hardware_label(self.hardware)
+
+    @property
+    def hardware_summary(self) -> HardwareReportSummary | None:
+        return self.hardware
+
+    @property
+    def run_count(self) -> int:
+        return self.summary.count
+
+    @property
+    def scored_run_count(self) -> int:
+        return self.summary.scored_count
+
+    @property
+    def average_overall_score(self) -> float | None:
+        return self.summary.average
+
+    @property
+    def median_overall_score(self) -> float | None:
+        return self.summary.median
+
+    @property
+    def minimum_overall_score(self) -> float | None:
+        return self.summary.minimum
+
+    @property
+    def maximum_overall_score(self) -> float | None:
+        return self.summary.maximum
+
+    @property
+    def score_distribution(self) -> Mapping[float, int]:
+        return self.summary.score_distribution
+
+
+@dataclass(frozen=True)
+class HardwareReport:
+    """Structured report grouped by authoritative historical hardware details."""
+
+    metadata: ReportMetadata
+    summary: ScoreStatistics
+    groups: tuple[HardwareReportGroup, ...]
+    include_hardware_details: bool = False
+
+    @property
+    def represented_models(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(model for group in self.groups for model in group.represented_models))
+
+    @property
+    def represented_benchmarks(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(benchmark for group in self.groups for benchmark in group.represented_benchmarks))
+
+    @property
+    def represented_hardware(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(group.label for group in self.groups))
+
+    @property
+    def hardware_groups(self) -> tuple[HardwareReportGroup, ...]:
+        return self.groups
+
+    @property
+    def fastest_group(self) -> HardwareReportGroup | None:
+        candidates = [group for group in self.groups if group.average_tokens_per_second is not None]
+        return min(
+            candidates,
+            key=lambda group: (-(group.average_tokens_per_second or 0.0), group.label.casefold(), group.label),
+            default=None,
+        )
+
+    @property
+    def highest_average_score_group(self) -> HardwareReportGroup | None:
+        candidates = [group for group in self.groups if group.summary.average is not None]
+        return min(
+            candidates,
+            key=lambda group: (-(group.summary.average or 0.0), group.label.casefold(), group.label),
+            default=None,
+        )
+
+
+@dataclass(frozen=True)
 class ScoreboardBatchSection:
     batch: ScoreboardImportBatch | None
     entries: tuple[ScoreboardEntryAggregate, ...]
@@ -522,7 +775,7 @@ class ReportWriteResult:
         return self.status is ReportWriteStatus.SUCCESS
 
 
-ReportDocument: TypeAlias = BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport
+ReportDocument: TypeAlias = BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport
 BenchmarkSource: TypeAlias = BenchmarkRun | BenchmarkRunAggregate
 ScoreboardSource: TypeAlias = ScoreboardEntry | ScoreboardEntryAggregate
 
@@ -613,6 +866,82 @@ def _hardware_summary(snapshot: Mapping[str, Any]) -> HardwareReportSummary | No
         imported_at=_text(snapshot.get("imported_at"), default="") or None,
         extra={key: value for key, value in snapshot.items() if key not in known},
     )
+
+
+def _normalized_snapshot_value(value: Any) -> str:
+    if isinstance(value, Mapping):
+        return ",".join(
+            f"{str(key).strip().casefold()}={_normalized_snapshot_value(item)}"
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]).casefold())
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return ",".join(sorted(_normalized_snapshot_value(item) for item in value))
+    return " ".join(_text(value).strip().casefold().split())
+
+
+def _hardware_group_key(snapshot: Mapping[str, Any]) -> str:
+    """Create a deterministic key from a run's historical snapshot only."""
+
+    if not snapshot:
+        return "unknown"
+    return "|".join(
+        f"{str(key).strip().casefold()}={_normalized_snapshot_value(value)}"
+        for key, value in sorted(snapshot.items(), key=lambda pair: str(pair[0]).casefold())
+    ) or "unknown"
+
+
+def _hardware_label(hardware: HardwareReportSummary | None) -> str:
+    if hardware is None:
+        return "Unknown hardware"
+    values = [
+        hardware.name,
+        hardware.computer_name,
+        hardware.cpu,
+        hardware.gpu,
+        f"{_display(hardware.vram_gb)} GB VRAM" if hardware.vram_gb is not None else "",
+        f"{_display(hardware.ram_gb)} GB RAM" if hardware.ram_gb is not None else "",
+        hardware.operating_system,
+    ]
+    label = ", ".join(value for value in values if value)
+    if label:
+        return label
+    if hardware.backend_versions:
+        return "Backend versions: " + ", ".join(
+            f"{key}={value}" for key, value in sorted(hardware.backend_versions.items(), key=lambda pair: pair[0].casefold())
+        )
+    return "Unknown hardware"
+
+
+def _record_scores(records: Sequence[BenchmarkRunReportItem]) -> list[float | None]:
+    return [item.review.overall_score if item.review else None for item in records]
+
+
+def _record_speeds(records: Sequence[BenchmarkRunReportItem]) -> list[float]:
+    return [
+        speed
+        for item in records
+        if (speed := item.model.tokens_per_second) is not None
+    ]
+
+
+def _record_hallucination_distribution(records: Sequence[BenchmarkRunReportItem]) -> Mapping[str, int]:
+    return Counter(
+        item.review.hallucination_level
+        for item in records
+        if item.review and item.review.hallucination_level
+    )
+
+
+def _record_reliability_distribution(records: Sequence[BenchmarkRunReportItem]) -> Mapping[str, int]:
+    return Counter(
+        item.review.reliability_level
+        for item in records
+        if item.review and item.review.reliability_level
+    )
+
+
+def _average_values(values: Sequence[float]) -> float | None:
+    return sum(values) / len(values) if values else None
 
 
 def _review_summary(score: ReviewScore | None) -> ReviewScoreSummary | None:
@@ -808,7 +1137,14 @@ def build_benchmark_run_report(
     include_attachment_metadata: bool = False,
     title: str = "Benchmark Run Report",
     generated_at: str | None = None,
+    template_options: ReportTemplateOptions | None = None,
 ) -> BenchmarkRunReport:
+    options = template_options or ReportTemplateOptions(
+        template_id="standard",
+        include_prompt_text=include_prompt_text,
+        include_raw_model_output=include_raw_model_output,
+        include_attachment_metadata=include_attachment_metadata,
+    )
     selected = [
         aggregate for aggregate in _run_source(runs, service, catalog)
         if _run_matches(aggregate, filters)
@@ -818,9 +1154,9 @@ def build_benchmark_run_report(
             (
                 _aggregate_item(
                     aggregate,
-                    include_prompt_text=include_prompt_text,
-                    include_raw_model_output=include_raw_model_output,
-                    include_attachment_metadata=include_attachment_metadata,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
                 )
                 for aggregate in selected
             ),
@@ -853,8 +1189,181 @@ def build_benchmark_run_report(
         record_count=len(records),
         generated_at=generated_at or now(),
         filters=_filter_mapping(filters),
+        template_id=options.template_id,
     )
     return BenchmarkRunReport(metadata, summary, records, sections)
+
+
+def _resolve_session(
+    session: BenchmarkSession | int | None,
+    catalog: CatalogService | None,
+) -> tuple[BenchmarkSession | None, int | None]:
+    if session is None:
+        return None, None
+    if isinstance(session, BenchmarkSession):
+        return deepcopy(session), session.id
+    return (catalog.sessions.get(session) if catalog else None), session
+
+
+def _distinct_sorted(values: Sequence[str]) -> tuple[str, ...]:
+    distinct = {value for value in values if value}
+    return tuple(sorted(distinct, key=lambda value: (value.casefold(), value)))
+
+
+def build_session_report(
+    session: BenchmarkSession | int | None = None,
+    runs: Sequence[BenchmarkSource] | None = None,
+    *,
+    service: BenchmarkService | None = None,
+    catalog: CatalogService | None = None,
+    filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+    include_prompt_text: bool = False,
+    include_raw_model_output: bool = False,
+    include_attachment_metadata: bool = False,
+    title: str = "Session Report",
+    generated_at: str | None = None,
+    template_options: ReportTemplateOptions | None = None,
+    session_id: int | None = None,
+) -> SessionReport:
+    """Build one immutable session report from eligible historical runs."""
+
+    options = template_options or ReportTemplateOptions(
+        template_id="standard",
+        include_prompt_text=include_prompt_text,
+        include_raw_model_output=include_raw_model_output,
+        include_attachment_metadata=include_attachment_metadata,
+    )
+    selected_session: BenchmarkSession | int | None = session if session is not None else session_id
+    session_record, resolved_session_id = _resolve_session(selected_session, catalog)
+    effective_filters = replace(filters, session_id=resolved_session_id) if resolved_session_id is not None else filters
+    eligible_session = (
+        session_record is not None
+        and (not session_record.is_deleted or effective_filters.include_deleted)
+    ) or (session_record is None and resolved_session_id is not None and catalog is None)
+    selected = [
+        aggregate
+        for aggregate in _run_source(runs, service, catalog)
+        if eligible_session and _run_matches(aggregate, effective_filters)
+    ]
+    records = tuple(
+        sorted(
+            (
+                _aggregate_item(
+                    aggregate,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                )
+                for aggregate in selected
+            ),
+            key=lambda item: (item.created_at, item.run_id or 0, item.model_name.casefold(), item.benchmark_name.casefold()),
+        )
+    )
+    session_summary = _session_summary(session_record, resolved_session_id) or SessionReportSummary(id=resolved_session_id)
+    metadata = ReportMetadata(
+        title=title,
+        report_type=ReportType.SESSION.value,
+        source_record_type="BenchmarkRun",
+        selection_summary=_selection_summary(effective_filters),
+        record_count=len(records),
+        generated_at=generated_at or now(),
+        filters=_filter_mapping(effective_filters),
+        template_id=options.template_id,
+    )
+    speeds = _record_speeds(records)
+    return SessionReport(
+        metadata=metadata,
+        session=session_summary,
+        summary=_score_statistics(_record_scores(records), count=len(records)),
+        records=records,
+        represented_models=_distinct_sorted([item.model_name for item in records]),
+        represented_benchmarks=_distinct_sorted([item.benchmark_name for item in records]),
+        represented_hardware=_distinct_sorted([_hardware_label(item.hardware) for item in records]),
+        average_tokens_per_second=_average_values(speeds),
+        hallucination_distribution=_record_hallucination_distribution(records),
+        reliability_distribution=_record_reliability_distribution(records),
+    )
+
+
+def build_hardware_report(
+    runs: Sequence[BenchmarkSource] | None = None,
+    *,
+    service: BenchmarkService | None = None,
+    catalog: CatalogService | None = None,
+    filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+    include_prompt_text: bool = False,
+    include_raw_model_output: bool = False,
+    include_attachment_metadata: bool = False,
+    include_hardware_details: bool = False,
+    title: str = "Hardware Report",
+    generated_at: str | None = None,
+    template_options: ReportTemplateOptions | None = None,
+) -> HardwareReport:
+    """Build deterministic hardware groups from authoritative run snapshots."""
+
+    options = template_options or ReportTemplateOptions(
+        template_id="standard",
+        include_prompt_text=include_prompt_text,
+        include_raw_model_output=include_raw_model_output,
+        include_attachment_metadata=include_attachment_metadata,
+        include_hardware_details=include_hardware_details,
+    )
+    selected = [
+        aggregate for aggregate in _run_source(runs, service, catalog)
+        if _run_matches(aggregate, filters)
+    ]
+    records_with_keys = [
+        (
+            _hardware_group_key(aggregate.run.hardware_snapshot),
+            _aggregate_item(
+                aggregate,
+                include_prompt_text=options.include_prompt_text,
+                include_raw_model_output=options.include_raw_model_output,
+                include_attachment_metadata=options.include_attachment_metadata,
+            ),
+        )
+        for aggregate in selected
+    ]
+    records_with_keys.sort(
+        key=lambda item: (item[1].created_at, item[1].run_id or 0, item[1].model_name.casefold(), item[1].benchmark_name.casefold())
+    )
+    grouped: dict[str, list[BenchmarkRunReportItem]] = {}
+    for key, record in records_with_keys:
+        grouped.setdefault(key, []).append(record)
+    groups: list[HardwareReportGroup] = []
+    for key, group_records in grouped.items():
+        hardware = group_records[0].hardware
+        groups.append(
+            HardwareReportGroup(
+                key=key,
+                hardware=hardware,
+                records=tuple(group_records),
+                summary=_score_statistics(_record_scores(group_records), count=len(group_records)),
+                represented_models=_distinct_sorted([item.model_name for item in group_records]),
+                represented_benchmarks=_distinct_sorted([item.benchmark_name for item in group_records]),
+                average_tokens_per_second=_average_values(_record_speeds(group_records)),
+                hallucination_distribution=_record_hallucination_distribution(group_records),
+                reliability_distribution=_record_reliability_distribution(group_records),
+            )
+        )
+    ordered_groups = tuple(sorted(groups, key=lambda group: (group.label.casefold(), group.label, group.key)))
+    all_records = tuple(record for group in ordered_groups for record in group.records)
+    metadata = ReportMetadata(
+        title=title,
+        report_type=ReportType.HARDWARE.value,
+        source_record_type="BenchmarkRun",
+        selection_summary=_selection_summary(filters),
+        record_count=len(all_records),
+        generated_at=generated_at or now(),
+        filters=_filter_mapping(filters),
+        template_id=options.template_id,
+    )
+    return HardwareReport(
+        metadata=metadata,
+        summary=_score_statistics(_record_scores(all_records), count=len(all_records)),
+        groups=ordered_groups,
+        include_hardware_details=options.include_hardware_details,
+    )
 
 
 def build_scoreboard_report(
@@ -865,7 +1374,9 @@ def build_scoreboard_report(
     filters: ScoreboardReportFilters = ScoreboardReportFilters(),
     title: str = "Historical Scoreboard Report",
     generated_at: str | None = None,
+    template_options: ReportTemplateOptions | None = None,
 ) -> ScoreboardReport:
+    options = template_options or ReportTemplateOptions()
     selected = [
         aggregate for aggregate in _scoreboard_source(entries, batches, catalog)
         if _scoreboard_matches(aggregate, filters)
@@ -904,6 +1415,7 @@ def build_scoreboard_report(
         record_count=len(selected),
         generated_at=generated_at or now(),
         filters=_filter_mapping(filters),
+        template_id=options.template_id,
     )
     return ScoreboardReport(metadata, summary, tuple(selected), sections)
 
@@ -916,7 +1428,9 @@ def build_model_leaderboard(
     filters: BenchmarkReportFilters = BenchmarkReportFilters(),
     title: str = "Model Leaderboard",
     generated_at: str | None = None,
+    template_options: ReportTemplateOptions | None = None,
 ) -> ModelLeaderboardReport:
+    options = template_options or ReportTemplateOptions()
     selected = [
         aggregate for aggregate in _run_source(runs, service, catalog)
         if _run_matches(aggregate, filters)
@@ -989,6 +1503,7 @@ def build_model_leaderboard(
         record_count=sum(entry.run_count for entry in ranked),
         generated_at=generated_at or now(),
         filters=_filter_mapping(filters),
+        template_id=options.template_id,
     )
     return ModelLeaderboardReport(metadata, ranked)
 
@@ -999,6 +1514,15 @@ class ReportingService:
     def __init__(self, service: BenchmarkService, catalog: CatalogService | None = None):
         self.service = service
         self.catalog = catalog or service.catalog
+
+    def report_templates(self) -> tuple[ReportTemplate, ...]:
+        return available_report_templates()
+
+    def report_template(self, template: str | ReportTemplateId) -> ReportTemplate | None:
+        return get_report_template(template)
+
+    def apply_template(self, template: str | ReportTemplateId) -> ReportTemplateOptions:
+        return apply_report_template(template)
 
     def select_benchmark_runs(self, runs: Sequence[BenchmarkSource] | None = None) -> tuple[BenchmarkRunAggregate, ...]:
         return _run_source(runs, self.service, self.catalog)
@@ -1021,6 +1545,7 @@ class ReportingService:
         include_attachment_metadata: bool = False,
         title: str = "Benchmark Run Report",
         generated_at: str | None = None,
+        template_options: ReportTemplateOptions | None = None,
     ) -> BenchmarkRunReport:
         return build_benchmark_run_report(
             runs,
@@ -1032,6 +1557,63 @@ class ReportingService:
             include_attachment_metadata=include_attachment_metadata,
             title=title,
             generated_at=generated_at,
+            template_options=template_options,
+        )
+
+    def session_report(
+        self,
+        session: BenchmarkSession | int | None = None,
+        runs: Sequence[BenchmarkSource] | None = None,
+        *,
+        filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+        include_prompt_text: bool = False,
+        include_raw_model_output: bool = False,
+        include_attachment_metadata: bool = False,
+        title: str = "Session Report",
+        generated_at: str | None = None,
+        template_options: ReportTemplateOptions | None = None,
+        session_id: int | None = None,
+    ) -> SessionReport:
+        return build_session_report(
+            session,
+            runs,
+            service=self.service,
+            catalog=self.catalog,
+            filters=filters,
+            include_prompt_text=include_prompt_text,
+            include_raw_model_output=include_raw_model_output,
+            include_attachment_metadata=include_attachment_metadata,
+            title=title,
+            generated_at=generated_at,
+            template_options=template_options,
+            session_id=session_id,
+        )
+
+    def hardware_report(
+        self,
+        runs: Sequence[BenchmarkSource] | None = None,
+        *,
+        filters: BenchmarkReportFilters = BenchmarkReportFilters(),
+        include_prompt_text: bool = False,
+        include_raw_model_output: bool = False,
+        include_attachment_metadata: bool = False,
+        include_hardware_details: bool = False,
+        title: str = "Hardware Report",
+        generated_at: str | None = None,
+        template_options: ReportTemplateOptions | None = None,
+    ) -> HardwareReport:
+        return build_hardware_report(
+            runs,
+            service=self.service,
+            catalog=self.catalog,
+            filters=filters,
+            include_prompt_text=include_prompt_text,
+            include_raw_model_output=include_raw_model_output,
+            include_attachment_metadata=include_attachment_metadata,
+            include_hardware_details=include_hardware_details,
+            title=title,
+            generated_at=generated_at,
+            template_options=template_options,
         )
 
     def scoreboard_report(
@@ -1042,6 +1624,7 @@ class ReportingService:
         filters: ScoreboardReportFilters = ScoreboardReportFilters(),
         title: str = "Historical Scoreboard Report",
         generated_at: str | None = None,
+        template_options: ReportTemplateOptions | None = None,
     ) -> ScoreboardReport:
         return build_scoreboard_report(
             entries,
@@ -1050,6 +1633,7 @@ class ReportingService:
             filters=filters,
             title=title,
             generated_at=generated_at,
+            template_options=template_options,
         )
 
     def model_leaderboard(
@@ -1059,6 +1643,7 @@ class ReportingService:
         filters: BenchmarkReportFilters = BenchmarkReportFilters(),
         title: str = "Model Leaderboard",
         generated_at: str | None = None,
+        template_options: ReportTemplateOptions | None = None,
     ) -> ModelLeaderboardReport:
         return build_model_leaderboard(
             runs,
@@ -1067,6 +1652,7 @@ class ReportingService:
             filters=filters,
             title=title,
             generated_at=generated_at,
+            template_options=template_options,
         )
 
     def write_markdown_report(
@@ -1076,19 +1662,22 @@ class ReportingService:
         *,
         overwrite: bool = False,
         include_model_details: bool = False,
+        include_hardware_details: bool = False,
+        template_options: ReportTemplateOptions | None = None,
     ) -> ReportWriteResult:
         """Render and stage a report through the application-facing facade.
 
-        Leaderboard detail sections are a rendering option, so the facade
-        accepts that option here rather than requiring a UI caller to render
-        Markdown itself.  The underlying writer still owns UTF-8 staging,
+        Template-controlled detail sections are rendering options, so the
+        facade accepts them here rather than requiring a UI caller to render
+        Markdown itself. The underlying writer still owns UTF-8 staging,
         finalization, and overwrite protection.
         """
 
-        if isinstance(report, ModelLeaderboardReport) and include_model_details:
-            rendered = render_model_leaderboard_markdown(report, include_model_details=True)
-            return write_markdown_report(rendered, destination, overwrite=overwrite)
-        return write_markdown_report(report, destination, overwrite=overwrite)
+        options = template_options or ReportTemplateOptions(
+            include_model_details=include_model_details,
+            include_hardware_details=include_hardware_details,
+        )
+        return write_markdown_report(report, destination, overwrite=overwrite, template_options=options)
 
 
 def _render_header(metadata: ReportMetadata) -> list[str]:
@@ -1100,6 +1689,7 @@ def _render_header(metadata: ReportMetadata) -> list[str]:
         f"- Source record type: {metadata.source_record_type}",
         f"- Selection: {metadata.selection_summary}",
         f"- Record count: {metadata.record_count}",
+        f"- Template: {metadata.template_id}",
     ]
 
 
@@ -1144,7 +1734,55 @@ def _render_model_settings(model: ModelReportSummary) -> str:
     return ", ".join(f"{name}={_display(value)}" for name, value in values if value not in (None, "")) or "—"
 
 
-def render_benchmark_run_markdown(report: BenchmarkRunReport) -> str:
+def _render_compact_run_table(lines: list[str], records: Sequence[BenchmarkRunReportItem]) -> None:
+    lines.extend(
+        [
+            "",
+            "## Benchmark runs",
+            "",
+            "| Recorded | Model | Benchmark | Score | Hallucination | Reliability | Tokens/s | Verdict |",
+            "| --- | --- | --- | ---: | --- | --- | ---: | --- |",
+        ]
+    )
+    if not records:
+        lines.append("| — | No benchmark runs selected | — | — | — | — | — | — |")
+    for item in records:
+        review = item.review
+        lines.append(
+            "| " + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    item.created_at,
+                    item.model_name,
+                    item.benchmark_name,
+                    review.overall_score if review else None,
+                    review.hallucination_level if review else None,
+                    review.reliability_level if review else None,
+                    item.model.tokens_per_second,
+                    review.verdict if review else None,
+                )
+            ) + " |"
+        )
+
+
+def _template_has_sensitive_content(options: ReportTemplateOptions) -> bool:
+    return options.include_prompt_text or options.include_raw_model_output or options.include_attachment_metadata
+
+
+def render_benchmark_run_markdown(
+    report: BenchmarkRunReport,
+    *,
+    template_options: ReportTemplateOptions | None = None,
+) -> str:
+    if (
+        template_options is not None
+        and not template_options.include_record_details
+        and not _template_has_sensitive_content(template_options)
+    ):
+        lines = _render_header(report.metadata)
+        _render_stats(lines, report.summary, "Overall score summary")
+        _render_compact_run_table(lines, report.records)
+        return "\n".join(lines).rstrip() + "\n"
     lines = _render_header(report.metadata)
     _render_stats(lines, report.summary, "Overall score summary")
     lines.extend(["", "## Benchmark runs", ""])
@@ -1232,6 +1870,149 @@ def render_benchmark_run_markdown(report: BenchmarkRunReport) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_run_detail(lines: list[str], item: BenchmarkRunReportItem) -> None:
+    lines.extend(
+        [
+            f"### {item.model_name} — {item.benchmark_name}",
+            "",
+            f"- Run ID: {_display(item.run_id)}",
+            f"- Benchmark file: {_display(item.benchmark_file)}",
+            f"- Benchmark type: {_display(item.benchmark.benchmark_type)}",
+            f"- Recorded at: {_display(item.created_at)}",
+            f"- Model settings: {_render_model_settings(item.model)}",
+        ]
+    )
+    if item.hardware:
+        lines.append(f"- Hardware: {_hardware_label(item.hardware)}")
+    else:
+        lines.append("- Hardware: Unknown hardware")
+    prompt = item.prompt
+    prompt_value = ", ".join(
+        value
+        for value in (
+            prompt.name,
+            f"version {prompt.version}" if prompt.version else "",
+            f"SHA-256 {prompt.prompt_hash}" if prompt.prompt_hash else "",
+        )
+        if value
+    )
+    if prompt_value:
+        lines.append(f"- Prompt template: {prompt_value}")
+    if item.review:
+        review = item.review
+        lines.extend(
+            [
+                "",
+                "#### Review",
+                f"- Overall: {_display(review.overall_score)}",
+                f"- Hallucination: {_display(review.hallucination_level)}",
+                f"- Reliability: {_display(review.reliability_level)}",
+                f"- Strengths: {_display(review.strengths)}",
+                f"- Weaknesses: {_display(review.weaknesses)}",
+                f"- Verdict: {_display(review.verdict)}",
+            ]
+        )
+    else:
+        lines.extend(["", "- Review: Unavailable"])
+    if item.attachments:
+        lines.extend(["", "#### Attachment metadata", ""])
+        lines.extend(
+            f"- {_display(attachment.attachment_type)}: {_display(attachment.original_filename)} "
+            f"(path: {_display(attachment.file_path)}; notes: {_display(attachment.notes)})"
+            for attachment in item.attachments
+        )
+    _render_indented_block(lines, "Prompt text", item.prompt_text)
+    _render_indented_block(lines, "Raw model output", item.raw_model_output)
+    lines.append("")
+
+
+def render_session_markdown(
+    report: SessionReport,
+    *,
+    template_options: ReportTemplateOptions | None = None,
+) -> str:
+    options = template_options or ReportTemplateOptions()
+    lines = _render_header(report.metadata)
+    lines.extend(
+        [
+            "",
+            "## Session",
+            "",
+            f"- Session ID: {_display(report.session.id)}",
+            f"- Title: {_display(report.session.title)}",
+            f"- Description: {_display(report.session.description)}",
+            f"- Started at: {_display(report.session.started_at)}",
+            f"- Completed at: {_display(report.session.completed_at)}",
+            f"- Notes: {_display(report.session.notes)}",
+        ]
+    )
+    _render_stats(lines, report.summary, "Session score summary")
+    lines.extend(
+        [
+            "",
+            f"- Average tokens/s: {_display(report.average_tokens_per_second)}",
+            f"- Represented models: {_display(', '.join(report.represented_models) or None)}",
+            f"- Represented benchmarks: {_display(', '.join(report.represented_benchmarks) or None)}",
+            f"- Represented hardware: {_display(', '.join(report.represented_hardware) or None)}",
+            f"- Hallucination distribution: {_format_distribution(report.hallucination_distribution)}",
+            f"- Reliability distribution: {_format_distribution(report.reliability_distribution)}",
+        ]
+    )
+    if options.include_record_details or _template_has_sensitive_content(options):
+        lines.extend(["", "## Session runs", ""])
+        if not report.records:
+            lines.append("No benchmark runs selected.")
+        for item in report.records:
+            _render_run_detail(lines, item)
+    else:
+        _render_compact_run_table(lines, report.records)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_hardware_report_markdown(
+    report: HardwareReport,
+    *,
+    template_options: ReportTemplateOptions | None = None,
+) -> str:
+    options = template_options or ReportTemplateOptions(
+        include_hardware_details=report.include_hardware_details,
+    )
+    lines = _render_header(report.metadata)
+    _render_stats(lines, report.summary, "Overall hardware score summary")
+    lines.extend(["", "## Hardware groups", ""])
+    if not report.groups:
+        lines.append("No benchmark runs selected.")
+    show_details = report.include_hardware_details or options.include_hardware_details or _template_has_sensitive_content(options)
+    for group in report.groups:
+        lines.extend(
+            [
+                f"### {group.label}",
+                "",
+                f"- Snapshot key: `{group.key}`",
+                f"- Run count: {group.summary.count}",
+                f"- Scored count: {group.summary.scored_count}",
+                f"- Average overall score: {_display(group.summary.average)}",
+                f"- Median overall score: {_display(group.summary.median)}",
+                f"- Minimum overall score: {_display(group.summary.minimum)}",
+                f"- Maximum overall score: {_display(group.summary.maximum)}",
+                f"- Score distribution: {_format_distribution(group.summary.score_distribution)}",
+                f"- Average tokens/s: {_display(group.average_tokens_per_second)}",
+                f"- Represented models: {_display(', '.join(group.represented_models) or None)}",
+                f"- Represented benchmarks: {_display(', '.join(group.represented_benchmarks) or None)}",
+                f"- Hallucination distribution: {_format_distribution(group.hallucination_distribution)}",
+                f"- Reliability distribution: {_format_distribution(group.reliability_distribution)}",
+            ]
+        )
+        if show_details:
+            lines.extend(["", "#### Contributing runs", ""])
+            if options.include_record_details or _template_has_sensitive_content(options):
+                for item in group.records:
+                    _render_run_detail(lines, item)
+            else:
+                _render_compact_run_table(lines, group.records)
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_scoreboard_markdown(report: ScoreboardReport) -> str:
     lines = _render_header(report.metadata)
     _render_stats(lines, report.summary, "Overall score summary")
@@ -1281,7 +2062,14 @@ def render_scoreboard_markdown(report: ScoreboardReport) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_model_leaderboard_markdown(report: ModelLeaderboardReport, *, include_model_details: bool = False) -> str:
+def render_model_leaderboard_markdown(
+    report: ModelLeaderboardReport,
+    *,
+    include_model_details: bool = False,
+    template_options: ReportTemplateOptions | None = None,
+) -> str:
+    if template_options is not None:
+        include_model_details = template_options.include_model_details
     lines = _render_header(report.metadata)
     lines.extend(
         [
@@ -1329,12 +2117,20 @@ def render_model_leaderboard_markdown(report: ModelLeaderboardReport, *, include
     return "\n".join(lines).rstrip() + "\n"
 
 
-def render_markdown(report: ReportDocument) -> str:
+def render_markdown(
+    report: ReportDocument,
+    *,
+    template_options: ReportTemplateOptions | None = None,
+) -> str:
     if isinstance(report, BenchmarkRunReport):
-        return render_benchmark_run_markdown(report)
+        return render_benchmark_run_markdown(report, template_options=template_options)
+    if isinstance(report, SessionReport):
+        return render_session_markdown(report, template_options=template_options)
+    if isinstance(report, HardwareReport):
+        return render_hardware_report_markdown(report, template_options=template_options)
     if isinstance(report, ScoreboardReport):
         return render_scoreboard_markdown(report)
-    return render_model_leaderboard_markdown(report)
+    return render_model_leaderboard_markdown(report, template_options=template_options)
 
 
 def render_combined_markdown(benchmark_report: BenchmarkRunReport, scoreboard_report: ScoreboardReport) -> str:
@@ -1357,6 +2153,7 @@ def write_markdown_report(
     destination: str | Path,
     *,
     overwrite: bool = False,
+    template_options: ReportTemplateOptions | None = None,
 ) -> ReportWriteResult:
     """Write UTF-8 Markdown through a same-directory staged replacement.
 
@@ -1383,7 +2180,7 @@ def write_markdown_report(
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.parent.is_dir():
             return ReportWriteResult(ReportWriteStatus.TEMP_WRITE_FAILED, path, "Report parent is not a directory")
-        content = report if isinstance(report, str) else render_markdown(report)
+        content = report if isinstance(report, str) else render_markdown(report, template_options=template_options)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         temporary = Path(temporary_name)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output:
@@ -1410,12 +2207,17 @@ def write_markdown_report(
 # Friendly aliases for callers that prefer generate/render terminology.
 DetailedBenchmarkReport = BenchmarkRunReport
 HistoricalScoreboardReport = ScoreboardReport
+SessionBenchmarkReport = SessionReport
 ReportSummary = ScoreStatistics
 generate_benchmark_run_report = build_benchmark_run_report
 generate_scoreboard_report = build_scoreboard_report
 generate_model_leaderboard = build_model_leaderboard
+generate_session_report = build_session_report
+generate_hardware_report = build_hardware_report
 render_benchmark_report_markdown = render_benchmark_run_markdown
 render_leaderboard_markdown = render_model_leaderboard_markdown
+render_session_report_markdown = render_session_markdown
+render_hardware_markdown = render_hardware_report_markdown
 write_report_markdown = write_markdown_report
 
 
@@ -1427,15 +2229,22 @@ __all__ = (
     "BenchmarkRunAggregate",
     "BenchmarkRunReport",
     "BenchmarkRunReportItem",
+    "HardwareReport",
+    "HardwareReportGroup",
     "HardwareReportSummary",
     "DetailedBenchmarkReport",
     "HistoricalScoreboardReport",
+    "SessionBenchmarkReport",
+    "SessionReport",
     "ModelLeaderboardEntry",
     "ModelLeaderboardReport",
     "ModelReportSummary",
     "PromptReportSummary",
     "ReportDocument",
     "ReportMetadata",
+    "ReportTemplate",
+    "ReportTemplateId",
+    "ReportTemplateOptions",
     "ReportSummary",
     "ReportType",
     "ReportWriteResult",
@@ -1449,18 +2258,29 @@ __all__ = (
     "ScoreboardReportFilters",
     "SessionReportSummary",
     "build_benchmark_run_report",
+    "build_hardware_report",
     "build_model_leaderboard",
     "build_scoreboard_report",
+    "build_session_report",
+    "available_report_templates",
+    "apply_report_template",
+    "get_report_template",
     "generate_benchmark_run_report",
+    "generate_hardware_report",
     "generate_model_leaderboard",
     "generate_scoreboard_report",
+    "generate_session_report",
     "render_benchmark_report_markdown",
     "render_benchmark_run_markdown",
     "render_combined_markdown",
     "render_leaderboard_markdown",
     "render_markdown",
     "render_model_leaderboard_markdown",
+    "render_hardware_report_markdown",
+    "render_hardware_markdown",
     "render_scoreboard_markdown",
+    "render_session_markdown",
+    "render_session_report_markdown",
     "write_markdown_report",
     "write_report_markdown",
 )

@@ -29,12 +29,15 @@ from engine.datasets import DatasetBuilder, DatasetFilters, DatasetWriteResult, 
 from engine.reporting import (
     BenchmarkReportFilters,
     BenchmarkRunReport,
+    HardwareReport,
     ModelLeaderboardReport,
     ReportWriteResult,
     ReportWriteStatus,
+    ReportTemplateOptions,
     ReportingService,
     ScoreboardReport,
     ScoreboardReportFilters,
+    SessionReport,
 )
 
 class NavigationSignal:
@@ -68,6 +71,7 @@ class BenchmarkReportOptions:
     include_prompt_text: bool = False
     include_raw_model_output: bool = False
     include_attachment_metadata: bool = False
+    template_id: str = "standard"
     destination: str = ""
 
 
@@ -77,6 +81,7 @@ class ScoreboardReportOptions:
 
     title: str = "Historical Scoreboard Report"
     filters: ScoreboardReportFilters = field(default_factory=ScoreboardReportFilters)
+    template_id: str = "standard"
     destination: str = ""
 
 
@@ -87,6 +92,34 @@ class LeaderboardReportOptions:
     title: str = "Model Leaderboard"
     filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
     include_model_details: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class SessionReportOptions:
+    """Session-local options for one session report."""
+
+    title: str = "Session Report"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class HardwareReportOptions:
+    """Session-local options for historical hardware reports."""
+
+    title: str = "Hardware Report"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+    include_hardware_details: bool = False
+    template_id: str = "standard"
     destination: str = ""
 
 
@@ -127,6 +160,8 @@ class TerminalApp:
         self._benchmark_report_options = BenchmarkReportOptions()
         self._scoreboard_report_options = ScoreboardReportOptions()
         self._leaderboard_report_options = LeaderboardReportOptions()
+        self._session_report_options = SessionReportOptions()
+        self._hardware_report_options = HardwareReportOptions()
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -247,6 +282,8 @@ class TerminalApp:
             "Detailed Benchmark Run Report": ("benchmark-run-report.md", ".md"),
             "Historical Scoreboard Report": ("scoreboard-report.md", ".md"),
             "Model Leaderboard": ("model-leaderboard.md", ".md"),
+            "Session Report": ("session-report.md", ".md"),
+            "Hardware Report": ("hardware-report.md", ".md"),
             "BenchPup Backup": ("benchpup-backup.json", ".json"),
             "JSONL Dataset": ("dataset.jsonl", ".jsonl"),
         }
@@ -1482,6 +1519,45 @@ class TerminalApp:
             else:
                 self.output("Choose a number from 1 to 9, or B to return.")
 
+    def _report_template_label(self, template_id: str) -> str:
+        template = self.reporting.report_template(template_id)
+        if template is None:
+            return self._report_value(template_id)
+        return f"{template.name} — {template.description}"
+
+    def _report_template_choice(self, current: str) -> str | NavigationSignal:
+        choices = [
+            (f"{template.name} — {template.description}", template.template_id)
+            for template in self.reporting.report_templates()
+        ]
+        selected = self._report_vertical_choice("Report Template", choices, current)
+        return selected if isinstance(selected, NavigationSignal) else str(selected or current)
+
+    def _apply_report_template(self, template_id: str) -> ReportTemplateOptions:
+        return self.reporting.apply_template(template_id)
+
+    def _report_template_options_for(
+        self,
+        template_id: str,
+        **overrides: bool,
+    ) -> ReportTemplateOptions:
+        applied = self.reporting.apply_template(template_id)
+        if not isinstance(applied, ReportTemplateOptions):
+            applied = ReportTemplateOptions(template_id=template_id)
+        for name, value in overrides.items():
+            if hasattr(applied, name):
+                setattr(applied, name, value)
+        return applied
+
+    def _report_template_argument(
+        self,
+        template_id: str,
+        **overrides: bool,
+    ) -> dict[str, Any]:
+        if template_id == "standard":
+            return {}
+        return {"template_options": self._report_template_options_for(template_id, **overrides)}
+
     def _benchmark_report_options_screen(self, options: BenchmarkReportOptions) -> BenchmarkReportOptions:
         while True:
             content = "\n".join((
@@ -1490,7 +1566,8 @@ class TerminalApp:
                 f"3) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
                 f"4) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
                 f"5) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
-                "6) Reset Report Options",
+                f"6) Report Template [{self._report_template_label(options.template_id)}]",
+                "7) Reset Report Options",
                 "",
                 *self._report_filter_summary(options.filters),
                 f"Destination: {self._report_value(options.destination)}",
@@ -1526,9 +1603,20 @@ class TerminalApp:
                 if not isinstance(value, NavigationSignal):
                     options = replace(options, **{field_name: value})
             elif command == "6":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "7":
                 options = BenchmarkReportOptions()
             else:
-                self.output("Choose a number from 1 to 6, or B to return.")
+                self.output("Choose a number from 1 to 7, or B to return.")
 
     def _scoreboard_report_options_screen(self, options: ScoreboardReportOptions) -> ScoreboardReportOptions:
         while True:
@@ -1536,7 +1624,8 @@ class TerminalApp:
                 f"1) Report Title [{options.title}]",
                 "2) Scoreboard Import Batch",
                 f"3) Model Text Filter [{self._report_value(options.filters.model)}]",
-                "4) Reset Report Options",
+                f"4) Report Template [{self._report_template_label(options.template_id)}]",
+                "5) Reset Report Options",
                 "",
                 *self._report_scoreboard_filter_summary(options.filters),
                 f"Destination: {self._report_value(options.destination)}",
@@ -1568,9 +1657,14 @@ class TerminalApp:
                 if isinstance(value, str):
                     options = replace(options, filters=replace(options.filters, model=value))
             elif command == "4":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(options, template_id=applied.template_id)
+            elif command == "5":
                 options = ScoreboardReportOptions()
             else:
-                self.output("Choose a number from 1 to 4, or B to return.")
+                self.output("Choose a number from 1 to 5, or B to return.")
 
     def _leaderboard_report_options_screen(self, options: LeaderboardReportOptions) -> LeaderboardReportOptions:
         while True:
@@ -1578,7 +1672,8 @@ class TerminalApp:
                 f"1) Report Title [{options.title}]",
                 "2) Configure Selection Filters",
                 f"3) Include Per-Model Detail Sections [{'Yes' if options.include_model_details else 'No'}]",
-                "4) Reset Report Options",
+                f"4) Report Template [{self._report_template_label(options.template_id)}]",
+                "5) Reset Report Options",
                 "",
                 *self._report_filter_summary(options.filters),
                 f"Destination: {self._report_value(options.destination)}",
@@ -1602,15 +1697,164 @@ class TerminalApp:
                 if not isinstance(value, NavigationSignal):
                     options = replace(options, include_model_details=value)
             elif command == "4":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_model_details=applied.include_model_details,
+                    )
+            elif command == "5":
                 options = LeaderboardReportOptions()
             else:
-                self.output("Choose a number from 1 to 4, or B to return.")
+                self.output("Choose a number from 1 to 5, or B to return.")
+
+    def _session_report_options_screen(self, options: SessionReportOptions) -> SessionReportOptions:
+        while True:
+            session = self.catalog.sessions.get(options.filters.session_id) if options.filters.session_id is not None else None
+            content = "\n".join((
+                f"1) Select Session [{session.title if session else 'Not set'}]",
+                "2) Configure Additional Filters",
+                f"3) Report Title [{options.title}]",
+                f"4) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
+                f"5) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
+                f"6) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
+                f"7) Report Template [{self._report_template_label(options.template_id)}]",
+                "8) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._report_catalog_choice(
+                    "Select Session",
+                    self.catalog.sessions.list(),
+                    lambda item: f"{item.title} ({item.started_at or 'date unavailable'})",
+                    lambda item: item.id,
+                    options.filters.session_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    options = replace(options, filters=replace(options.filters, session_id=selected))
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command == "3":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command in {"4", "5", "6"}:
+                field_name = {
+                    "4": "include_prompt_text",
+                    "5": "include_raw_model_output",
+                    "6": "include_attachment_metadata",
+                }[command]
+                value = self._configure_redaction_toggle(
+                    {
+                        "include_prompt_text": "Include Prompt Text",
+                        "include_raw_model_output": "Include Raw Model Output",
+                        "include_attachment_metadata": "Include Attachment Metadata",
+                    }[field_name],
+                    bool(getattr(options, field_name)),
+                )
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "8":
+                options = SessionReportOptions()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _hardware_report_options_screen(self, options: HardwareReportOptions) -> HardwareReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Report Title [{options.title}]",
+                "2) Configure Hardware and Selection Filters",
+                f"3) Include Per-Hardware Detail Sections [{'Yes' if options.include_hardware_details else 'No'}]",
+                f"4) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
+                f"5) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
+                f"6) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
+                f"7) Report Template [{self._report_template_label(options.template_id)}]",
+                "8) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Hardware Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command == "3":
+                value = self._configure_redaction_toggle("Include Per-Hardware Detail Sections", options.include_hardware_details)
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, include_hardware_details=value)
+            elif command in {"4", "5", "6"}:
+                field_name = {
+                    "4": "include_prompt_text",
+                    "5": "include_raw_model_output",
+                    "6": "include_attachment_metadata",
+                }[command]
+                value = self._configure_redaction_toggle(
+                    {
+                        "include_prompt_text": "Include Prompt Text",
+                        "include_raw_model_output": "Include Raw Model Output",
+                        "include_attachment_metadata": "Include Attachment Metadata",
+                    }[field_name],
+                    bool(getattr(options, field_name)),
+                )
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_hardware_details=applied.include_hardware_details,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "8":
+                options = HardwareReportOptions()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
 
     def _report_configuration_lines(
         self,
         benchmark: BenchmarkReportOptions,
         scoreboard: ScoreboardReportOptions,
         leaderboard: LeaderboardReportOptions,
+        session: SessionReportOptions,
+        hardware: HardwareReportOptions,
     ) -> tuple[str, ...]:
         return (
             "Detailed Benchmark Run Report",
@@ -1619,18 +1863,37 @@ class TerminalApp:
             f"  Prompt text: {'Included' if benchmark.include_prompt_text else 'Excluded'}",
             f"  Raw model output: {'Included' if benchmark.include_raw_model_output else 'Excluded'}",
             f"  Attachment metadata: {'Included' if benchmark.include_attachment_metadata else 'Excluded'}",
+            f"  Template: {self._report_template_label(benchmark.template_id)}",
             f"  Destination: {self._report_value(benchmark.destination)}",
             "",
             "Historical Scoreboard Report",
             f"  Title: {scoreboard.title}",
             f"  Filters: {'; '.join(self._report_scoreboard_filter_summary(scoreboard.filters))}",
+            f"  Template: {self._report_template_label(scoreboard.template_id)}",
             f"  Destination: {self._report_value(scoreboard.destination)}",
             "",
             "Model Leaderboard",
             f"  Title: {leaderboard.title}",
             f"  Filters: {'; '.join(self._report_filter_summary(leaderboard.filters))}",
             f"  Per-model details: {'Included' if leaderboard.include_model_details else 'Excluded'}",
+            f"  Template: {self._report_template_label(leaderboard.template_id)}",
             f"  Destination: {self._report_value(leaderboard.destination)}",
+            "",
+            "Session Report",
+            f"  Title: {session.title}",
+            f"  Session: {self._report_filter_summary(session.filters)[0] if session.filters.session_id is not None else 'Not selected'}",
+            f"  Template: {self._report_template_label(session.template_id)}",
+            f"  Prompt text: {'Included' if session.include_prompt_text else 'Excluded'}",
+            f"  Raw model output: {'Included' if session.include_raw_model_output else 'Excluded'}",
+            f"  Attachment metadata: {'Included' if session.include_attachment_metadata else 'Excluded'}",
+            f"  Destination: {self._report_value(session.destination)}",
+            "",
+            "Hardware Report",
+            f"  Title: {hardware.title}",
+            f"  Filters: {'; '.join(self._report_filter_summary(hardware.filters))}",
+            f"  Per-hardware details: {'Included' if hardware.include_hardware_details else 'Excluded'}",
+            f"  Template: {self._report_template_label(hardware.template_id)}",
+            f"  Destination: {self._report_value(hardware.destination)}",
             "",
             "Overwrite: explicit confirmation is required for an existing file.",
             "",
@@ -1652,6 +1915,7 @@ class TerminalApp:
             f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
             f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
             f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
             "Soft-deleted runs: excluded by the reporting engine.",
         )
 
@@ -1665,6 +1929,7 @@ class TerminalApp:
             f"Filters: {'; '.join(self._report_scoreboard_filter_summary(options.filters))}",
             "Missing scores remain unavailable; they are not treated as zero.",
             "Soft-deleted entries and batches: excluded by the reporting engine.",
+            f"Template: {self._report_template_label(options.template_id)}",
         )
 
     def _leaderboard_selection_lines(self, report: ModelLeaderboardReport, options: LeaderboardReportOptions) -> tuple[str, ...]:
@@ -1676,9 +1941,49 @@ class TerminalApp:
             f"Top-ranked model: {top_model}",
             f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
             f"Per-model detail sections: {'Included' if options.include_model_details else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
             "Ranking: average overall score descending; scored-run count descending; median overall score descending; deterministic model-name ordering.",
             f"Models without scored runs: {', '.join(unscored) if unscored else 'None represented'}",
             "Missing scores and speeds remain unavailable; they are not treated as zero.",
+        )
+
+    def _session_selection_lines(self, report: SessionReport, options: SessionReportOptions) -> tuple[str, ...]:
+        period = " → ".join(
+            value for value in (report.session.started_at, report.session.completed_at) if value
+        ) or "Date range unavailable"
+        return (
+            f"Session: {report.session.title or self._report_value(report.session.id)}",
+            f"Session period: {period}",
+            f"Eligible run count: {report.metadata.record_count}",
+            f"Scored run count: {report.summary.scored_count} of {report.summary.count}",
+            f"Represented models: {self._report_models(list(report.represented_models))}",
+            f"Represented benchmarks: {self._report_models(list(report.represented_benchmarks))}",
+            f"Represented hardware: {self._report_models(list(report.represented_hardware))}",
+            f"Average score: {self._report_number(report.summary.average)}; median: {self._report_number(report.summary.median)}",
+            f"Average tokens/s: {self._report_number(report.average_tokens_per_second)}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+            f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+            f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+            "Soft-deleted sessions and runs: excluded by the reporting engine.",
+        )
+
+    def _hardware_selection_lines(self, report: HardwareReport, options: HardwareReportOptions) -> tuple[str, ...]:
+        fastest = report.fastest_group.label if report.fastest_group else "Not calculable"
+        highest = report.highest_average_score_group.label if report.highest_average_score_group else "Not calculable"
+        return (
+            f"Hardware group count: {len(report.groups)}",
+            f"Contributing run count: {report.metadata.record_count}",
+            f"Scored run count: {report.summary.scored_count} of {report.summary.count}",
+            f"Represented models: {self._report_models(list(report.represented_models))}",
+            f"Fastest group: {fastest}",
+            f"Highest average-score group: {highest}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Per-hardware detail sections: {'Included' if options.include_hardware_details else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            "Missing scores and speeds remain unavailable; they are not treated as zero.",
+            "Historical hardware snapshots are authoritative; distinct snapshots remain distinct groups.",
         )
 
     def _report_empty_screen(self, title: str, lines: tuple[str, ...]) -> None:
@@ -1725,12 +2030,13 @@ class TerminalApp:
 
     def _write_report_workflow(
         self,
-        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport,
+        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport,
         *,
         report_name: str,
         selection_lines: tuple[str, ...],
         destination: str,
         include_model_details: bool = False,
+        template_options: ReportTemplateOptions | None = None,
     ) -> str | None:
         self.render_screen(f"{report_name} Selection", "\n".join(selection_lines))
         path = self.prompt_path(
@@ -1764,6 +2070,7 @@ class TerminalApp:
                 report,
                 output_path,
                 include_model_details=include_model_details,
+                template_options=template_options,
             )
         except (OSError, ValueError) as error:
             self._report_error_screen(f"{report_name} Failed", f"Report generation or writing failed: {error}")
@@ -1781,6 +2088,7 @@ class TerminalApp:
                         output_path,
                         overwrite=True,
                         include_model_details=include_model_details,
+                        template_options=template_options,
                     )
                 except (OSError, ValueError) as error:
                     self._report_error_screen("Report Overwrite Failed", f"Report overwrite failed: {error}")
@@ -1824,6 +2132,12 @@ class TerminalApp:
                     include_raw_model_output=options.include_raw_model_output,
                     include_attachment_metadata=options.include_attachment_metadata,
                     title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                    ),
                 )
             except (OSError, ValueError) as error:
                 self._report_error_screen("Detailed Report Failed", f"Could not build the report: {error}")
@@ -1840,6 +2154,12 @@ class TerminalApp:
                 report_name="Detailed Benchmark Run Report",
                 selection_lines=selection_lines,
                 destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
             )
             if destination is not None:
                 options = replace(options, destination=destination)
@@ -1869,7 +2189,11 @@ class TerminalApp:
                 self.output("Choose 1, 2, or 3, or B to return.")
                 continue
             try:
-                report = self.reporting.scoreboard_report(filters=options.filters, title=options.title)
+                report = self.reporting.scoreboard_report(
+                    filters=options.filters,
+                    title=options.title,
+                    **self._report_template_argument(options.template_id),
+                )
             except (OSError, ValueError) as error:
                 self._report_error_screen("Scoreboard Report Failed", f"Could not build the report: {error}")
                 continue
@@ -1885,6 +2209,7 @@ class TerminalApp:
                 report_name="Historical Scoreboard Report",
                 selection_lines=selection_lines,
                 destination=options.destination,
+                template_options=self._report_template_options_for(options.template_id),
             )
             if destination is not None:
                 options = replace(options, destination=destination)
@@ -1931,7 +2256,11 @@ class TerminalApp:
                 self.output("Choose 1, 2, 3, or 4, or B to return.")
                 continue
             try:
-                report = self.reporting.model_leaderboard(filters=options.filters, title=options.title)
+                report = self.reporting.model_leaderboard(
+                    filters=options.filters,
+                    title=options.title,
+                    **self._report_template_argument(options.template_id),
+                )
             except (OSError, ValueError) as error:
                 self._report_error_screen("Leaderboard Failed", f"Could not build the leaderboard: {error}")
                 continue
@@ -1956,6 +2285,163 @@ class TerminalApp:
                 selection_lines=selection_lines,
                 destination=options.destination,
                 include_model_details=options.include_model_details,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_model_details=options.include_model_details,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _session_report_screen(self, options: SessionReportOptions) -> SessionReportOptions:
+        while True:
+            session = self.catalog.sessions.get(options.filters.session_id) if options.filters.session_id is not None else None
+            content = "\n".join((
+                "1) Configure Session Report Options",
+                "2) Preview Session Report",
+                "3) Write Markdown Report",
+                "",
+                f"Session: {session.title if session else 'Not selected'}",
+                *self._report_filter_summary(options.filters),
+                f"Template: {self._report_template_label(options.template_id)}",
+                f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+                f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+                f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._session_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            if options.filters.session_id is None:
+                self._report_empty_screen(
+                    "No Session Selected",
+                    ("Select a session before previewing or writing a session report.",),
+                )
+                continue
+            try:
+                report = self.reporting.session_report(
+                    options.filters.session_id,
+                    filters=options.filters,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                    title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Session Report Failed", f"Could not build the session report: {error}")
+                continue
+            selection_lines = self._session_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Session Report Preview", selection_lines)
+                continue
+            if not report.records:
+                self._report_empty_screen(
+                    "No Eligible Session Runs",
+                    selection_lines + ("The selected session has no eligible benchmark runs.",),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Session Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _hardware_report_screen(self, options: HardwareReportOptions) -> HardwareReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Hardware Report Options",
+                "2) Preview Hardware Report",
+                "3) Write Markdown Report",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Template: {self._report_template_label(options.template_id)}",
+                f"Per-hardware details: {'Included' if options.include_hardware_details else 'Excluded'}",
+                f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+                f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+                f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Hardware Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._hardware_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.hardware_report(
+                    filters=options.filters,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                    include_hardware_details=options.include_hardware_details,
+                    title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                        include_hardware_details=options.include_hardware_details,
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Hardware Report Failed", f"Could not build the hardware report: {error}")
+                continue
+            selection_lines = self._hardware_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Hardware Report Preview", selection_lines)
+                continue
+            if not report.groups:
+                self._report_empty_screen(
+                    "No Hardware Report Runs",
+                    selection_lines + ("No eligible benchmark runs have hardware report data.",),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Hardware Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_hardware_details=options.include_hardware_details,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
             )
             if destination is not None:
                 options = replace(options, destination=destination)
@@ -1966,12 +2452,16 @@ class TerminalApp:
         benchmark_options = self._benchmark_report_options
         scoreboard_options = self._scoreboard_report_options
         leaderboard_options = self._leaderboard_report_options
+        session_options = self._session_report_options
+        hardware_options = self._hardware_report_options
         while True:
             content = "\n".join((
                 "1) Detailed Benchmark Run Report",
                 "2) Historical Scoreboard Report",
                 "3) Model Leaderboard",
-                "4) View Current Report Options",
+                "4) Session Report",
+                "5) Hardware Report",
+                "6) View Current Report Options",
                 "",
                 "Options are session-local and are never written to SQLite.",
                 "",
@@ -1984,6 +2474,8 @@ class TerminalApp:
                 self._benchmark_report_options = benchmark_options
                 self._scoreboard_report_options = scoreboard_options
                 self._leaderboard_report_options = leaderboard_options
+                self._session_report_options = session_options
+                self._hardware_report_options = hardware_options
                 return
             command = self.normalized(choice)
             if command == "1":
@@ -1996,13 +2488,27 @@ class TerminalApp:
                 leaderboard_options = self._model_leaderboard_report_screen(leaderboard_options)
                 self._leaderboard_report_options = leaderboard_options
             elif command == "4":
+                session_options = self._session_report_screen(session_options)
+                self._session_report_options = session_options
+            elif command == "5":
+                hardware_options = self._hardware_report_screen(hardware_options)
+                self._hardware_report_options = hardware_options
+            elif command == "6":
                 self.render_screen(
                     "Current Report Options",
-                    "\n".join(self._report_configuration_lines(benchmark_options, scoreboard_options, leaderboard_options)),
+                    "\n".join(
+                        self._report_configuration_lines(
+                            benchmark_options,
+                            scoreboard_options,
+                            leaderboard_options,
+                            session_options,
+                            hardware_options,
+                        )
+                    ),
                 )
                 self.ask("Choose an option", navigation=True)
             else:
-                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                self.output("Choose 1, 2, 3, 4, 5, or 6, or B to return.")
 
     def reports_screen(self) -> None:
         """Compatibility alias for callers that use the shorter screen name."""

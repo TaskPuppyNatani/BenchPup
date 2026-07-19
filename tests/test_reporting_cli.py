@@ -8,9 +8,11 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from cli import (
     BenchmarkReportOptions,
+    HardwareReportOptions,
     LeaderboardReportOptions,
     QuitApplication,
     ScoreboardReportOptions,
+    SessionReportOptions,
     TerminalApp,
 )
 from engine.domain import (
@@ -24,13 +26,16 @@ from engine.domain import (
     ScoreboardImportBatch,
 )
 from engine.reporting import (
+    BenchmarkReportFilters,
     BenchmarkRunAggregate,
     ReportWriteResult,
     ReportWriteStatus,
     ReportingService,
     build_benchmark_run_report,
+    build_hardware_report,
     build_model_leaderboard,
     build_scoreboard_report,
+    build_session_report,
 )
 
 
@@ -67,7 +72,9 @@ class ReportingCliTests(unittest.TestCase):
         app, output = self.app_with(["b"])
         app.reporting_screen()
         self.assertIn("1) Detailed Benchmark Run Report", "\n".join(output))
-        self.assertIn("4) View Current Report Options", "\n".join(output))
+        self.assertIn("4) Session Report", "\n".join(output))
+        self.assertIn("5) Hardware Report", "\n".join(output))
+        self.assertIn("6) View Current Report Options", "\n".join(output))
 
         app, _ = self.app_with(["qa"])
         with self.assertRaises(QuitApplication):
@@ -298,6 +305,98 @@ class ReportingCliTests(unittest.TestCase):
         ):
             app._model_leaderboard_report_screen(options)
         self.assertTrue(app.reporting.write_markdown_report.call_args.kwargs["include_model_details"])
+
+    def test_session_report_selects_catalog_session_and_calls_reporting_service(self) -> None:
+        app, _ = self.app_with(["3", "y", "b", "b"])
+        session = app.catalog.sessions.create(BenchmarkSession(title="July session", started_at="2026-07-10"))
+        aggregate = self.run_aggregate()
+        aggregate.run.session_id = session.id
+        aggregate = BenchmarkRunAggregate(aggregate.run, aggregate.score, session)
+        report = build_session_report(session, [aggregate])
+        app.reporting = Mock(spec=ReportingService)
+        app.reporting.session_report.return_value = report
+        app.reporting.write_markdown_report.return_value = ReportWriteResult(ReportWriteStatus.SUCCESS, Path("session.md"))
+        destination = Path(app.benchmarks.database.path.parent) / "session.md"
+        options = SessionReportOptions(filters=BenchmarkReportFilters(session_id=session.id))
+        with patch.object(app, "prompt_path", return_value=str(destination)), patch.object(
+            app, "prepare_export_destination", return_value=destination
+        ):
+            app._session_report_screen(options)
+        app.reporting.session_report.assert_called_once_with(
+            session.id,
+            filters=options.filters,
+            include_prompt_text=False,
+            include_raw_model_output=False,
+            include_attachment_metadata=False,
+            title=options.title,
+        )
+        app.reporting.write_markdown_report.assert_called_once()
+
+    def test_session_report_handles_no_session_without_writing(self) -> None:
+        app, output = self.app_with(["3", "b", "b"])
+        app.reporting = Mock(spec=ReportingService)
+        app._session_report_screen(SessionReportOptions())
+        self.assertIn("No Session Selected", "\n".join(output))
+        app.reporting.session_report.assert_not_called()
+        app.reporting.write_markdown_report.assert_not_called()
+
+    def test_hardware_report_preview_uses_structured_group_properties(self) -> None:
+        app, output = self.app_with(["2", "b", "b"])
+        report = build_hardware_report([self.run_aggregate()])
+        app.reporting = Mock(spec=ReportingService)
+        app.reporting.hardware_report.return_value = report
+        app._hardware_report_screen(HardwareReportOptions())
+        rendered = "\n".join(output)
+        self.assertIn("Hardware group count: 1", rendered)
+        self.assertIn("Fastest group: Unknown hardware", rendered)
+        self.assertIn("Highest average-score group: Unknown hardware", rendered)
+        app.reporting.write_markdown_report.assert_not_called()
+
+    def test_hardware_report_empty_selection_does_not_write(self) -> None:
+        app, output = self.app_with(["3", "b", "b"])
+        app.reporting = Mock(spec=ReportingService)
+        app.reporting.hardware_report.return_value = build_hardware_report([])
+        app._hardware_report_screen(HardwareReportOptions())
+        self.assertIn("No Hardware Report Runs", "\n".join(output))
+        app.reporting.write_markdown_report.assert_not_called()
+
+    def test_hardware_report_propagates_filters_and_detail_option(self) -> None:
+        app, _ = self.app_with(["3", "y", "b", "b"])
+        report = build_hardware_report([self.run_aggregate()])
+        app.reporting = Mock(spec=ReportingService)
+        app.reporting.hardware_report.return_value = report
+        app.reporting.write_markdown_report.return_value = ReportWriteResult(ReportWriteStatus.SUCCESS, Path("hardware.md"))
+        destination = Path(app.benchmarks.database.path.parent) / "hardware.md"
+        from engine.reporting import BenchmarkReportFilters
+
+        options = HardwareReportOptions(
+            filters=BenchmarkReportFilters(benchmark_type="code_review", hardware="RTX"),
+            include_hardware_details=True,
+        )
+        with patch.object(app, "prompt_path", return_value=str(destination)), patch.object(
+            app, "prepare_export_destination", return_value=destination
+        ):
+            app._hardware_report_screen(options)
+        app.reporting.hardware_report.assert_called_once_with(
+            filters=options.filters,
+            include_prompt_text=False,
+            include_raw_model_output=False,
+            include_attachment_metadata=False,
+            include_hardware_details=True,
+            title=options.title,
+        )
+        self.assertTrue(app.reporting.write_markdown_report.call_args.kwargs["template_options"].include_hardware_details)
+
+    def test_template_selection_uses_vertical_choices_and_preserves_filters(self) -> None:
+        app, _ = self.app_with(["7", "1", "b"])
+        from engine.reporting import BenchmarkReportFilters
+
+        options = HardwareReportOptions(filters=BenchmarkReportFilters(benchmark_type="code_review"))
+        updated = app._hardware_report_options_screen(options)
+        self.assertEqual(updated.template_id, "concise")
+        self.assertEqual(updated.filters, options.filters)
+        self.assertFalse(updated.include_prompt_text)
+        self.assertFalse(updated.include_hardware_details)
 
 
 if __name__ == "__main__":

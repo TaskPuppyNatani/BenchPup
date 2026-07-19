@@ -81,27 +81,53 @@ Completed:
 
 ### Phase 4.2 — Markdown Reports and Leaderboards
 
-Next:
+Completed:
 
-- enhanced Markdown reports
-- reporting enhancements
-- session reports
-- model leaderboards
-- hardware summaries
-- scoreboard and benchmark-run reports
-- report templates
+- UI-independent reporting engine foundation and typed report models
+- detailed benchmark-run and historical scoreboard Markdown reports
+- deterministic model leaderboards
+- session reports with score, review-level, speed, and run summaries
+- hardware reports grouped by authoritative historical hardware snapshots
+- immutable Concise, Standard, and Full Audit report templates
+- session-local template and inclusion options with privacy-sensitive defaults
+- screen-based Reports workflows, previews, destination autocomplete,
+  explicit confirmation, overwrite handling, and structured write statuses
+
+**Status: Complete**
 
 
-### Phase 4.2A
+### Phase 4.2A — Reporting Engine Foundation
 
 Completed:
-- Every menu is its own screen.
-- Entering a screen clears the previous one.
-- Only the active screen is visible.
-- B returns one level.
-- Q is the Main-screen quit command.
-- QA exits globally from shared input helpers.
-- Long detail views may scroll naturally, but menus do not stack.
+
+- `ReportingService` selection and aggregation boundary
+- typed benchmark, scoreboard, leaderboard, session, and hardware reports
+- deterministic summaries and historical snapshot authority
+- UI-independent Markdown renderers
+- staged UTF-8 Markdown writer with explicit overwrite protection
+
+### Phase 4.2B — Reporting CLI Integration
+
+Completed:
+
+- Reports screen navigation for detailed runs, scoreboard history, and
+  leaderboards
+- vertical catalog selectors and snapshot-text filters
+- structured previews, path autocomplete, confirmation, and write-result screens
+- session-local options with no new database persistence
+
+### Phase 4.2C — Session, Hardware, and Report Templates
+
+Completed:
+
+- dedicated session report workflow with catalog session selection
+- dedicated hardware report workflow with shared filters and optional detail
+  sections
+- immutable built-in report templates with isolated applied options
+- privacy-sensitive prompt, raw-output, and attachment metadata controls
+
+Persisted custom report-template editing remains future work; the existing
+`ExportProfile` model is intentionally unchanged.
 
 
 ### Phase 4.3 — JSONL Dataset Builder
@@ -118,20 +144,19 @@ Completed:
 
 ### Phase 4.4 — Statistics and Comparison
 
-Next after reporting enhancements:
+Next:
 
 - descriptive statistics
 - model comparisons
 - session comparison
 - trend reports
 - richer HTML charts
-- leaderboards
 
 ## Phase 5 — GUI
 
 Implement a PySide6 dark-mode desktop application only after the reporting,
-statistics, leaderboard, and model-comparison engine/reporting phases are
-complete. It will reuse the existing engine and design language.
+statistics, and model-comparison engine/reporting phases are complete. It will
+reuse the existing engine and design language.
 
 ## Phase 6 — Advanced Research Features
 

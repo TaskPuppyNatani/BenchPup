@@ -21,14 +21,22 @@ from engine.domain import (
 from engine.reporting import (
     BenchmarkReportFilters,
     BenchmarkRunAggregate,
+    ReportTemplateId,
+    ReportTemplateOptions,
     ReportWriteStatus,
     ScoreboardReportFilters,
+    apply_report_template,
+    available_report_templates,
     build_benchmark_run_report,
+    build_hardware_report,
     build_model_leaderboard,
     build_scoreboard_report,
+    build_session_report,
     render_benchmark_run_markdown,
+    render_hardware_report_markdown,
     render_model_leaderboard_markdown,
     render_scoreboard_markdown,
+    render_session_markdown,
     write_markdown_report,
 )
 from engine.services import BenchmarkService, CatalogService
@@ -289,6 +297,136 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(report.models[0].model_name, "Filter me")
         self.assertEqual(aggregate.run, original_run)
         self.assertEqual(aggregate.score, original_score)
+
+    def test_session_report_summarizes_runs_deterministically_and_redacts_by_default(self) -> None:
+        later = self.make_run(
+            model_name="Beta",
+            score=5.0,
+            created_at="2026-07-11T12:00:00+00:00",
+            tokens_per_second=120.0,
+            hallucination="Medium",
+            reliability="High",
+        )
+        earlier = self.make_run(
+            model_name="Alpha",
+            score=3.0,
+            created_at="2026-07-10T12:00:00+00:00",
+            tokens_per_second=100.0,
+        )
+        no_score = self.make_run(model_name="NoScore", score=None, tokens_per_second=None)
+        original = copy.deepcopy(earlier.run)
+
+        report = build_session_report(
+            self.session,
+            [later, no_score, earlier],
+            generated_at="2026-07-18T00:00:00+00:00",
+        )
+        markdown = render_session_markdown(report)
+
+        self.assertEqual(report.session.title, "July session")
+        self.assertEqual(report.summary.count, 3)
+        self.assertEqual(report.summary.scored_count, 2)
+        self.assertEqual(report.summary.average, 4.0)
+        self.assertEqual(report.summary.median, 4.0)
+        self.assertEqual(dict(report.summary.score_distribution), {3.0: 1, 5.0: 1})
+        self.assertEqual(dict(report.hallucination_distribution), {"Low": 1, "Medium": 1})
+        self.assertEqual(dict(report.reliability_distribution), {"High": 2})
+        self.assertEqual(report.average_tokens_per_second, 110.0)
+        self.assertEqual([item.model_name for item in report.records], ["Alpha", "NoScore", "Beta"])
+        self.assertEqual(earlier.run, original)
+        self.assertNotIn("Review the code carefully.", markdown)
+        self.assertNotIn("RÃ©sumÃ©: useful model output", markdown)
+
+    def test_session_report_deleted_session_and_run_rules_and_optional_content(self) -> None:
+        aggregate = self.make_run()
+        deleted_run = copy.deepcopy(aggregate.run)
+        deleted_run.is_deleted = True
+        deleted = BenchmarkRunAggregate(deleted_run, aggregate.score, self.session)
+        report = build_session_report(self.session, [aggregate, deleted])
+        self.assertEqual(report.summary.count, 1)
+
+        deleted_session = copy.deepcopy(self.session)
+        deleted_session.is_deleted = True
+        excluded = build_session_report(deleted_session, [aggregate])
+        included = build_session_report(
+            deleted_session,
+            [aggregate],
+            filters=BenchmarkReportFilters(include_deleted=True),
+            include_prompt_text=True,
+            include_raw_model_output=True,
+        )
+        self.assertEqual(excluded.records, ())
+        self.assertEqual(len(included.records), 1)
+        self.assertEqual(included.records[0].prompt_text, self.prompt.prompt_text)
+        self.assertEqual(included.records[0].raw_model_output, aggregate.run.raw_model_output)
+
+    def test_hardware_report_groups_historical_snapshots_and_missing_metadata(self) -> None:
+        first = self.make_run(model_name="Alpha", score=4.0, tokens_per_second=100.0)
+        second_run = copy.deepcopy(first.run)
+        second_run.hardware_snapshot = {"name": "Rig A", "cpu": "CPU", "gpu": "Different GPU", "operating_system": "Windows"}
+        second_run.model_snapshot["tokens_per_second"] = 90.0
+        second = BenchmarkRunAggregate(second_run, ReviewScore(run_id=2, overall_score=5.0), self.session)
+        unknown_run = copy.deepcopy(first.run)
+        unknown_run.hardware_snapshot = {}
+        unknown = BenchmarkRunAggregate(unknown_run, None, self.session)
+
+        report = build_hardware_report([second, unknown, first], include_hardware_details=True)
+        markdown = render_hardware_report_markdown(report)
+
+        self.assertEqual(len(report.groups), 3)
+        self.assertEqual(report.metadata.record_count, 3)
+        self.assertEqual(report.summary.scored_count, 2)
+        self.assertIn("Unknown hardware", [group.label for group in report.groups])
+        self.assertEqual(report.fastest_group.label, "Rig A, CPU, GPU, Windows")
+        self.assertEqual(report.highest_average_score_group.summary.average, 5.0)
+        self.assertIn("Different GPU", markdown)
+        self.assertIn("Contributing runs", markdown)
+
+    def test_hardware_report_ignores_missing_scores_and_filters_deleted_runs(self) -> None:
+        scored = self.make_run(model_name="Alpha", score=4.0, tokens_per_second=None)
+        missing = self.make_run(model_name="Beta", score=None, tokens_per_second=None, created_at="2026-07-11")
+        deleted_run = copy.deepcopy(scored.run)
+        deleted_run.is_deleted = True
+        deleted = BenchmarkRunAggregate(deleted_run, ReviewScore(run_id=3, overall_score=1.0), self.session)
+
+        report = build_hardware_report([scored, missing, deleted])
+        filtered = build_hardware_report([scored, missing], filters=BenchmarkReportFilters(model="Alpha"))
+        self.assertEqual(report.summary.count, 2)
+        self.assertEqual(report.summary.scored_count, 1)
+        self.assertIsNone(report.groups[0].average_tokens_per_second)
+        self.assertEqual(filtered.metadata.record_count, 1)
+
+    def test_report_templates_are_immutable_and_application_is_isolated(self) -> None:
+        templates = available_report_templates()
+        self.assertEqual([template.name for template in templates], ["Concise", "Standard", "Full Audit"])
+        concise = apply_report_template(ReportTemplateId.CONCISE)
+        standard = apply_report_template("standard")
+        audit = apply_report_template("full_audit")
+        self.assertFalse(concise.include_prompt_text)
+        self.assertFalse(concise.include_raw_model_output)
+        self.assertFalse(concise.include_attachment_metadata)
+        self.assertFalse(standard.include_prompt_text)
+        self.assertTrue(audit.include_hardware_details)
+        concise.include_prompt_text = True
+        self.assertFalse(apply_report_template("concise").include_prompt_text)
+        with self.assertRaises(ValueError):
+            apply_report_template("not-a-template")
+
+    def test_template_options_can_drive_compact_rendering_without_sensitive_content(self) -> None:
+        report = build_benchmark_run_report(
+            [self.make_run()],
+            include_prompt_text=True,
+            include_raw_model_output=True,
+            template_options=ReportTemplateOptions(
+                template_id="concise",
+                include_record_details=False,
+                include_prompt_text=True,
+                include_raw_model_output=True,
+            ),
+        )
+        rendered = render_benchmark_run_markdown(report, template_options=apply_report_template("concise"))
+        self.assertNotIn("RÃ©sumÃ©: useful model output", rendered)
+        self.assertIn("| Recorded | Model | Benchmark |", rendered)
 
     def test_safe_utf8_markdown_write_and_overwrite_protection(self) -> None:
         report = build_benchmark_run_report([self.make_run()], title="Résumé report")

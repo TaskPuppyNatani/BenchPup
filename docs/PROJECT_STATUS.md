@@ -6,7 +6,7 @@
 
 ## Current Test Status
 
-**145 passing**
+**181 passing**
 
 ## Completed
 
@@ -36,16 +36,22 @@
 - [x] Dataset eligibility, filters, duplicate accounting, and redaction
 - [x] JSONL v1 validation and manifest verification
 - [x] Dataset preview, staged build, overwrite confirmation, and validation CLI workflows
+- [x] Phase 4.2 reporting engine foundation
+- [x] Detailed benchmark, historical scoreboard, and model leaderboard reports
+- [x] Session reports and hardware reports from historical run snapshots
+- [x] Immutable Concise, Standard, and Full Audit report templates
+- [x] Screen-based reporting workflows with staged Markdown writing and overwrite confirmation
 
 ## Next
 
-- [ ] Reporting enhancements and Markdown reports
 - [ ] Statistics
-- [ ] Leaderboards
 - [ ] Model comparisons
-- [ ] Session and hardware reports
+- [ ] Trend reports
 
 ## Planned
+
+Phase 4 remains in progress; Phase 4.4 Statistics and Comparison is the next
+engine/reporting slice. The GUI remains planned and is not complete.
 
 - [ ] Richer HTML charts
 - [ ] Benchmark comparison

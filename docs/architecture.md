@@ -174,10 +174,10 @@ writing.
 
 ## Reporting Engine Foundation
 
-`engine.reporting` is the UI-independent boundary for Phase 4.2A. Its public
+`engine.reporting` is the UI-independent boundary for Phase 4.2. Its public
 `ReportingService` and `build_*` APIs own record selection, aggregation,
-structured report results, and portable Markdown rendering for the two separate
-source families:
+structured report results, template application, and portable Markdown
+rendering for the two separate source families:
 
 - `BenchmarkRunAggregate` records combine a run with its `ReviewScore`, session,
   and attachment metadata when available.
@@ -185,10 +185,12 @@ source families:
   separate and associate an optional `ScoreboardImportBatch`.
 
 `build_benchmark_run_report()` produces detailed model-grouped run reports;
-`build_scoreboard_report()` produces batch-grouped historical reports; and
+`build_scoreboard_report()` produces batch-grouped historical reports;
 `build_model_leaderboard()` produces deterministic model rankings from detailed
-runs. `render_*_markdown()` functions are UI-independent. Prompt text, raw
-model output, and attachment metadata are opt-in, and attachment binary
+runs; `build_session_report()` produces one-session summaries; and
+`build_hardware_report()` groups runs by normalized historical hardware
+snapshots. `render_*_markdown()` functions are UI-independent. Prompt text,
+raw model output, and attachment metadata are opt-in, and attachment binary
 contents are never read by the reporting engine.
 
 Soft-deleted runs are excluded by default. Scoreboard entries whose entry or
@@ -198,18 +200,40 @@ them as zero. Leaderboard ordering is average overall score descending, then
 scored-run count descending, median score descending, and model name ascending
 (case-insensitive, then original spelling).
 
+`ReportTemplate` definitions are immutable built-ins (`Concise`, `Standard`,
+and `Full Audit`). `apply_report_template()` returns an isolated mutable
+`ReportTemplateOptions` object, so report-specific option edits cannot mutate a
+template definition. Templates establish presentation and inclusion defaults;
+filters remain independent. Sensitive prompt, raw-output, and attachment
+metadata fields remain excluded until explicitly enabled, including for Full
+Audit.
+
 `write_markdown_report()` provides staged UTF-8 output with explicit overwrite
 protection and structured `ReportWriteResult` statuses. It never prompts or
-owns CLI destination selection.
+owns CLI destination selection. The existing `ExportProfile` persistence
+model is not used for these built-in templates yet; persisted custom templates
+remain future work.
 
 ## Reporting CLI Integration
 
 The screen-based CLI exposes the reporting engine through `Data > Reports`.
-The Reports screen keeps detailed-run, historical-scoreboard, and leaderboard
-options in memory for the current CLI session only. It provides vertical
+The Reports screen keeps detailed-run, historical-scoreboard, leaderboard,
+session, and hardware options in memory for the current CLI session only. It provides vertical
 catalog selectors for benchmark types, benchmarks, sessions, hardware
 profiles, models, and scoreboard import batches, plus snapshot-text filters
 where a catalog record is not required.
+
+Session reports select one catalog session without requiring the user to type
+an ID. Hardware reports can cover all eligible runs or use the shared
+benchmark/session/hardware filters. Hardware grouping uses the historical
+`BenchmarkRun.hardware_snapshot`; a linked `HardwareProfile` may provide
+display context but never rewrites a distinct historical snapshot. Missing
+hardware is represented as an explicit `Unknown hardware` group.
+
+Each workflow offers the same friendly template selector. The CLI passes the
+engine-produced options to `ReportingService`, preserves filters separately,
+and only owns preview, destination autocomplete, confirmation, and structured
+write-result presentation.
 
 `TerminalApp` owns only screen navigation, option editing, selection previews,
 destination autocomplete, confirmation, and presentation of structured
