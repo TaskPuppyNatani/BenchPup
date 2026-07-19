@@ -26,6 +26,7 @@ from .domain import (
     ScoreboardImportBatch,
     now,
 )
+from .comparisons import ModelComparisonResult, SessionComparisonResult
 from .services import BenchmarkService, CatalogService
 from .statistics import numeric_summary
 
@@ -775,7 +776,15 @@ class ReportWriteResult:
         return self.status is ReportWriteStatus.SUCCESS
 
 
-ReportDocument: TypeAlias = BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport
+ReportDocument: TypeAlias = (
+    BenchmarkRunReport
+    | ScoreboardReport
+    | ModelLeaderboardReport
+    | SessionReport
+    | HardwareReport
+    | ModelComparisonResult
+    | SessionComparisonResult
+)
 BenchmarkSource: TypeAlias = BenchmarkRun | BenchmarkRunAggregate
 ScoreboardSource: TypeAlias = ScoreboardEntry | ScoreboardEntryAggregate
 
@@ -1679,6 +1688,21 @@ class ReportingService:
             template_options=template_options,
         )
 
+    def render_model_comparison_markdown(self, report: ModelComparisonResult) -> str:
+        """Render a typed model comparison without recalculating its metrics."""
+
+        return render_model_comparison_markdown(report)
+
+    def render_session_comparison_markdown(self, report: SessionComparisonResult) -> str:
+        """Render a typed session comparison without recalculating its metrics."""
+
+        return render_session_comparison_markdown(report)
+
+    # Short aliases keep the facade convenient for callers that already use
+    # ``render_*`` methods for other report families.
+    model_comparison_markdown = render_model_comparison_markdown
+    session_comparison_markdown = render_session_comparison_markdown
+
     def write_markdown_report(
         self,
         report: ReportDocument,
@@ -2141,11 +2165,420 @@ def render_model_leaderboard_markdown(
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _comparison_value(value: Any) -> str:
+    return "Not available" if value is None else _display(value)
+
+
+def _comparison_percentage(value: float | None) -> str:
+    return "Not available" if value is None else f"{value:.2f}%"
+
+
+def _comparison_labels(values: Sequence[str]) -> str:
+    return ", ".join(values) if values else "None represented"
+
+
+def _render_comparison_header(report: ModelComparisonResult | SessionComparisonResult) -> list[str]:
+    metadata = report.metadata
+    comparison_type = metadata.comparison_type.value if hasattr(metadata.comparison_type, "value") else metadata.comparison_type
+    selected = ", ".join(metadata.selected_entities) if metadata.selected_entities else "None"
+    filters = "; ".join(
+        f"{key}={value}" for key, value in metadata.active_filters.items()
+    ) or "None"
+    return [
+        f"# {_display(metadata.title)}",
+        "",
+        f"- Comparison type: {_display(comparison_type)}",
+        f"- Generated at: {_display(metadata.generated_at)}",
+        f"- Contributing BenchmarkRun records: {metadata.contributing_record_count}",
+        f"- Selected entities: {_display(selected)}",
+        f"- Active filters: {_display(filters)}",
+    ]
+
+
+def _render_comparison_summary_table(
+    lines: list[str],
+    report: ModelComparisonResult | SessionComparisonResult,
+) -> None:
+    lines.extend(
+        [
+            "",
+            "## Broad comparison",
+            "",
+            "| Entity | Runs | Scored | Mean score | Median score | Mean tokens/s | Models | Benchmarks | Sessions | Hardware |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    if not report.entities:
+        lines.append("| No eligible entities | 0 | 0 | Not available | Not available | Not available | 0 | 0 | 0 | 0 |")
+        return
+    for entity in report.entities:
+        summary = entity.summary
+        lines.append(
+            "| " + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    entity.label,
+                    entity.record_count,
+                    entity.scored_count,
+                    _comparison_value(entity.overall_score.mean),
+                    _comparison_value(entity.overall_score.median),
+                    _comparison_value(entity.tokens_per_second.mean),
+                    summary.unique_model_count,
+                    summary.unique_benchmark_count,
+                    summary.unique_session_count,
+                    summary.unique_hardware_environment_count,
+                )
+            ) + " |"
+        )
+    lines.extend(["", "### Represented snapshot identities", ""])
+    if isinstance(report, ModelComparisonResult):
+        lines.extend(
+            [
+                "| Model | Benchmarks | Sessions | Hardware |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for entity in report.entities:
+            lines.append(
+                "| " + " | ".join(
+                    _markdown_cell(value)
+                    for value in (
+                        entity.label,
+                        _comparison_labels(entity.represented_benchmarks),
+                        _comparison_labels(entity.represented_sessions),
+                        _comparison_labels(entity.represented_hardware),
+                    )
+                ) + " |"
+            )
+    else:
+        lines.extend(
+            [
+                "| Session | Models | Benchmarks | Hardware |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for entity in report.entities:
+            lines.append(
+                "| " + " | ".join(
+                    _markdown_cell(value)
+                    for value in (
+                        entity.label,
+                        _comparison_labels(entity.represented_models),
+                        _comparison_labels(entity.represented_benchmarks),
+                        _comparison_labels(entity.represented_hardware),
+                    )
+                ) + " |"
+            )
+
+
+def _render_comparison_session_metadata(
+    lines: list[str],
+    report: SessionComparisonResult,
+) -> None:
+    lines.extend(
+        [
+            "",
+            "## Selected session metadata",
+            "",
+            "| ID | Session | Description | Started | Completed | Notes |",
+            "| ---: | --- | --- | --- | --- | --- |",
+        ]
+    )
+    for session in report.selected_sessions:
+        lines.append(
+            "| " + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    session.id,
+                    session.label,
+                    session.description,
+                    session.started_at,
+                    session.completed_at,
+                    session.notes,
+                )
+            ) + " |"
+        )
+
+
+def _render_categorical_comparisons(
+    lines: list[str],
+    report: ModelComparisonResult | SessionComparisonResult,
+) -> None:
+    rows_by_prefix: dict[str, list[Any]] = {}
+    for row in report.categorical_comparisons:
+        prefix, _, _ = row.category.partition(":")
+        rows_by_prefix.setdefault(prefix, []).append(row)
+    if not rows_by_prefix:
+        return
+    lines.extend(["", "## Categorical distributions", ""])
+    entities = tuple(report.entities)
+    for prefix in sorted(rows_by_prefix, key=lambda value: (value.casefold(), value)):
+        lines.extend(
+            [
+                f"### {prefix.replace('_', ' ').title()}",
+                "",
+                "| Category | " + " | ".join(
+                    f"{entity.label} count / % / missing" for entity in entities
+                ) + " |",
+                "| --- | " + " | ".join("---" for _ in entities) + " |",
+            ]
+        )
+        for row in rows_by_prefix[prefix]:
+            category = row.category.partition(":")[2]
+            cells = []
+            for entity in entities:
+                cells.append(
+                    f"{row.counts.get(entity.identity, 0)} / "
+                    f"{_comparison_percentage(row.percentages.get(entity.identity))} / "
+                    f"{row.missing_counts.get(entity.identity, 0)}"
+                )
+            lines.append("| " + " | ".join(_markdown_cell(value) for value in (category, *cells)) + " |")
+
+
+def _render_aligned_statistics(statistics: Any) -> tuple[Any, ...]:
+    return (
+        statistics.record_count,
+        statistics.scored_count,
+        _comparison_value(statistics.overall_score.mean),
+        _comparison_value(statistics.overall_score.median),
+        _comparison_value(statistics.tokens_per_second.mean),
+    )
+
+
+def _render_aligned_groups(
+    lines: list[str],
+    heading: str,
+    groups: Sequence[Any],
+    entities: Sequence[Any],
+) -> None:
+    lines.extend(
+        [
+            "",
+            f"### {heading}",
+            "",
+            "| Aligned key | Entity | Runs | Scored | Mean score | Median score | Mean tokens/s |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    if not groups:
+        lines.append("| No shared keys | Not applicable | 0 | 0 | Not available | Not available | Not available |")
+        return
+    for group in groups:
+        for entity in entities:
+            statistics = group.entities.get(entity.identity)
+            values = _render_aligned_statistics(statistics) if statistics is not None else (0, 0, None, None, None)
+            lines.append(
+                "| " + " | ".join(
+                    _markdown_cell(value) for value in (group.label, entity.label, *values)
+                ) + " |"
+            )
+
+
+def _render_model_alignment(lines: list[str], report: ModelComparisonResult) -> None:
+    alignment = report.alignment
+    lines.extend(
+        [
+            "",
+            "## Aligned benchmark comparison",
+            "",
+            f"- Shared benchmarks: {alignment.shared_benchmark_count}",
+            f"- Excluded non-overlapping benchmark identities: {alignment.excluded_benchmark_count}",
+        ]
+    )
+    if alignment.non_overlapping_benchmarks:
+        lines.extend(
+            [
+                "",
+                "### Non-overlapping benchmarks",
+                "",
+                "| Model | Benchmarks present only for this model |",
+                "| --- | --- |",
+            ]
+        )
+        for entity in report.entities:
+            lines.append(
+                f"| {_markdown_cell(entity.label)} | "
+                f"{_markdown_cell(_comparison_labels(alignment.non_overlapping_benchmarks.get(entity.identity, ())))} |"
+            )
+    _render_aligned_groups(lines, "Shared benchmark summaries", alignment.aligned_benchmarks, report.entities)
+
+
+def _render_session_alignment(lines: list[str], report: SessionComparisonResult) -> None:
+    alignment = report.alignment
+    lines.extend(
+        [
+            "",
+            "## Aligned session comparison",
+            "",
+            f"- Shared models: {alignment.shared_model_count}",
+            f"- Shared benchmarks: {alignment.shared_benchmark_count}",
+            f"- Shared model/benchmark pairs: {alignment.shared_model_benchmark_pair_count}",
+        ]
+    )
+    _render_aligned_groups(lines, "Shared model summaries", alignment.aligned_models, report.entities)
+    _render_aligned_groups(lines, "Shared benchmark summaries", alignment.aligned_benchmarks, report.entities)
+    lines.extend(
+        [
+            "",
+            "### Shared model/benchmark pair summaries",
+            "",
+            "| Model | Benchmark | Session | Runs | Scored | Mean score | Median score | Mean tokens/s |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    if not alignment.aligned_model_benchmarks:
+        lines.append("| No shared pairs | Not applicable | Not applicable | 0 | 0 | Not available | Not available | Not available |")
+    else:
+        for pair in alignment.aligned_model_benchmarks:
+            for entity in report.entities:
+                statistics = pair.entities.get(entity.identity)
+                values = _render_aligned_statistics(statistics) if statistics is not None else (0, 0, None, None, None)
+                lines.append(
+                    "| " + " | ".join(
+                        _markdown_cell(value)
+                        for value in (pair.model_label, pair.benchmark_label, entity.label, *values)
+                    ) + " |"
+                )
+    lines.extend(["", "### Non-overlapping session identities", "", "| Session | Models | Benchmarks | Model/benchmark pairs |", "| --- | --- | --- | --- |"])
+    for entity in report.entities:
+        lines.append(
+            "| " + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    entity.label,
+                    _comparison_labels(alignment.non_overlapping_models.get(entity.identity, ())),
+                    _comparison_labels(alignment.non_overlapping_benchmarks.get(entity.identity, ())),
+                    _comparison_labels(
+                        tuple(
+                            f"{model} / {benchmark}"
+                            for model, benchmark in alignment.non_overlapping_model_benchmark_pairs.get(entity.identity, ())
+                        )
+                    ),
+                )
+            ) + " |"
+        )
+
+
+def _render_comparison_pairwise(
+    lines: list[str],
+    report: ModelComparisonResult | SessionComparisonResult,
+) -> None:
+    if report.pairwise is None:
+        return
+    pairwise = report.pairwise
+    first = next((entity.label for entity in report.entities if entity.identity == pairwise.baseline_entity), pairwise.baseline_entity)
+    second = next((entity.label for entity in report.entities if entity.identity == pairwise.comparison_entity), pairwise.comparison_entity)
+    lines.extend(
+        [
+            "",
+            "## Pairwise deltas",
+            "",
+            f"- Baseline: {first}",
+            f"- Comparison: {second}",
+            "- Delta direction: second selected entity minus first selected entity.",
+            "",
+            "| Metric | First value | Second value | Absolute delta | Percentage delta | Direction | Availability |",
+            "| --- | ---: | ---: | ---: | ---: | --- | --- |",
+        ]
+    )
+    for metric in pairwise.metrics:
+        availability = "Available" if metric.is_available else (metric.unavailable_reason or "Not available")
+        lines.append(
+            "| " + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    metric.metric_name,
+                    _comparison_value(metric.values.get(pairwise.baseline_entity)),
+                    _comparison_value(metric.values.get(pairwise.comparison_entity)),
+                    _comparison_value(metric.absolute_delta),
+                    _comparison_percentage(metric.percentage_delta),
+                    metric.direction.value,
+                    availability,
+                )
+            ) + " |"
+        )
+
+
+def _render_model_rankings(lines: list[str], report: ModelComparisonResult) -> None:
+    for heading, ranking, value_name in (
+        ("Model ranking", report.ranking, "Mean score"),
+        ("Speed ranking", report.speed_ranking, "Mean tokens/s"),
+    ):
+        lines.extend(
+            [
+                "",
+                f"## {heading}",
+                "",
+                f"| Rank | Model | Scored | Mean score | Median score | {value_name} |",
+                "| ---: | --- | ---: | ---: | ---: | ---: |",
+            ]
+        )
+        if not ranking:
+            lines.append("| Not ranked | No selected models | 0 | Not available | Not available | Not available |")
+        for entry in ranking:
+            primary = entry.mean_overall_score if value_name == "Mean score" else entry.mean_tokens_per_second
+            lines.append(
+                "| " + " | ".join(
+                    _markdown_cell(value)
+                    for value in (
+                        entry.rank if entry.rank is not None else "Unranked",
+                        entry.label,
+                        entry.scored_count,
+                        _comparison_value(entry.mean_overall_score),
+                        _comparison_value(entry.median_overall_score),
+                        _comparison_value(primary),
+                    )
+                ) + " |"
+            )
+
+
+def _render_comparison_methodology(lines: list[str]) -> None:
+    lines.extend(
+        [
+            "",
+            "## Methodology and unavailable values",
+            "",
+            "- BenchmarkRun snapshots are authoritative; scoreboard entries are not included in comparisons.",
+            "- Non-deleted runs are selected by default. Numeric missing values are omitted from calculations and never zero-filled.",
+            "- Categorical percentages use observed values as the denominator; missing values remain a separate count.",
+            "- Broad summaries include each selected entity's eligible records. Aligned summaries use exact shared snapshot identities and expose non-overlap separately; runs contribute equally within each summary.",
+            "- Pairwise percentages are unavailable when a value is missing or the first selected value is zero. Pairwise deltas are always second minus first.",
+            "- This report contains descriptive comparisons only; it does not claim statistical significance, trends, forecasts, or causal effects.",
+        ]
+    )
+
+
+def render_model_comparison_markdown(report: ModelComparisonResult) -> str:
+    lines = _render_comparison_header(report)
+    _render_comparison_summary_table(lines, report)
+    _render_categorical_comparisons(lines, report)
+    _render_model_alignment(lines, report)
+    _render_comparison_pairwise(lines, report)
+    _render_model_rankings(lines, report)
+    _render_comparison_methodology(lines)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_session_comparison_markdown(report: SessionComparisonResult) -> str:
+    lines = _render_comparison_header(report)
+    _render_comparison_session_metadata(lines, report)
+    _render_comparison_summary_table(lines, report)
+    _render_categorical_comparisons(lines, report)
+    _render_session_alignment(lines, report)
+    _render_comparison_pairwise(lines, report)
+    _render_comparison_methodology(lines)
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def render_markdown(
     report: ReportDocument,
     *,
     template_options: ReportTemplateOptions | None = None,
 ) -> str:
+    if isinstance(report, ModelComparisonResult):
+        return render_model_comparison_markdown(report)
+    if isinstance(report, SessionComparisonResult):
+        return render_session_comparison_markdown(report)
     if isinstance(report, BenchmarkRunReport):
         return render_benchmark_run_markdown(report, template_options=template_options)
     if isinstance(report, SessionReport):
@@ -2232,6 +2665,8 @@ def write_markdown_report(
 DetailedBenchmarkReport = BenchmarkRunReport
 HistoricalScoreboardReport = ScoreboardReport
 SessionBenchmarkReport = SessionReport
+ModelComparisonReport = ModelComparisonResult
+SessionComparisonReport = SessionComparisonResult
 ReportSummary = ScoreStatistics
 generate_benchmark_run_report = build_benchmark_run_report
 generate_scoreboard_report = build_scoreboard_report
@@ -2242,6 +2677,8 @@ render_benchmark_report_markdown = render_benchmark_run_markdown
 render_leaderboard_markdown = render_model_leaderboard_markdown
 render_session_report_markdown = render_session_markdown
 render_hardware_markdown = render_hardware_report_markdown
+render_model_comparison = render_model_comparison_markdown
+render_session_comparison = render_session_comparison_markdown
 write_report_markdown = write_markdown_report
 
 
@@ -2256,6 +2693,8 @@ __all__ = (
     "HardwareReport",
     "HardwareReportGroup",
     "HardwareReportSummary",
+    "ModelComparisonReport",
+    "ModelComparisonResult",
     "DetailedBenchmarkReport",
     "HistoricalScoreboardReport",
     "SessionBenchmarkReport",
@@ -2280,6 +2719,8 @@ __all__ = (
     "ScoreboardEntryAggregate",
     "ScoreboardReport",
     "ScoreboardReportFilters",
+    "SessionComparisonReport",
+    "SessionComparisonResult",
     "SessionReportSummary",
     "build_benchmark_run_report",
     "build_hardware_report",
@@ -2301,11 +2742,15 @@ __all__ = (
     "render_combined_markdown",
     "render_leaderboard_markdown",
     "render_markdown",
+    "render_model_comparison",
+    "render_model_comparison_markdown",
     "render_model_leaderboard_markdown",
     "render_hardware_report_markdown",
     "render_hardware_markdown",
     "render_scoreboard_markdown",
     "render_session_markdown",
+    "render_session_comparison",
+    "render_session_comparison_markdown",
     "render_session_report_markdown",
     "write_markdown_report",
     "write_report_markdown",

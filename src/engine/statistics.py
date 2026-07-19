@@ -686,16 +686,11 @@ def _contains(value: Any, needle: str) -> bool:
 
 
 def _model_name(run: Any) -> str:
-    return str(run.model_snapshot.get("model_name") or run.model_snapshot.get("name") or "").strip()
+    return model_snapshot_name(run.model_snapshot)
 
 
 def _benchmark_name(run: Any) -> str:
-    return str(
-        run.benchmark_snapshot.get("name")
-        or run.benchmark_snapshot.get("file_path")
-        or run.benchmark_snapshot.get("benchmark_file")
-        or ""
-    ).strip()
+    return benchmark_snapshot_name(run.benchmark_snapshot)
 
 
 def _benchmark_type(run: Any) -> str:
@@ -705,6 +700,35 @@ def _benchmark_type(run: Any) -> str:
 def _canonical_identity(value: Any) -> str | None:
     text = str(value or "").strip()
     return text.casefold() if text else None
+
+
+def model_snapshot_name(snapshot: Mapping[str, Any]) -> str:
+    """Return the historical model label from a run snapshot."""
+
+    return str(snapshot.get("model_name") or snapshot.get("name") or "").strip()
+
+
+def benchmark_snapshot_name(snapshot: Mapping[str, Any]) -> str:
+    """Return the historical benchmark label using reporting's fallback order."""
+
+    return str(
+        snapshot.get("name")
+        or snapshot.get("file_path")
+        or snapshot.get("benchmark_file")
+        or ""
+    ).strip()
+
+
+def normalize_model_identity(value: Any) -> str:
+    """Normalize model identities using the existing case-insensitive policy."""
+
+    return _canonical_identity(value) or "unknown"
+
+
+def normalize_benchmark_identity(snapshot: Mapping[str, Any]) -> str:
+    """Normalize a historical benchmark snapshot identity."""
+
+    return _canonical_identity(benchmark_snapshot_name(snapshot)) or "unknown"
 
 
 def _unique_count(values: Iterable[Any]) -> int:
@@ -1128,6 +1152,10 @@ __all__ = (
     "build_time_buckets",
     "categorical_distribution",
     "numeric_summary",
+    "benchmark_snapshot_name",
+    "model_snapshot_name",
+    "normalize_benchmark_identity",
+    "normalize_model_identity",
     "summarize_categorical",
     "summarize_numeric",
     "time_bucket_for",

@@ -11,7 +11,7 @@ import webbrowser
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
+from typing import Any, Callable, Mapping, Sequence, TypeAlias, TypedDict, cast
 from prompt_toolkit import prompt as toolkit_prompt
 from prompt_toolkit.completion import PathCompleter
 
@@ -26,6 +26,7 @@ from engine.archive import ArchiveError, ArchiveService, TABLES
 from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
 from engine.settings import DefaultWorkingDirectorySettings
 from engine.datasets import DatasetBuilder, DatasetFilters, DatasetWriteResult, DatasetWriteStatus, RedactionConfig
+from engine.comparisons import ComparisonService, ModelComparisonResult, SessionComparisonResult
 from engine.reporting import (
     BenchmarkReportFilters,
     BenchmarkRunReport,
@@ -39,6 +40,7 @@ from engine.reporting import (
     ScoreboardReportFilters,
     SessionReport,
 )
+from engine.statistics import BenchmarkStatisticsFilters, model_snapshot_name, normalize_model_identity
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -123,6 +125,34 @@ class HardwareReportOptions:
     destination: str = ""
 
 
+@dataclass(frozen=True)
+class ModelComparisonOptions:
+    """Session-local options for a snapshot-based model comparison."""
+
+    title: str = "Model Comparison"
+    models: tuple[str, ...] = ()
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    destination: str = ""
+
+    @property
+    def selected_models(self) -> tuple[str, ...]:
+        return self.models
+
+
+@dataclass(frozen=True)
+class SessionComparisonOptions:
+    """Session-local options for a session comparison."""
+
+    title: str = "Session Comparison"
+    sessions: tuple[int, ...] = ()
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    destination: str = ""
+
+    @property
+    def selected_sessions(self) -> tuple[int, ...]:
+        return self.sessions
+
+
 REPORT_BENCHMARK_TYPE_LABELS = {
     "code_review": "Code review",
     "code_generation": "Code generation",
@@ -152,6 +182,7 @@ class TerminalApp:
         self.catalog = CatalogService(database)
         self.benchmarks = BenchmarkService(database, self.catalog)
         self.reporting = ReportingService(self.benchmarks, self.catalog)
+        self.comparisons = ComparisonService(self.benchmarks, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
         self.archives = ArchiveService(database)
@@ -162,6 +193,8 @@ class TerminalApp:
         self._leaderboard_report_options = LeaderboardReportOptions()
         self._session_report_options = SessionReportOptions()
         self._hardware_report_options = HardwareReportOptions()
+        self._model_comparison_options = ModelComparisonOptions()
+        self._session_comparison_options = SessionComparisonOptions()
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -282,7 +315,9 @@ class TerminalApp:
             "Detailed Benchmark Run Report": ("benchmark-run-report.md", ".md"),
             "Historical Scoreboard Report": ("scoreboard-report.md", ".md"),
             "Model Leaderboard": ("model-leaderboard.md", ".md"),
+            "Model Comparison": ("model-comparison.md", ".md"),
             "Session Report": ("session-report.md", ".md"),
+            "Session Comparison": ("session-comparison.md", ".md"),
             "Hardware Report": ("hardware-report.md", ".md"),
             "BenchPup Backup": ("benchpup-backup.json", ".json"),
             "JSONL Dataset": ("dataset.jsonl", ".jsonl"),
@@ -1519,6 +1554,190 @@ class TerminalApp:
             else:
                 self.output("Choose a number from 1 to 9, or B to return.")
 
+    def _comparison_filter_summary(self, filters: BenchmarkStatisticsFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.benchmark_type:
+            values.append(f"Benchmark type: {self._report_benchmark_type_label(filters.benchmark_type)}")
+        if filters.benchmark:
+            values.append(f"Benchmark: {filters.benchmark}")
+        if filters.session_id is not None:
+            session = self.catalog.sessions.get(filters.session_id)
+            values.append(f"Session: {session.title if session else 'Unavailable selection'}")
+        elif filters.session:
+            values.append(f"Session text: {filters.session}")
+        if filters.hardware_profile_id is not None:
+            hardware = self.catalog.hardware_profiles.get(filters.hardware_profile_id)
+            values.append(f"Hardware profile: {hardware.name if hardware else 'Unavailable selection'}")
+        elif filters.hardware:
+            values.append(f"Hardware snapshot: {filters.hardware}")
+        if filters.date_from:
+            values.append(f"Created from: {filters.date_from}")
+        if filters.date_to:
+            values.append(f"Created to: {filters.date_to}")
+        if filters.minimum_score is not None:
+            values.append(f"Minimum overall score: {filters.minimum_score:g}")
+        if filters.maximum_score is not None:
+            values.append(f"Maximum overall score: {filters.maximum_score:g}")
+        if filters.hallucination:
+            values.append(f"Hallucination: {filters.hallucination}")
+        if filters.reliability:
+            values.append(f"Reliability: {filters.reliability}")
+        if filters.include_deleted:
+            values.append("Deleted runs: included")
+        return tuple(values or ("All non-deleted BenchmarkRun snapshots",))
+
+    def _comparison_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+        *,
+        comparison_type: str,
+    ) -> BenchmarkStatisticsFilters:
+        """Configure comparison filters without moving selection logic into the CLI."""
+
+        while True:
+            content = "\n".join((
+                "1) Benchmark, type, session, and hardware selectors",
+                f"2) Created date range [{self._report_value(filters.date_from)} → {self._report_value(filters.date_to)}]",
+                f"3) Overall score range [{self._report_value(filters.minimum_score)} → {self._report_value(filters.maximum_score)}]",
+                f"4) Hallucination level [{self._report_value(filters.hallucination)}]",
+                f"5) Reliability level [{self._report_value(filters.reliability)}]",
+                "6) Reset Comparison Filters",
+                "",
+                f"Comparison: {comparison_type}",
+                *self._comparison_filter_summary(filters),
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Comparison Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                base = BenchmarkReportFilters(
+                    benchmark=filters.benchmark,
+                    benchmark_type=filters.benchmark_type,
+                    session=filters.session,
+                    session_id=filters.session_id,
+                    hardware=filters.hardware,
+                    hardware_profile_id=filters.hardware_profile_id,
+                    include_run_ids=filters.include_run_ids,
+                    exclude_run_ids=filters.exclude_run_ids,
+                    include_deleted=filters.include_deleted,
+                )
+                configured = self._report_filters_screen(base)
+                filters = replace(
+                    filters,
+                    benchmark=configured.benchmark,
+                    benchmark_type=configured.benchmark_type,
+                    session=configured.session,
+                    session_id=configured.session_id,
+                    hardware=configured.hardware,
+                    hardware_profile_id=configured.hardware_profile_id,
+                    include_run_ids=configured.include_run_ids,
+                    exclude_run_ids=configured.exclude_run_ids,
+                    # Entity selection is handled by ComparisonService.
+                    model="",
+                )
+            elif command == "2":
+                start = self.ask("Created start (ISO date/time; blank clears)", navigation=True)
+                if isinstance(start, NavigationSignal):
+                    continue
+                end = self.ask("Created end (ISO date/time; blank clears)", navigation=True)
+                if isinstance(end, NavigationSignal):
+                    continue
+                filters = replace(filters, date_from=start or None, date_to=end or None)
+            elif command == "3":
+                minimum = self.ask_float("Minimum overall score (blank clears)", navigation=True)
+                if isinstance(minimum, NavigationSignal):
+                    continue
+                maximum = self.ask_float("Maximum overall score (blank clears)", navigation=True)
+                if isinstance(maximum, NavigationSignal):
+                    continue
+                filters = replace(filters, minimum_score=minimum, maximum_score=maximum)
+            elif command == "4":
+                selected = self._report_vertical_choice(
+                    "Hallucination Level",
+                    [(level, level) for level in LEVELS],
+                    filters.hallucination or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, hallucination=selected or "")
+            elif command == "5":
+                selected = self._report_vertical_choice(
+                    "Reliability Level",
+                    [(level, level) for level in LEVELS],
+                    filters.reliability or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, reliability=selected or "")
+            elif command == "6":
+                filters = BenchmarkStatisticsFilters()
+            else:
+                self.output("Choose a number from 1 to 6, or B to return.")
+
+    def _comparison_multi_select(
+        self,
+        title: str,
+        choices: Sequence[tuple[Any, str]],
+        selected: Sequence[Any],
+    ) -> tuple[Any, ...] | NavigationSignal:
+        selected_values = list(dict.fromkeys(selected))
+        choice_values = [value for value, _ in choices]
+        while True:
+            lines = [
+                "Toggle a number, then choose D when at least two entries are selected.",
+                "",
+            ]
+            if choices:
+                lines.extend(
+                    f"{number}) [{'x' if value in selected_values else ' '}] {label}"
+                    for number, (value, label) in enumerate(choices, start=1)
+                )
+            else:
+                lines.append("No eligible entries are available.")
+            lines.extend(("", f"Selected: {len(selected_values)}", "D) Done", "B) Back", "QA) Quit BenchPup completely"))
+            self.render_screen(title, "\n".join(lines))
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return choice
+            command = self.normalized(choice)
+            if command in {"d", "done"}:
+                return tuple(value for value in choice_values if value in selected_values)
+            if command.isdigit() and 1 <= int(command) <= len(choices):
+                value = choice_values[int(command) - 1]
+                if value in selected_values:
+                    selected_values.remove(value)
+                else:
+                    selected_values.append(value)
+                continue
+            self.output(f"Choose a number from 1 to {len(choices)}, D when finished, or B to return.")
+
+    def _available_comparison_models(self) -> tuple[tuple[str, str], ...]:
+        labels: dict[str, str] = {}
+        for aggregate in self.comparisons.statistics.select_benchmark_runs():
+            label = model_snapshot_name(aggregate.run.model_snapshot)
+            key = normalize_model_identity(label)
+            if key == "unknown":
+                continue
+            current = labels.get(key)
+            labels[key] = label if current is None else min((current, label), key=lambda value: (value.casefold(), value))
+        return tuple(
+            (labels[key], labels[key])
+            for key in sorted(labels, key=lambda item: (labels[item].casefold(), labels[item], item))
+        )
+
+    def _available_comparison_sessions(self) -> tuple[tuple[int, str], ...]:
+        return tuple(
+            (session.id, session.title)
+            for session in sorted(
+                self.catalog.sessions.list(),
+                key=lambda item: ((item.title or "").casefold(), item.title or "", item.id or 0),
+            )
+            if session.id is not None
+        )
+
     def _report_template_label(self, template_id: str) -> str:
         template = self.reporting.report_template(template_id)
         if template is None:
@@ -2030,7 +2249,7 @@ class TerminalApp:
 
     def _write_report_workflow(
         self,
-        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport,
+        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport | ModelComparisonResult | SessionComparisonResult,
         *,
         report_name: str,
         selection_lines: tuple[str, ...],
@@ -2445,6 +2664,296 @@ class TerminalApp:
             )
             if destination is not None:
                 options = replace(options, destination=destination)
+
+    def _model_comparison_selection_lines(
+        self,
+        report: ModelComparisonResult,
+        options: ModelComparisonOptions,
+    ) -> tuple[str, ...]:
+        lines = [
+            f"Models: {', '.join(options.models) if options.models else 'None selected'}",
+            *self._comparison_filter_summary(options.filters),
+            f"Contributing records: {report.metadata.contributing_record_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Non-overlapping benchmark identities: {report.alignment.excluded_benchmark_count}",
+        ]
+        if report.ranking:
+            ranked = ", ".join(
+                f"{entry.rank or 'unranked'}. {entry.label}"
+                for entry in report.ranking
+            )
+            lines.append(f"Ranking: {ranked}")
+        return tuple(lines)
+
+    def _session_comparison_selection_lines(
+        self,
+        report: SessionComparisonResult,
+        options: SessionComparisonOptions,
+    ) -> tuple[str, ...]:
+        labels = [session.label for session in report.selected_sessions]
+        return (
+            f"Sessions: {', '.join(labels) if labels else 'None selected'}",
+            *self._comparison_filter_summary(options.filters),
+            f"Contributing records: {report.metadata.contributing_record_count}",
+            f"Shared models: {report.alignment.shared_model_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Shared model/benchmark pairs: {report.alignment.shared_model_benchmark_pair_count}",
+        )
+
+    def _model_comparison_terminal_lines(self, report: ModelComparisonResult) -> tuple[str, ...]:
+        lines = [
+            f"Selected models: {', '.join(report.selected_models)}",
+            f"Contributing BenchmarkRun records: {report.metadata.contributing_record_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            "",
+            "Model | Runs | Scored | Mean score | Median score | Mean tokens/s",
+            "-" * 72,
+        ]
+        for entity in report.entities:
+            lines.append(
+                f"{entity.label} | {entity.record_count} | {entity.scored_count} | "
+                f"{self._report_number(entity.overall_score.mean)} | "
+                f"{self._report_number(entity.overall_score.median)} | "
+                f"{self._report_number(entity.tokens_per_second.mean)}"
+            )
+        lines.extend(("", f"Shared benchmark summaries: {len(report.alignment.aligned_benchmarks)}"))
+        if report.pairwise is not None:
+            lines.append("Pairwise deltas: second selected model minus first selected model")
+        lines.append("Missing values are shown as unavailable; no zero fill is applied.")
+        return tuple(lines)
+
+    def _session_comparison_terminal_lines(self, report: SessionComparisonResult) -> tuple[str, ...]:
+        lines = [
+            f"Selected sessions: {', '.join(report.metadata.selected_entities)}",
+            f"Contributing BenchmarkRun records: {report.metadata.contributing_record_count}",
+            f"Shared models: {report.alignment.shared_model_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Shared model/benchmark pairs: {report.alignment.shared_model_benchmark_pair_count}",
+            "",
+            "Session | Runs | Scored | Mean score | Median score | Mean tokens/s",
+            "-" * 72,
+        ]
+        for entity in report.entities:
+            lines.append(
+                f"{entity.label} | {entity.record_count} | {entity.scored_count} | "
+                f"{self._report_number(entity.overall_score.mean)} | "
+                f"{self._report_number(entity.overall_score.median)} | "
+                f"{self._report_number(entity.tokens_per_second.mean)}"
+            )
+        if report.pairwise is not None:
+            lines.extend(("", "Pairwise deltas: second selected session minus first selected session"))
+        lines.append("Missing values are shown as unavailable; no zero fill is applied.")
+        return tuple(lines)
+
+    def _model_comparison_screen(self, options: ModelComparisonOptions) -> ModelComparisonOptions:
+        while True:
+            content = "\n".join((
+                "1) Select Models",
+                "2) Configure Comparison Filters",
+                "3) Preview Comparison Selection",
+                "4) View Terminal Comparison",
+                "5) Write Markdown Report",
+                "",
+                f"Selected models: {', '.join(options.models) if options.models else 'None'}",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Model Comparison", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                choices = self._available_comparison_models()
+                selected = self._comparison_multi_select("Select Models", choices, options.models)
+                if isinstance(selected, NavigationSignal):
+                    continue
+                if len(selected) < 2:
+                    self.output("Select at least two distinct models before continuing.")
+                else:
+                    options = replace(options, models=tuple(str(value) for value in selected))
+            elif command == "2":
+                options = replace(
+                    options,
+                    filters=self._comparison_filters_screen(options.filters, comparison_type="models"),
+                )
+            elif command not in {"3", "4", "5"}:
+                self.output("Choose a number from 1 to 5, or B to return.")
+                continue
+            if command in {"3", "4", "5"}:
+                if len(options.models) < 2:
+                    self.output("Select at least two distinct models before building a comparison.")
+                    continue
+                try:
+                    report = self.comparisons.compare_models(
+                        options.models,
+                        filters=options.filters,
+                        title=options.title,
+                    )
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("Model Comparison Failed", f"Could not build the model comparison: {error}")
+                    continue
+                selection_lines = self._model_comparison_selection_lines(report, options)
+                if command == "3":
+                    self._report_selection_preview("Model Comparison Selection", selection_lines)
+                elif command == "4":
+                    self._report_selection_preview("Model Comparison", self._model_comparison_terminal_lines(report))
+                elif report.metadata.contributing_record_count == 0:
+                    self._report_empty_screen(
+                        "No Eligible Model Comparison Runs",
+                        selection_lines + ("No eligible BenchmarkRun snapshots match the current comparison.",),
+                    )
+                else:
+                    destination = self._write_report_workflow(
+                        report,
+                        report_name="Model Comparison",
+                        selection_lines=selection_lines,
+                        destination=options.destination,
+                    )
+                    if destination is not None:
+                        options = replace(options, destination=destination)
+
+    def _session_comparison_screen(self, options: SessionComparisonOptions) -> SessionComparisonOptions:
+        while True:
+            labels = []
+            for session_id in options.sessions:
+                session = self.catalog.sessions.get(session_id)
+                labels.append(session.title if session else f"Session {session_id}")
+            content = "\n".join((
+                "1) Select Sessions",
+                "2) Configure Comparison Filters",
+                "3) Preview Comparison Selection",
+                "4) View Terminal Comparison",
+                "5) Write Markdown Report",
+                "",
+                f"Selected sessions: {', '.join(labels) if labels else 'None'}",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Comparison", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._comparison_multi_select(
+                    "Select Sessions",
+                    self._available_comparison_sessions(),
+                    options.sessions,
+                )
+                if isinstance(selected, NavigationSignal):
+                    continue
+                if len(selected) < 2:
+                    self.output("Select at least two distinct sessions before continuing.")
+                else:
+                    options = replace(options, sessions=tuple(int(value) for value in selected))
+            elif command == "2":
+                options = replace(
+                    options,
+                    filters=self._comparison_filters_screen(options.filters, comparison_type="sessions"),
+                )
+            elif command not in {"3", "4", "5"}:
+                self.output("Choose a number from 1 to 5, or B to return.")
+                continue
+            if command in {"3", "4", "5"}:
+                if len(options.sessions) < 2:
+                    self.output("Select at least two distinct sessions before building a comparison.")
+                    continue
+                try:
+                    report = self.comparisons.compare_sessions(
+                        options.sessions,
+                        filters=options.filters,
+                        title=options.title,
+                    )
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("Session Comparison Failed", f"Could not build the session comparison: {error}")
+                    continue
+                selection_lines = self._session_comparison_selection_lines(report, options)
+                if command == "3":
+                    self._report_selection_preview("Session Comparison Selection", selection_lines)
+                elif command == "4":
+                    self._report_selection_preview("Session Comparison", self._session_comparison_terminal_lines(report))
+                elif report.metadata.contributing_record_count == 0:
+                    self._report_empty_screen(
+                        "No Eligible Session Comparison Runs",
+                        selection_lines + ("No eligible BenchmarkRun snapshots match the current comparison.",),
+                    )
+                else:
+                    destination = self._write_report_workflow(
+                        report,
+                        report_name="Session Comparison",
+                        selection_lines=selection_lines,
+                        destination=options.destination,
+                    )
+                    if destination is not None:
+                        options = replace(options, destination=destination)
+
+    def _comparison_options_lines(
+        self,
+        model_options: ModelComparisonOptions,
+        session_options: SessionComparisonOptions,
+    ) -> tuple[str, ...]:
+        session_labels = tuple(
+            session.title if (session := self.catalog.sessions.get(session_id)) else f"Unavailable session {session_id}"
+            for session_id in session_options.sessions
+        )
+        return (
+            "Model comparison:",
+            f"  Models: {', '.join(model_options.models) if model_options.models else 'None selected'}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(model_options.filters))}",
+            f"  Destination: {self._report_value(model_options.destination)}",
+            "",
+            "Session comparison:",
+            f"  Sessions: {', '.join(session_labels) if session_labels else 'None selected'}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(session_options.filters))}",
+            f"  Destination: {self._report_value(session_options.destination)}",
+        )
+
+    def comparisons_screen(self) -> None:
+        """Navigate model and session comparisons while retaining options in memory."""
+
+        model_options = self._model_comparison_options
+        session_options = self._session_comparison_options
+        while True:
+            content = "\n".join((
+                "1) Compare Models",
+                "2) Compare Sessions",
+                "3) View Current Comparison Options",
+                "",
+                "Comparisons use immutable BenchmarkRun snapshots and exclude deleted runs by default.",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Comparisons", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                self._model_comparison_options = model_options
+                self._session_comparison_options = session_options
+                return
+            command = self.normalized(choice)
+            if command == "1":
+                model_options = self._model_comparison_screen(model_options)
+                self._model_comparison_options = model_options
+            elif command == "2":
+                session_options = self._session_comparison_screen(session_options)
+                self._session_comparison_options = session_options
+            elif command == "3":
+                self.render_screen("Current Comparison Options", "\n".join(self._comparison_options_lines(model_options, session_options)))
+                self.ask("Choose an option", navigation=True)
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def comparison_screen(self) -> None:
+        """Compatibility alias for callers using the singular screen name."""
+
+        self.comparisons_screen()
 
     def reporting_screen(self) -> None:
         """Navigate report workflows while keeping configuration in memory only."""
@@ -3091,7 +3600,7 @@ class TerminalApp:
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
-        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n17) Reports\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n17) Reports\n18) Comparisons\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
 
     def run(self) -> None:
         try:
@@ -3113,6 +3622,7 @@ class TerminalApp:
             "14": "backup", "backup": "backup", "15": "restore", "restore": "restore",
             "16": "dataset", "dataset": "dataset",
             "17": "reports", "report": "reports", "reports": "reports", "reporting": "reports",
+            "18": "comparisons", "comparison": "comparisons", "comparisons": "comparisons",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -3143,6 +3653,7 @@ class TerminalApp:
                 elif command == "restore": self.restore_data()
                 elif command == "dataset": self.dataset_builder_screen()
                 elif command == "reports": self.reporting_screen()
+                elif command == "comparisons": self.comparisons_screen()
                 elif command == "settings": self.settings_screen()
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")

@@ -255,6 +255,43 @@ and months begin on the first UTC day. Invalid or missing timestamps are
 excluded from buckets and counted in `TimeBucketResult`; this foundation does
 not interpret trends, calculate forecasts, or render charts.
 
+## Model and Session Comparisons
+
+`engine.comparisons.ComparisonService` is the UI-independent Phase 4.4B
+boundary. It consumes eligible `BenchmarkRunAggregate` snapshots through
+`StatisticsService`, selects models by normalized snapshot model name or
+catalog sessions, aligns shared snapshot identities, and returns immutable
+typed model/session comparison results. `StatisticsService` remains the owner
+of descriptive numeric and categorical calculations; the comparison service
+does not introduce trend, regression, forecast, significance, or confidence
+logic.
+
+Both comparison families expose broad per-entity summaries and explicit
+overlap data. Model comparisons align the intersection of benchmark snapshot
+identities and report each model's non-overlap separately. Session comparisons
+align shared models, benchmarks, and model/benchmark pairs. Aligned summaries
+retain run and scored counts, score and speed summaries, and missing values;
+unequal benchmark or pair sets are never presented as equivalent. Snapshot
+labels are normalized using the existing case-insensitive grouping policy,
+while the snapshot values remain authoritative and distinct unless that policy
+already treats them as the same identity.
+
+Exactly two selected entities also receive pairwise metrics for mean and median
+score, mean tokens per second, scored count, low-hallucination percentage, and
+high-reliability percentage. Deltas are consistently second selected entity
+minus first; percentage deltas are unavailable for missing or zero baselines.
+Model rankings are deterministic: mean score descending, scored count
+descending, median score descending, then case-insensitive label and original
+label fallback. Speed ranking is separate, and entities without a rank remain
+visible as unranked.
+
+`ReportingService` renders the structured comparison results to Markdown and
+uses the existing staged UTF-8 writer with explicit overwrite protection. The
+comparison Markdown includes selection metadata, broad summaries, categorical
+distributions, overlap/non-overlap, aligned summaries, pairwise deltas,
+rankings, and methodology/unavailable-value notes; it does not include raw
+model output, prompts, or attachment contents.
+
 ## Reporting CLI Integration
 
 The screen-based CLI exposes the reporting engine through `Data > Reports`.
@@ -279,7 +316,10 @@ write-result presentation.
 `TerminalApp` owns only screen navigation, option editing, selection previews,
 destination autocomplete, confirmation, and presentation of structured
 results. `ReportingService` owns selection, aggregation, ranking, Markdown
-rendering, staged UTF-8 writing, and overwrite statuses. Prompt text, raw model
+rendering, staged UTF-8 writing, and overwrite statuses for the existing report
+families. `ComparisonService` owns comparison selection, alignment, deltas, and
+rankings; `ReportingService` owns comparison Markdown rendering and writing.
+Prompt text, raw model
 output, and attachment metadata are excluded by default and are passed to the
 engine only when explicitly enabled. Attachment binary contents are never
 read. An existing report requires a second explicit overwrite confirmation;

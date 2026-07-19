@@ -128,6 +128,44 @@ Missing or invalid timestamps are excluded and counted separately. These
 results provide structured input for later trend work but do not include trend
 interpretation, comparisons, forecasting, charts, or GUI presentation.
 
+### Model and session comparison reports
+
+Phase 4.4B comparisons use detailed `BenchmarkRun` snapshots only. The
+`ComparisonService` accepts two or more snapshot model names or
+`BenchmarkSession` selections and returns immutable structured results with
+comparison metadata, selected entities, contributing counts, active filters,
+broad summaries, categorical counts/percentages/missing values, aligned
+summaries, pairwise deltas when exactly two entities are selected, and
+deterministic rankings for models.
+
+Model alignment uses the intersection of benchmark snapshot identities and
+reports each selected model's non-overlapping benchmarks separately. Session
+alignment reports shared models, shared benchmarks, shared model/benchmark
+pairs, and the corresponding non-overlap. Broad and aligned tables retain
+record/scored counts and score/speed summaries, so unequal coverage is visible
+and is not silently treated as an apples-to-apples result.
+
+The pairwise contract reports mean score, median score, mean tokens per second,
+scored count, low-hallucination percentage, and high-reliability percentage.
+Every delta is second-minus-first. Percentage deltas are marked unavailable
+when either value is missing or the first value is zero. Missing numeric values
+are omitted rather than converted to zero; categorical percentages use
+observed values as the denominator and keep missing counts separate. Deleted
+runs and, for session selection, deleted sessions are excluded by default.
+
+`Model Comparison` and `Session Comparison` are screen-based CLI workflows
+under `Data > Comparisons`. The CLI uses vertical multi-selectors, optional
+benchmark/type/session/hardware/date/score/review filters, structured previews,
+and the existing path autocomplete, confirmation, overwrite confirmation, and
+staged UTF-8 Markdown writer. It does not calculate metrics, rank entities, or
+accept manually typed internal IDs. Cancellation does not write output.
+
+Comparison Markdown contains title/generated/selection/filter metadata, broad
+and aligned summaries, overlap/non-overlap, categorical distributions,
+pairwise results, rankings where applicable, and a methodology note. It does
+not export raw model output, prompt text, attachments, charts, trends,
+forecasts, significance claims, or confidence claims.
+
 ## BenchPup Archive
 
 Backup and restore use a dedicated versioned format:
