@@ -18,6 +18,10 @@ from .reporting import (
     write_markdown_report,
 )
 from .services import BenchmarkService, CatalogService
+from .html_reporting import (
+    HtmlAnalyticsReportOptions,
+    export_html_analytics,
+)
 
 
 def export_benchmark_runs_csv(service: BenchmarkService, path: str | Path) -> Path:
@@ -327,6 +331,27 @@ def export_scoreboard_markdown(
     if not result.succeeded:
         raise OSError(result.details or result.message)
     return result.path
+
+
+def export_html_analytics_report(
+    service: BenchmarkService,
+    path: str | Path,
+    *,
+    catalog: CatalogService | None = None,
+    options: HtmlAnalyticsReportOptions | None = None,
+    overwrite: bool = False,
+    **kwargs: object,
+):
+    """Export the typed standalone HTML analytics report."""
+
+    return export_html_analytics(
+        service,
+        path,
+        catalog=catalog,
+        options=options,
+        overwrite=overwrite,
+        **kwargs,
+    )
 
 
 def export_model_leaderboard_markdown(

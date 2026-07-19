@@ -53,6 +53,8 @@ Completed:
 
 ## Phase 4 — Reporting, Export, Backup, and Restore
 
+**Status: Complete**
+
 ### Phase 4.1 — JSON Backup and Restore
 
 Completed:
@@ -142,21 +144,28 @@ Completed:
 - staged output and structured write results
 - screen-based, session-local Dataset Builder configuration
 
-### Phase 4.4 — Statistics and Comparison
+### Phase 4.4 — Statistics, Comparison, Trends, and HTML Analytics
 
-Next:
+Completed:
 
-- descriptive statistics
-- model comparisons
-- session comparison
-- trend reports
-- richer HTML charts
+- descriptive statistics with separate BenchmarkRun and ScoreboardEntry APIs
+- model and session comparisons with explicit overlap and non-overlap
+- UTC day, week, and month trend reports with neutral coverage metadata
+- immutable typed standalone HTML analytics datasets and dashboards
+- safe JSON embedding, escaped presentation fields, CSP, accessible fallback
+  tables, no-network behavior, and no browser-side metric recalculation
+- staged overwrite-safe HTML writing through the existing report statuses
+- existing Export workflow integration as option 6 without duplicate menus
+- Phase 4.1 Polish audit: backup defaults, automatic folder creation, clean
+  diagnostics, and polished summaries were already complete and remain intact
+
+**Status: Complete**
 
 ## Phase 5 — GUI
 
-Implement a PySide6 dark-mode desktop application only after the reporting,
-statistics, and model-comparison engine/reporting phases are complete. It will
-reuse the existing engine and design language.
+Implement a PySide6 dark-mode desktop application now that the reporting,
+statistics, comparison, trend, and HTML analytics engine/reporting phases are
+complete. It will reuse the existing engine and design language.
 
 ## Phase 6 — Advanced Research Features
 
@@ -168,5 +177,4 @@ Planned:
 - advanced search
 - prompt library improvements
 - benchmark templates
-- trends
 - plugins

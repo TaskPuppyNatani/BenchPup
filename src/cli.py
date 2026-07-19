@@ -27,6 +27,7 @@ from engine.prompt_file_importer import PromptFileError, decode_prompt_file, pro
 from engine.settings import DefaultWorkingDirectorySettings
 from engine.datasets import DatasetBuilder, DatasetFilters, DatasetWriteResult, DatasetWriteStatus, RedactionConfig
 from engine.comparisons import ComparisonService, ModelComparisonResult, SessionComparisonResult
+from engine.html_reporting import AnalyticsSourceFamily, HtmlAnalyticsReport, HtmlAnalyticsReportOptions
 from engine.reporting import (
     BenchmarkReportFilters,
     BenchmarkRunReport,
@@ -227,6 +228,7 @@ class TerminalApp:
         self._leaderboard_report_options = LeaderboardReportOptions()
         self._session_report_options = SessionReportOptions()
         self._hardware_report_options = HardwareReportOptions()
+        self._html_analytics_options = HtmlAnalyticsReportOptions()
         self._model_comparison_options = ModelComparisonOptions()
         self._session_comparison_options = SessionComparisonOptions()
         self._benchmark_trend_options = BenchmarkTrendOptions()
@@ -357,6 +359,7 @@ class TerminalApp:
             "Session Report": ("session-report.md", ".md"),
             "Session Comparison": ("session-comparison.md", ".md"),
             "Hardware Report": ("hardware-report.md", ".md"),
+            "HTML Analytics Report": ("benchpup-analytics.html", ".html"),
             "BenchPup Backup": ("benchpup-backup.json", ".json"),
             "JSONL Dataset": ("dataset.jsonl", ".jsonl"),
         }
@@ -1392,12 +1395,15 @@ class TerminalApp:
             self.output(f"Import cancelled: {error}. No rows were written.")
 
     def export_screen(self) -> None:
-        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n\nB) Back\nQA) Quit BenchPup completely")
+        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n6) HTML Analytics Report\n\nB) Back\nQA) Quit BenchPup completely")
         choice = self.ask("Choose an option", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
+        if self.normalized(str(choice)) == "6":
+            self._html_analytics_options = self._html_analytics_screen(self._html_analytics_options)
+            return
         exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
         selected = exporters.get(self.normalized(str(choice)))
-        if not selected: self.output("Choose 1, 2, 3, 4, or 5."); return
+        if not selected: self.output("Choose 1, 2, 3, 4, 5, or 6."); return
         path = self.prompt_path(f"Destination for {selected[0]}", preserve_trailing_separator=True)
         if path is None: return
         if path in (BACK, CANCEL, MAIN): return
@@ -1416,6 +1422,354 @@ class TerminalApp:
                 webbrowser.open(Path(saved).resolve().as_uri())
             except OSError as error:
                 self.output(f"Could not open HTML report: {error}")
+
+    @staticmethod
+    def _html_analytics_source_label(value: AnalyticsSourceFamily | str) -> str:
+        source = value.value if isinstance(value, AnalyticsSourceFamily) else str(value)
+        return {
+            AnalyticsSourceFamily.BENCHMARK_RUNS.value: "Benchmark Runs",
+            AnalyticsSourceFamily.SCOREBOARD.value: "Historical Scoreboard",
+            AnalyticsSourceFamily.COMBINED.value: "Combined dashboard",
+        }.get(source, source)
+
+    def _html_analytics_source_choice(
+        self,
+        current: AnalyticsSourceFamily | str,
+    ) -> AnalyticsSourceFamily | NavigationSignal:
+        choices = [
+            ("Benchmark Runs", AnalyticsSourceFamily.BENCHMARK_RUNS),
+            ("Historical Scoreboard", AnalyticsSourceFamily.SCOREBOARD),
+            ("Combined dashboard (separate source-family sections)", AnalyticsSourceFamily.COMBINED),
+        ]
+        selected = self._report_vertical_choice("HTML Analytics Source", choices, current)
+        if isinstance(selected, NavigationSignal):
+            return selected
+        return selected if isinstance(selected, AnalyticsSourceFamily) else AnalyticsSourceFamily.BENCHMARK_RUNS
+
+    def _html_analytics_benchmark_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+    ) -> BenchmarkStatisticsFilters:
+        """Reuse the existing catalog/snapshot filter screen for analytics."""
+
+        base = BenchmarkReportFilters(
+            benchmark_type=filters.benchmark_type,
+            benchmark=filters.benchmark,
+            session_id=filters.session_id,
+            session=filters.session,
+            hardware_profile_id=filters.hardware_profile_id,
+            hardware=filters.hardware,
+            model=filters.model,
+            include_run_ids=filters.include_run_ids,
+            exclude_run_ids=filters.exclude_run_ids,
+            include_deleted=filters.include_deleted,
+        )
+        updated = self._report_filters_screen(base)
+        return replace(
+            filters,
+            benchmark_type=updated.benchmark_type,
+            benchmark=updated.benchmark,
+            session_id=updated.session_id,
+            session=updated.session,
+            hardware_profile_id=updated.hardware_profile_id,
+            hardware=updated.hardware,
+            model=updated.model,
+            include_run_ids=updated.include_run_ids,
+            exclude_run_ids=updated.exclude_run_ids,
+            include_deleted=updated.include_deleted,
+        )
+
+    def _html_analytics_scoreboard_filters_screen(
+        self,
+        filters: ScoreboardStatisticsFilters,
+    ) -> ScoreboardStatisticsFilters:
+        while True:
+            batch = self.catalog.scoreboard_import_batches.get(filters.batch_id) if filters.batch_id is not None else None
+            content = "\n".join((
+                f"1) Scoreboard Import Batch [{batch.name if batch else ('Unavailable selection' if filters.batch_id is not None else 'Not set')} ]",
+                f"2) Model Text Filter [{self._report_value(filters.model)}]",
+                "3) Reset Scoreboard Filters",
+                "",
+                f"Active: {self._report_value(filters.model) if filters.model else 'All non-deleted scoreboard entries'}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Scoreboard Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._report_catalog_choice(
+                    "Select Analytics Import Batch",
+                    self.catalog.scoreboard_import_batches.list(),
+                    lambda item: f"{item.name} ({item.source_file})",
+                    lambda item: item.id,
+                    filters.batch_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, batch_id=selected)
+            elif command == "2":
+                value = self.ask("Model text filter (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, model=value)
+            elif command == "3":
+                filters = ScoreboardStatisticsFilters()
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def _html_analytics_sections_screen(
+        self,
+        options: HtmlAnalyticsReportOptions,
+    ) -> HtmlAnalyticsReportOptions:
+        toggles = (
+            ("3", "include_detailed_tables", "Detailed tables"),
+            ("4", "include_model_quality_chart", "Model quality/score chart"),
+            ("5", "include_speed_chart", "Speed charts"),
+            ("6", "include_score_distribution", "Score distributions"),
+            ("7", "include_categorical_distributions", "Categorical distributions"),
+            ("8", "include_trends", "Trend charts"),
+            ("9", "include_hardware_summary", "Hardware summary"),
+            ("10", "compact_layout", "Compact layout"),
+        )
+        while True:
+            lines = [
+                f"1) Source [{self._html_analytics_source_label(options.source_family)}]",
+                "2) Report Title",
+            ]
+            lines.extend(
+                f"{number}) {label} [{'Yes' if bool(getattr(options, field_name)) else 'No'}]"
+                for number, field_name, label in toggles
+            )
+            lines.extend(("11) Reset presentation options", "", "B) Back", "QA) Quit BenchPup completely"))
+            self.render_screen("HTML Analytics Sections", "\n".join(lines))
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._html_analytics_source_choice(cast(AnalyticsSourceFamily, options.source_family))
+                if not isinstance(selected, NavigationSignal):
+                    options = replace(
+                        options,
+                        source_family=selected,
+                        include_benchmark_run_dashboard=None,
+                        include_scoreboard_dashboard=None,
+                    )
+            elif command == "2":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command in {number for number, _, _ in toggles}:
+                field_name = next(field_name for number, field_name, _ in toggles if number == command)
+                value = self._configure_redaction_toggle(str(next(label for number, _, label in toggles if number == command)), bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "11":
+                options = HtmlAnalyticsReportOptions(source_family=options.source_family)
+            else:
+                self.output("Choose a number from 1 to 11, or B to return.")
+
+    def _html_analytics_options_screen(
+        self,
+        options: HtmlAnalyticsReportOptions,
+    ) -> HtmlAnalyticsReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Presentation and Source [{self._html_analytics_source_label(options.source_family)}]",
+                "2) Benchmark Run Filters",
+                "3) Scoreboard Filters",
+                f"4) Trend Interval [{self._trend_interval_label(options.interval)}]",
+                "5) Reset All Analytics Options",
+                "",
+                f"Title: {options.title}",
+                f"Detailed tables: {'Included' if options.include_detailed_tables else 'Excluded'}",
+                f"Quality charts: {'Included' if options.include_model_quality_chart else 'Excluded'}",
+                f"Speed charts: {'Included' if options.include_speed_chart else 'Excluded'}",
+                f"Score distributions: {'Included' if options.include_score_distribution else 'Excluded'}",
+                f"Categorical distributions: {'Included' if options.include_categorical_distributions else 'Excluded'}",
+                f"Trends: {'Included' if options.include_trends else 'Excluded'}",
+                f"Hardware summary: {'Included' if options.include_hardware_summary else 'Excluded'}",
+                f"Compact layout: {'Enabled' if options.compact_layout else 'Disabled'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._html_analytics_sections_screen(options)
+            elif command == "2":
+                options = replace(options, benchmark_filters=self._html_analytics_benchmark_filters_screen(options.benchmark_filters))
+            elif command == "3":
+                options = replace(options, scoreboard_filters=self._html_analytics_scoreboard_filters_screen(options.scoreboard_filters))
+            elif command == "4":
+                choices = [
+                    ("Day", TimeBucketGranularity.DAY),
+                    ("Week", TimeBucketGranularity.WEEK),
+                    ("Month", TimeBucketGranularity.MONTH),
+                ]
+                selected = self._report_vertical_choice("HTML Analytics Trend Interval", choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, trend_interval=selected)
+            elif command == "5":
+                options = HtmlAnalyticsReportOptions(source_family=options.source_family)
+            else:
+                self.output("Choose a number from 1 to 5, or B to return.")
+
+    def _html_analytics_selection_lines(
+        self,
+        report: HtmlAnalyticsReport,
+        options: HtmlAnalyticsReportOptions,
+    ) -> tuple[str, ...]:
+        lines: list[str] = [
+            f"Report title: {report.title}",
+            f"Source: {self._html_analytics_source_label(report.source_family)}",
+            f"Generated at: {report.generated_at}",
+        ]
+        for dashboard in report.dashboards:
+            metadata = dashboard.metadata
+            lines.extend((
+                "",
+                f"{dashboard.title} ({dashboard.source_record_family})",
+                f"  Contributing records: {metadata.contributing_record_count}",
+                f"  Scored records: {metadata.scored_record_count}",
+                f"  Models: {', '.join(metadata.represented_models) or 'None represented'}",
+                f"  Benchmarks: {', '.join(metadata.represented_benchmarks) or 'None represented'}",
+                f"  Sessions: {', '.join(metadata.represented_sessions) or 'None represented'}",
+                f"  Hardware: {', '.join(metadata.represented_hardware_environments) or 'None represented'}",
+                f"  Import batches: {', '.join(metadata.represented_import_batches) or 'None represented'}",
+                f"  Date range: {metadata.date_range[0] or 'Unavailable'} to {metadata.date_range[1] or 'Unavailable'}",
+                f"  Included charts: {', '.join(chart.title for chart in dashboard.charts) or 'None'}",
+                f"  Omitted charts: {', '.join(f'{item.title} ({item.reason})' for item in dashboard.omitted_charts) or 'None'}",
+                f"  Active filters: {'; '.join(f'{key}={value}' for key, value in metadata.active_filters.items()) or 'None'}",
+                f"  Coverage warnings: {'; '.join(metadata.coverage_warnings) or 'None'}",
+            ))
+        if not report.dashboards:
+            lines.append("No dashboards were selected.")
+        lines.extend((
+            "",
+            f"Detailed tables: {'Included' if options.include_detailed_tables else 'Excluded'}",
+            "Missing values remain unavailable; the report never treats them as zero.",
+        ))
+        return tuple(lines)
+
+    def _html_analytics_write_result_screen(self, result: ReportWriteResult) -> None:
+        if result.status is ReportWriteStatus.SUCCESS:
+            title = "HTML Analytics Write Complete"
+            explanation = "The standalone HTML analytics report was staged and finalized successfully."
+        elif result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            title = "HTML Analytics Write Requires Confirmation"
+            explanation = "The destination already exists; no replacement was written."
+        elif result.status is ReportWriteStatus.TEMP_WRITE_FAILED:
+            title = "HTML Analytics Temporary Write Failed"
+            explanation = "The report could not be staged; the final destination was not replaced."
+        elif result.status is ReportWriteStatus.FINALIZE_FAILED:
+            title = "HTML Analytics Finalization Failed"
+            explanation = "The staged report could not be finalized; inspect the destination before retrying."
+        else:
+            title = "HTML Analytics Write Failed"
+            explanation = "The HTML analytics writer returned an unrecognized failure status."
+        lines = [explanation, "", f"Status: {result.status.value}", f"Path: {result.path}"]
+        if result.message:
+            lines.append(f"Message: {result.message}")
+        if result.details:
+            lines.append(f"Details: {result.details}")
+        lines.extend(("", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        self.ask("Choose an option", navigation=True)
+
+    def _write_html_analytics_workflow(
+        self,
+        report: HtmlAnalyticsReport,
+        options: HtmlAnalyticsReportOptions,
+    ) -> str | None:
+        selection_lines = self._html_analytics_selection_lines(report, options)
+        self.render_screen("HTML Analytics Selection", "\n".join(selection_lines))
+        path = self.prompt_path(
+            "HTML Analytics destination",
+            default=str(options.output_path) if options.output_path else None,
+            preserve_trailing_separator=True,
+        )
+        if not isinstance(path, str):
+            return None
+        output_path = self.prepare_export_destination(path, "HTML Analytics Report")
+        if not isinstance(output_path, Path):
+            return None
+        self.render_screen(
+            "Confirm HTML Analytics Report",
+            "\n".join((*selection_lines, "", f"Destination: {output_path}", "The report will be written as one staged UTF-8 HTML file.", "", "Write this report?", "B) Back", "QA) Quit BenchPup completely")),
+        )
+        confirm = self.yes_no("Confirm HTML Analytics Report", navigation=True)
+        if confirm is not True:
+            return None
+        try:
+            result = self.reporting.write_html_analytics_report(report, output_path)
+        except (OSError, ValueError) as error:
+            self._report_error_screen("HTML Analytics Failed", f"Report generation or writing failed: {error}")
+            return str(output_path)
+        if result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            self.render_screen(
+                "Confirm HTML Analytics Overwrite",
+                f"An existing report is at:\n{output_path}\n\nReplace it only after staged validation?\n\nB) Back\nQA) Quit BenchPup completely",
+            )
+            overwrite = self.yes_no("Replace existing HTML analytics report", navigation=True)
+            if overwrite is True:
+                try:
+                    result = self.reporting.write_html_analytics_report(report, output_path, overwrite=True)
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("HTML Analytics Overwrite Failed", f"Report overwrite failed: {error}")
+                    return str(output_path)
+            elif isinstance(overwrite, NavigationSignal):
+                return None
+        self._html_analytics_write_result_screen(result)
+        return str(output_path)
+
+    def _html_analytics_screen(self, options: HtmlAnalyticsReportOptions) -> HtmlAnalyticsReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure HTML Analytics",
+                "2) Preview Typed Analytics",
+                "3) Write Standalone HTML Analytics",
+                "",
+                f"Source: {self._html_analytics_source_label(options.source_family)}",
+                f"Trend interval: {self._trend_interval_label(options.interval)}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._html_analytics_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.html_analytics_report(options=options)
+            except (OSError, ValueError) as error:
+                self._report_error_screen("HTML Analytics Failed", f"Could not build the analytics report: {error}")
+                continue
+            selection_lines = self._html_analytics_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("HTML Analytics Preview", selection_lines)
+                continue
+            if not report.dashboards:
+                self._report_empty_screen("No Analytics Dashboards", selection_lines + ("No dashboard source was selected.",))
+                continue
+            destination = self._write_html_analytics_workflow(report, options)
+            if destination is not None:
+                options = replace(options, output_destination=destination, destination=destination)
 
     @staticmethod
     def _report_value(value: object) -> str:

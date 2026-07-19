@@ -14,7 +14,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, Sequence, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, TypeAlias, cast
 from types import MappingProxyType
 
 from .domain import (
@@ -30,6 +30,9 @@ from .comparisons import ModelComparisonResult, SessionComparisonResult
 from .services import BenchmarkService, CatalogService
 from .statistics import numeric_summary
 from .trends import TrendReport, TrendSeries
+
+if TYPE_CHECKING:
+    from .html_reporting import HtmlAnalyticsReport, HtmlAnalyticsReportOptions
 
 
 class ReportType(str, Enum):
@@ -1762,6 +1765,47 @@ class ReportingService:
             options = replace(options, include_record_details=include_series_details)
         return write_markdown_report(report, destination, overwrite=overwrite, template_options=options)
 
+    def html_analytics_report(
+        self,
+        *,
+        options: HtmlAnalyticsReportOptions | None = None,
+        **kwargs: Any,
+    ) -> HtmlAnalyticsReport:
+        """Prepare a typed standalone HTML analytics report."""
+
+        from .html_reporting import HtmlAnalyticsReportOptions, build_html_analytics_report
+
+        return build_html_analytics_report(
+            self.service,
+            self.catalog,
+            options=options or HtmlAnalyticsReportOptions(),
+            **kwargs,
+        )
+
+    def render_html_analytics_report(self, report: HtmlAnalyticsReport) -> str:
+        """Render engine-prepared analytics without recalculating any metric."""
+
+        from .html_reporting import render_html_analytics_report
+
+        return render_html_analytics_report(report)
+
+    def write_html_analytics_report(
+        self,
+        report: HtmlAnalyticsReport,
+        destination: str | Path | None = None,
+        *,
+        overwrite: bool = False,
+    ) -> ReportWriteResult:
+        """Stage and atomically finalize a standalone analytics file."""
+
+        from .html_reporting import write_html_analytics_report
+
+        return write_html_analytics_report(report, destination, overwrite=overwrite)
+
+    build_html_analytics_report = html_analytics_report
+    render_html_analytics = render_html_analytics_report
+    write_html_analytics = write_html_analytics_report
+
 
 def _render_header(metadata: ReportMetadata) -> list[str]:
     return [
@@ -2905,6 +2949,35 @@ render_scoreboard_trend = render_scoreboard_trend_markdown
 write_report_markdown = write_markdown_report
 
 
+def build_html_analytics_report(*args: Any, **kwargs: Any) -> Any:
+    """Lazy compatibility import for the dedicated HTML analytics module."""
+
+    from .html_reporting import build_html_analytics_report as builder
+
+    return builder(*args, **kwargs)
+
+
+def render_html_analytics_report(*args: Any, **kwargs: Any) -> str:
+    """Lazy compatibility import for standalone HTML rendering."""
+
+    from .html_reporting import render_html_analytics_report as renderer
+
+    return renderer(*args, **kwargs)
+
+
+def write_html_analytics_report(*args: Any, **kwargs: Any) -> ReportWriteResult:
+    """Lazy compatibility import for staged HTML analytics writing."""
+
+    from .html_reporting import write_html_analytics_report as writer
+
+    return writer(*args, **kwargs)
+
+
+build_html_analytics = build_html_analytics_report
+render_html_analytics = render_html_analytics_report
+write_html_analytics = write_html_analytics_report
+
+
 __all__ = (
     "AttachmentReportMetadata",
     "BenchmarkModelSection",
@@ -2946,6 +3019,8 @@ __all__ = (
     "SessionComparisonResult",
     "SessionReportSummary",
     "TrendReport",
+    "build_html_analytics",
+    "build_html_analytics_report",
     "build_benchmark_run_report",
     "build_hardware_report",
     "build_model_leaderboard",
@@ -2973,6 +3048,8 @@ __all__ = (
     "render_model_leaderboard_markdown",
     "render_hardware_report_markdown",
     "render_hardware_markdown",
+    "render_html_analytics",
+    "render_html_analytics_report",
     "render_scoreboard_markdown",
     "render_scoreboard_trend",
     "render_scoreboard_trend_markdown",
@@ -2981,6 +3058,8 @@ __all__ = (
     "render_session_comparison_markdown",
     "render_session_report_markdown",
     "render_trend_markdown",
+    "write_html_analytics",
+    "write_html_analytics_report",
     "write_markdown_report",
     "write_report_markdown",
 )

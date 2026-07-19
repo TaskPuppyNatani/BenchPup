@@ -348,6 +348,47 @@ recalculating metrics, and delegates Markdown rendering, staged writing, and
 overwrite confirmation to the existing reporting boundary. Rolling summaries
 and richer chart presentation are outside this foundation slice.
 
+## Standalone HTML Analytics
+
+`engine.html_reporting` is the UI-independent Phase 4.4C2 boundary for the
+richer standalone HTML report. It consumes the existing `StatisticsService`
+and `TrendService` contracts, and accepts already-structured comparison
+results when comparison summaries are requested. It does not recalculate
+metrics in browser JavaScript.
+
+`HtmlAnalyticsReportOptions`, `HtmlAnalyticsReport`, `AnalyticsDashboard`,
+`DashboardMetadata`, `ChartMetadata`, `ChartData`, `ChartSeries`, and
+`ChartPoint` are immutable typed models. Each chart carries its source family,
+axis labels, value format, active filters, contributing-record counts, and
+explicit missing-value behavior. A combined report contains two independent
+dashboards; `BenchmarkRun` records are never converted into
+`ScoreboardEntry` records.
+
+The BenchmarkRun dashboard can include model quality, model speed, score and
+review-level distributions, score and speed trends, benchmark summaries, and
+optional historical hardware summaries. The ScoreboardEntry dashboard can
+include score and speed by model, score and review-level distributions,
+imported-time score trends, and import-batch summaries. Missing scores,
+speeds, timestamps, and categories remain unavailable or are counted as
+missing; they are never silently zero-filled. Empty or unsupported charts are
+represented by typed omission records with a user-facing reason.
+
+The renderer produces one UTF-8 HTML document with inline CSS, inline SVG,
+accessible chart tables, safe detailed-field tables, and a `noscript` fallback.
+Prompts, raw model output, and attachment contents are excluded. Visible text
+is HTML-escaped, and the embedded JSON uses explicit script-safe escaping for
+HTML-sensitive and script-breaking characters. A restrictive document CSP
+allows only the inline styles and presentation script needed by the file. The
+browser script only hides chart series and filters/sorts rendered tables; it
+does not fetch data, load a CDN, or perform statistical calculations.
+
+`write_html_analytics_report()` stages a same-directory temporary file,
+protects existing destinations unless overwrite is explicitly requested, and
+atomically finalizes the UTF-8 file using the existing structured
+`ReportWriteResult` / `ReportWriteStatus` contract. The legacy
+`export_scoreboard_html()` viewer remains available and is not replaced by the
+analytics writer.
+
 ## Reporting CLI Integration
 
 The screen-based CLI exposes the reporting engine through `Data > Reports`.
@@ -380,4 +421,7 @@ output, and attachment metadata are excluded by default and are passed to the
 engine only when explicitly enabled. Attachment binary contents are never
 read. An existing report requires a second explicit overwrite confirmation;
 cancellation does not write a file. The existing legacy Export screen remains
-available separately.
+available separately. Its existing options 1 through 5 are unchanged; option
+6, `HTML Analytics Report`, opens the session-local analytics configuration,
+typed preview, destination autocomplete, confirmation, overwrite confirmation,
+and structured write-result workflow. No duplicate analytics menu is added.

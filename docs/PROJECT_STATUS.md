@@ -6,7 +6,7 @@
 
 ## Current Test Status
 
-**181 passing**
+**227 passing**
 
 ## Completed
 
@@ -41,22 +41,20 @@
 - [x] Session reports and hardware reports from historical run snapshots
 - [x] Immutable Concise, Standard, and Full Audit report templates
 - [x] Screen-based reporting workflows with staged Markdown writing and overwrite confirmation
+- [x] Phase 4.4 descriptive statistics, model/session comparisons, and UTC trend reports
+- [x] Typed standalone HTML analytics dashboards for BenchmarkRun and ScoreboardEntry data
+- [x] Offline-safe HTML serialization, accessible fallback tables, staged writing, and Export option 6
+- [x] Phase 4.1 Polish audit: backup defaults, automatic folder creation, clean diagnostics, and summaries
 
 ## Next
 
-- [ ] Statistics
-- [ ] Model comparisons
-- [ ] Trend reports
+- [ ] PySide6 GUI after the reporting and analytics engine phases
 
 ## Planned
 
-Phase 4 remains in progress; Phase 4.4 Statistics and Comparison is the next
-engine/reporting slice. The GUI remains planned and is not complete.
+Phase 4 is complete. The GUI remains planned and is not complete; it should
+reuse the existing engine and reporting boundaries.
 
-- [ ] Richer HTML charts
-- [ ] Benchmark comparison
-- [ ] Session comparison
-- [ ] PySide6 GUI after reporting and statistics engine phases
 - [ ] Knowledge base
 - [ ] AI lab notebook
 - [ ] Plugin system
