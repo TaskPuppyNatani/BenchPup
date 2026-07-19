@@ -14,7 +14,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from statistics import median
 from typing import Any, Mapping, Sequence, TypeAlias, cast
 from types import MappingProxyType
 
@@ -28,6 +27,7 @@ from .domain import (
     now,
 )
 from .services import BenchmarkService, CatalogService
+from .statistics import numeric_summary
 
 
 class ReportType(str, Enum):
@@ -299,17 +299,17 @@ class ScoreStatistics:
 
 
 def _score_statistics(scores: Sequence[float | None], count: int | None = None) -> ScoreStatistics:
+    source_count = len(scores) if count is None else count
+    summary = numeric_summary(scores, total_count=source_count)
     numeric = [float(value) for value in scores if value is not None]
     distribution = Counter(numeric)
-    if not numeric:
-        return ScoreStatistics(count=len(scores) if count is None else count, score_distribution=distribution)
     return ScoreStatistics(
-        count=len(scores) if count is None else count,
-        scored_count=len(numeric),
-        average=sum(numeric) / len(numeric),
-        median=float(median(numeric)),
-        minimum=min(numeric),
-        maximum=max(numeric),
+        count=summary.total_count,
+        scored_count=summary.available_count,
+        average=summary.mean,
+        median=summary.median,
+        minimum=summary.minimum,
+        maximum=summary.maximum,
         score_distribution=distribution,
     )
 
@@ -912,6 +912,18 @@ def _hardware_label(hardware: HardwareReportSummary | None) -> str:
     return "Unknown hardware"
 
 
+def normalize_hardware_snapshot(snapshot: Mapping[str, Any]) -> str:
+    """Return the stable grouping key used for historical hardware snapshots."""
+
+    return _hardware_group_key(snapshot)
+
+
+def hardware_snapshot_label(snapshot: Mapping[str, Any]) -> str:
+    """Return the human-readable label used for a historical hardware snapshot."""
+
+    return _hardware_label(_hardware_summary(snapshot))
+
+
 def _record_scores(records: Sequence[BenchmarkRunReportItem]) -> list[float | None]:
     return [item.review.overall_score if item.review else None for item in records]
 
@@ -1060,7 +1072,7 @@ def _run_matches(aggregate: BenchmarkRunAggregate, filters: BenchmarkReportFilte
         return False
     if filters.hardware:
         hardware_text = " ".join(_text(value) for value in run.hardware_snapshot.values())
-        if not _contains(hardware_text, filters.hardware):
+        if not (_contains(hardware_text, filters.hardware) or _contains(_hardware_group_key(run.hardware_snapshot), filters.hardware)):
             return False
     if filters.model and not _contains(run.model_snapshot.get("model_name") or run.model_snapshot.get("name"), filters.model):
         return False
@@ -1524,16 +1536,28 @@ class ReportingService:
     def apply_template(self, template: str | ReportTemplateId) -> ReportTemplateOptions:
         return apply_report_template(template)
 
-    def select_benchmark_runs(self, runs: Sequence[BenchmarkSource] | None = None) -> tuple[BenchmarkRunAggregate, ...]:
-        return _run_source(runs, self.service, self.catalog)
+    def select_benchmark_runs(
+        self,
+        runs: Sequence[BenchmarkSource] | None = None,
+        *,
+        filters: BenchmarkReportFilters | None = None,
+    ) -> tuple[BenchmarkRunAggregate, ...]:
+        source = _run_source(runs, self.service, self.catalog)
+        if filters is None:
+            return source
+        return tuple(aggregate for aggregate in source if _run_matches(aggregate, filters))
 
     def select_scoreboard_entries(
         self,
         entries: Sequence[ScoreboardSource] | None = None,
         *,
         batches: Sequence[ScoreboardImportBatch] | None = None,
+        filters: ScoreboardReportFilters | None = None,
     ) -> tuple[ScoreboardEntryAggregate, ...]:
-        return _scoreboard_source(entries, batches, self.catalog)
+        source = _scoreboard_source(entries, batches, self.catalog)
+        if filters is None:
+            return source
+        return tuple(aggregate for aggregate in source if _scoreboard_matches(aggregate, filters))
 
     def benchmark_run_report(
         self,
@@ -2270,6 +2294,8 @@ __all__ = (
     "generate_model_leaderboard",
     "generate_scoreboard_report",
     "generate_session_report",
+    "hardware_snapshot_label",
+    "normalize_hardware_snapshot",
     "render_benchmark_report_markdown",
     "render_benchmark_run_markdown",
     "render_combined_markdown",

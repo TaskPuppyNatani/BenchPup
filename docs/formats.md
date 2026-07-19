@@ -94,6 +94,40 @@ requires confirmation before writing, and requires a second confirmation to
 replace an existing file. Write failures are returned as structured statuses;
 the CLI presents them without exposing a traceback for expected errors.
 
+### Descriptive statistics contract
+
+`StatisticsService` exposes separate descriptive summaries for detailed
+`BenchmarkRun` aggregates and historical `ScoreboardEntry` aggregates. A
+numeric summary reports total records, available and missing values, mean,
+median, minimum, maximum, population standard deviation, optional sample
+standard deviation, Q1, Q3, and IQR. Missing numbers are never treated as
+zero. Engine values are not silently rounded.
+
+Quartiles use Tukey's median-of-halves method: for an odd population the
+median is excluded from the lower and upper halves; for an even population the
+halves are equal. Population standard deviation divides by `n`; sample
+standard deviation divides by `n - 1` and is unavailable for fewer than two
+observations. Categorical distributions count missing values separately and
+calculate category percentages from observed non-missing values. Category
+ordering is deterministic.
+
+Benchmark-run groups support model, benchmark, benchmark type, session, and
+historical hardware environment. Scoreboard groups support model and import
+batch. Every group has a stable identity, human-readable label, record count,
+scored count, and the applicable numeric and categorical summaries. Missing
+metadata is retained as an explicit `Unknown ...` group. Group order is
+alphabetical; the engine does not rank groups in this phase. Hardware keys are
+derived from the authoritative `BenchmarkRun.hardware_snapshot`, so a later
+catalog edit does not change historical statistics.
+
+The reusable time-bucket result supports day, week, and month. Timestamps are
+normalized to UTC; daily and monthly buckets start at UTC midnight, and weekly
+buckets start Monday at UTC midnight with ISO week labels. Each bucket reports
+its start, label, record count, scored count, score summary, and speed summary.
+Missing or invalid timestamps are excluded and counted separately. These
+results provide structured input for later trend work but do not include trend
+interpretation, comparisons, forecasting, charts, or GUI presentation.
+
 ## BenchPup Archive
 
 Backup and restore use a dedicated versioned format:

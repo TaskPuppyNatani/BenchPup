@@ -214,6 +214,47 @@ owns CLI destination selection. The existing `ExportProfile` persistence
 model is not used for these built-in templates yet; persisted custom templates
 remain future work.
 
+## Statistics Engine Foundation
+
+`engine.statistics` is the UI-independent descriptive-statistics boundary for
+Phase 4.4A. `StatisticsService` exposes separate APIs for
+`BenchmarkRunAggregate` values and `ScoreboardEntryAggregate` values:
+`benchmark_run_statistics()` / `scoreboard_statistics()`, grouped summaries,
+and reusable day, week, and month time buckets. The service reuses
+`ReportingService` selection and soft-delete rules, then owns the typed
+statistical results; callers do not recalculate metrics.
+
+The public immutable models include `NumericSummary`,
+`CategoricalDistribution`, source-specific summary and group models, and
+`TimeBucketResult`. Numeric summaries retain useful precision and report
+total, available, and missing values, mean, median, minimum, maximum,
+population standard deviation, optional sample standard deviation, and
+quartiles. Missing numeric values are omitted from calculations rather than
+converted to zero. Categorical percentages use observed non-missing values as
+their denominator, and category maps are safely isolated from source data.
+
+Quartiles use Tukey's median-of-halves method: an odd-population median is
+excluded from both halves, while an even population is split into equal
+halves. The interquartile range is Q3 minus Q1. Population standard deviation
+divides by the full observed count; sample standard deviation is unavailable
+below two observed values.
+
+Benchmark-run filters operate on historical snapshots for model, benchmark,
+benchmark type, session, hardware, score, review levels, and created-time
+ranges. Hardware grouping and normalized-hardware filtering use the same
+snapshot normalization as `engine.reporting`; linked catalog records provide
+context but cannot rewrite or invalidate a valid historical snapshot. A
+missing group value is retained under a stable `Unknown ...` group. Group
+results are alphabetically ordered and are not ranked by a metric in this
+slice. Scoreboard statistics remain a separate API and preserve import-batch
+and soft-delete semantics without converting entries into runs.
+
+Time buckets normalize aware and naive project timestamps to UTC. Days begin
+at UTC midnight, weeks begin on Monday at UTC midnight and use ISO week labels,
+and months begin on the first UTC day. Invalid or missing timestamps are
+excluded from buckets and counted in `TimeBucketResult`; this foundation does
+not interpret trends, calculate forecasts, or render charts.
+
 ## Reporting CLI Integration
 
 The screen-based CLI exposes the reporting engine through `Data > Reports`.
