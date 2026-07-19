@@ -46,14 +46,31 @@
 - [x] Offline-safe HTML serialization, accessible fallback tables, staged writing, and Export option 6
 - [x] Phase 4.1 Polish audit: backup defaults, automatic folder creation, clean diagnostics, and summaries
 
+## Phase 5 GUI
+
+Status: In progress.
+
+- [x] Phase 5A PySide6 application shell
+- [x] Shared GUI application context and engine initialization
+- [x] Dark-mode shell, keyboard navigation, and centralized theme
+- [x] Read-only Dashboard with real engine data
+- [x] Navigation placeholders for future GUI slices
+- [x] Offscreen GUI tests and smoke coverage
+- [ ] Phase 5B Runs browsing and Add Run workflow
+
+Phase 5A is intentionally limited to architecture, navigation, and read-only
+Dashboard presentation. CRUD forms, import/export dialogs, report dialogs,
+Dataset Builder forms, packaging, and installers are not implemented.
+
 ## Next
 
-- [ ] PySide6 GUI after the reporting and analytics engine phases
+- [ ] Phase 5B GUI Runs and Add Run workflows
 
 ## Planned
 
-Phase 4 is complete. The GUI remains planned and is not complete; it should
-reuse the existing engine and reporting boundaries.
+Phase 4 is complete and Phase 5 is in progress. The CLI remains a permanent
+first-class interface and coexists with the PySide6 GUI over the same engine
+and database boundaries.
 
 - [ ] Knowledge base
 - [ ] AI lab notebook

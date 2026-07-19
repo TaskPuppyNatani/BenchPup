@@ -163,9 +163,34 @@ Completed:
 
 ## Phase 5 — GUI
 
-Implement a PySide6 dark-mode desktop application now that the reporting,
-statistics, comparison, trend, and HTML analytics engine/reporting phases are
-complete. It will reuse the existing engine and design language.
+**Status: In progress — Phase 5A complete**
+
+### Phase 5A — PySide6 application shell
+
+Completed:
+
+- `src/gui` package with a supported `python -m src.gui` entry point
+- shared GUI application context over `EngineDatabase` and the existing
+  catalog, benchmark, reporting, statistics, comparison, and trend services
+- dark-mode `QMainWindow` shell with keyboard-reachable sidebar navigation
+- functional read-only Dashboard summary cards and deterministic recent-runs
+  table
+- honest placeholder pages for future GUI destinations
+- centralized theme tokens, focus states, disabled-state styling, and table
+  accessibility foundations
+- offscreen Qt tests and bounded smoke coverage
+
+The GUI does not import `cli.py`; the CLI and engine do not import PySide6.
+Phase 5A does not add CRUD forms, import/export dialogs, report workflows,
+Dataset Builder forms, packaging, or persistence for GUI presentation state.
+
+### Phase 5B — GUI Runs and Add Run workflows
+
+Next recommended slice, subject to current repository priorities:
+
+- read-only Runs browsing and run detail presentation
+- an Add Run workflow over the existing benchmark service
+- explicit validation and error states without duplicating engine rules
 
 ## Phase 6 — Advanced Research Features
 

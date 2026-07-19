@@ -70,6 +70,79 @@ The CLI and GUI are two different front ends over the same engine.
 
 Adding a new interface should require little more than a new presentation layer.
 
+## Phase 5A GUI Application Architecture
+
+The initial PySide6 desktop interface lives under `src/gui` and is launched
+with `python -m src.gui`. Its package is deliberately split by ownership:
+
+```text
+src/gui/
+    __init__.py
+    __main__.py       module entry point
+    application.py    QApplication and startup boundary
+    context.py        one shared engine-service context and lifecycle
+    main_window.py    QMainWindow shell and page ownership
+    navigation.py     keyboard-reachable sidebar destinations
+    theme.py          centralized dark-mode tokens and stylesheet
+    models/
+        dashboard.py  immutable dashboard read models/provider
+    views/
+        dashboard.py  read-only cards, table, and refresh state
+        placeholder.py future-slice navigation pages
+```
+
+The GUI entry point creates one `QApplication`, sets BenchPup application
+metadata, resolves the established `<project_root>/data/benchmark.db` path,
+loads the existing settings authority, runs `EngineDatabase.migrate()`, and
+constructs the existing `CatalogService`, `BenchmarkService`,
+`ReportingService`, `StatisticsService`, `ComparisonService`, and
+`TrendService` once. `GuiApplicationContext.close()` is the explicit shutdown
+hook; engine connections remain operation-scoped and are not replaced with a
+long-lived GUI connection.
+
+The ownership boundary remains:
+
+```text
+CLI and PySide6 GUI
+        |
+Application and engine services
+        |
+Repositories and migrations
+        |
+SQLite
+```
+
+`src/gui` never imports `cli.py`. Widgets do not execute SQL or calculate
+statistics, comparisons, trends, rankings, or reports. The Dashboard adapter
+consumes `BenchmarkRunAggregate` and typed `StatisticsService` results, while
+the view layer only formats values and owns layout, navigation, signals, and
+refresh state. Missing scores and speeds remain visibly unavailable instead
+of being converted to zero. The CLI entry point and engine remain free of
+PySide6 imports.
+
+Phase 5A's `QMainWindow` has a BenchPup/version header, disabled future-action
+placeholders, a sidebar for Dashboard, Runs, Sessions, Models, Benchmarks,
+Scoreboards, Reports, Dataset Builder, Comparisons, Trends, and Settings, a
+single `QStackedWidget` page instance for each destination, and a status bar
+with database path, current page, and application status. Dashboard is the
+default page and refreshes synchronously through the existing small local
+service reads. Future blocking workflows have room for worker-thread work but
+do not add asynchronous infrastructure in this slice.
+
+The theme is centralized in `src/gui/theme.py`, uses system fonts and Qt's
+Fusion style, provides distinct surface levels, visible focus rings, readable
+disabled states, table headers, tooltips, and non-icon-only text controls. No
+external themes, fonts, icon packages, WebEngine, or downloaded assets are
+required. The checkout has no suitable application icon, so the shell uses
+Qt/text labels and starts without an optional icon dependency.
+
+GUI tests set `QT_QPA_PLATFORM=offscreen` and use temporary databases through
+the same service boundaries as the application. They cover context startup and
+cleanup, page reuse/navigation, empty and populated Dashboard states,
+missing-value display, refresh/error behavior, theme/accessibility basics,
+and a bounded shell smoke path. Phase 5B is the next recommended slice for
+Runs browsing and Add Run workflows; Phase 5 is not complete.
+
 
 ## Domain Data Classes
 

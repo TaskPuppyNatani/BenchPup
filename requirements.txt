@@ -1,3 +1,4 @@
 # Python 3.11+.
 pyreadline3>=3.5.4; sys_platform == "win32"
 prompt_toolkit>=3.0.0
+PySide6>=6.8

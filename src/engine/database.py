@@ -98,6 +98,17 @@ class EngineDatabase:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    def close(self) -> None:
+        """Close database resources owned by the engine boundary.
+
+        EngineDatabase opens connections for individual operations and closes
+        them in ``connection``.  The explicit lifecycle method gives front
+        ends a stable shutdown hook without introducing a long-lived shared
+        SQLite connection.
+        """
+
+        return None
+
     @contextmanager
     def connection(self):
         connection = self.connect()
