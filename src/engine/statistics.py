@@ -647,6 +647,17 @@ def time_bucket_for(timestamp: TimestampValue, granularity: str | TimeBucketGran
     return start.isoformat(), label
 
 
+def parse_utc_timestamp(timestamp: TimestampValue) -> datetime | None:
+    """Return the shared UTC-normalized timestamp used by statistics helpers.
+
+    Trend analysis uses this public wrapper for date-range metadata while
+    ``time_bucket_for`` remains the single bucket-convention implementation.
+    Invalid and missing values return ``None``.
+    """
+
+    return _parse_utc_timestamp(timestamp)
+
+
 def build_time_buckets(
     values: Sequence[TimeBucketValue],
     *,
@@ -1158,5 +1169,6 @@ __all__ = (
     "normalize_model_identity",
     "summarize_categorical",
     "summarize_numeric",
+    "parse_utc_timestamp",
     "time_bucket_for",
 )
