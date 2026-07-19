@@ -29,6 +29,7 @@ from .domain import (
 from .comparisons import ModelComparisonResult, SessionComparisonResult
 from .services import BenchmarkService, CatalogService
 from .statistics import numeric_summary
+from .trends import TrendReport, TrendSeries
 
 
 class ReportType(str, Enum):
@@ -784,6 +785,7 @@ ReportDocument: TypeAlias = (
     | HardwareReport
     | ModelComparisonResult
     | SessionComparisonResult
+    | TrendReport
 )
 BenchmarkSource: TypeAlias = BenchmarkRun | BenchmarkRunAggregate
 ScoreboardSource: TypeAlias = ScoreboardEntry | ScoreboardEntryAggregate
@@ -1698,6 +1700,36 @@ class ReportingService:
 
         return render_session_comparison_markdown(report)
 
+    def render_trend_markdown(
+        self,
+        report: TrendReport,
+        *,
+        include_series_details: bool = False,
+    ) -> str:
+        """Render a typed trend without recalculating any trend metrics."""
+
+        return render_trend_markdown(report, include_series_details=include_series_details)
+
+    def render_benchmark_run_trend_markdown(
+        self,
+        report: TrendReport,
+        *,
+        include_series_details: bool = False,
+    ) -> str:
+        return self.render_trend_markdown(report, include_series_details=include_series_details)
+
+    def render_scoreboard_trend_markdown(
+        self,
+        report: TrendReport,
+        *,
+        include_series_details: bool = False,
+    ) -> str:
+        return self.render_trend_markdown(report, include_series_details=include_series_details)
+
+    trend_markdown = render_trend_markdown
+    benchmark_run_trend_markdown = render_benchmark_run_trend_markdown
+    scoreboard_trend_markdown = render_scoreboard_trend_markdown
+
     # Short aliases keep the facade convenient for callers that already use
     # ``render_*`` methods for other report families.
     model_comparison_markdown = render_model_comparison_markdown
@@ -1711,6 +1743,7 @@ class ReportingService:
         overwrite: bool = False,
         include_model_details: bool = False,
         include_hardware_details: bool = False,
+        include_series_details: bool | None = None,
         template_options: ReportTemplateOptions | None = None,
     ) -> ReportWriteResult:
         """Render and stage a report through the application-facing facade.
@@ -1725,6 +1758,8 @@ class ReportingService:
             include_model_details=include_model_details,
             include_hardware_details=include_hardware_details,
         )
+        if isinstance(report, TrendReport) and include_series_details is not None:
+            options = replace(options, include_record_details=include_series_details)
         return write_markdown_report(report, destination, overwrite=overwrite, template_options=options)
 
 
@@ -2570,11 +2605,191 @@ def render_session_comparison_markdown(report: SessionComparisonResult) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _trend_summary_value(summary: Any, field: str = "mean") -> Any:
+    return getattr(summary, field, None) if summary is not None else None
+
+
+def _trend_distribution(distribution: Any) -> str:
+    return _format_distribution(distribution.counts if distribution is not None else {})
+
+
+def _render_trend_point_table(lines: list[str], points: Sequence[Any]) -> None:
+    lines.extend(
+        [
+            "| Bucket | Records | Scored | Score mean | Score median | Speed mean | Hallucination | Reliability | Consistency |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |",
+        ]
+    )
+    if not points:
+        lines.append("| — | 0 | 0 | — | — | — | — | — | — |")
+        return
+    for point in points:
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    point.label or point.bucket_start,
+                    point.record_count,
+                    point.scored_count,
+                    _trend_summary_value(point.overall_score),
+                    _trend_summary_value(point.overall_score, "median"),
+                    _trend_summary_value(point.tokens_per_second),
+                    _trend_distribution(point.hallucination),
+                    _trend_distribution(point.reliability),
+                    _trend_distribution(point.consistency),
+                )
+            )
+            + " |"
+        )
+
+
+def _render_trend_series_summary(lines: list[str], report: TrendReport) -> None:
+    lines.extend(
+        [
+            "",
+            "## Series summary",
+            "",
+            "| Series | Records | Scored | Populated buckets | First score mean | Last score mean | Score delta | Score % delta | First speed mean | Last speed mean | Speed delta |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    series = (report.aggregate_series, *report.series)
+    for item in series:
+        lines.append(
+            "| "
+            + " | ".join(
+                _markdown_cell(value)
+                for value in (
+                    item.label,
+                    item.total_contributing_records,
+                    item.total_scored_records,
+                    item.populated_bucket_count,
+                    _trend_summary_value(item.first_available_score_summary),
+                    _trend_summary_value(item.last_available_score_summary),
+                    item.score_absolute_delta,
+                    item.score_percentage_delta,
+                    _trend_summary_value(item.first_available_speed_summary),
+                    _trend_summary_value(item.last_available_speed_summary),
+                    item.speed_absolute_delta,
+                )
+            )
+            + " |"
+        )
+
+
+def _render_trend_series_details(lines: list[str], series: Sequence[TrendSeries]) -> None:
+    for item in series:
+        lines.extend(
+            [
+                "",
+                f"### {item.label}",
+                "",
+                f"- Series identity: `{_markdown_cell(item.identity)}`",
+                f"- Contributing records: {item.total_contributing_records}",
+                f"- Scored records: {item.total_scored_records}",
+                f"- Bucket count: {item.bucket_count}",
+                f"- Populated bucket count: {item.populated_bucket_count}",
+                f"- Empty bucket count: {item.missing_bucket_count}",
+                f"- First-to-last score delta (last minus first): {_display(item.score_absolute_delta)}",
+                f"- First-to-last speed delta (last minus first): {_display(item.speed_absolute_delta)}",
+                "",
+            ]
+        )
+        _render_trend_point_table(lines, item.points)
+
+
+def render_trend_markdown(
+    report: TrendReport,
+    *,
+    include_series_details: bool = False,
+) -> str:
+    """Render a trend report using only its structured typed values."""
+
+    metadata = report.metadata
+    date_range = " to ".join(value or "Not available" for value in metadata.date_range)
+    interval = metadata.bucket_interval.value if isinstance(metadata.bucket_interval, Enum) else metadata.bucket_interval
+    grouping = report.grouping.value if isinstance(report.grouping, Enum) else report.grouping
+    trend_type = metadata.trend_type.value if isinstance(metadata.trend_type, Enum) else metadata.trend_type
+    filters = "; ".join(f"{key}={value}" for key, value in metadata.active_filters.items()) or "None"
+    lines = [
+        f"# {_display(metadata.title)}",
+        "",
+        f"- Generated at: {_display(metadata.generated_at)}",
+        f"- Trend type: {_display(trend_type)}",
+        f"- Source record family: {_display(metadata.source_record_family)}",
+        f"- Bucket interval: {_display(interval)}",
+        f"- Date range: {_display(date_range)}",
+        f"- Grouping: {_display(grouping)}",
+        f"- Contributing records: {metadata.contributing_record_count}",
+        f"- Excluded missing/invalid timestamps: {metadata.excluded_timestamp_count}",
+        f"- Active filters: {_display(filters)}",
+        f"- Empty buckets: {'Included between observed buckets' if report.include_empty_buckets else 'Excluded by default'}",
+    ]
+    lines.extend(["", "## Methodology", "", f"- {report.methodology_note}"])
+    lines.extend(
+        [
+            "- Deltas are descriptive last-minus-first differences; a positive or negative delta is not labeled as improvement or regression.",
+            "- Composition changes across buckets may affect the observed values. No significance or causal interpretation is performed.",
+        ]
+    )
+    lines.extend(["", "## Coverage and excluded data", ""])
+    if report.coverage_warnings:
+        lines.append("Coverage warnings:")
+        lines.extend(f"- {warning}" for warning in report.coverage_warnings)
+    else:
+        lines.append("- No coverage warnings.")
+    for note in report.excluded_data_notes:
+        lines.append(f"- {note}")
+    lines.extend(
+        [
+            f"- Same series time range: {'Yes' if report.same_time_range else 'No'}",
+            f"- Same represented benchmarks where calculable: {_display(report.same_represented_benchmarks)}",
+            f"- Same represented models where calculable: {_display(report.same_represented_models)}",
+        ]
+    )
+    _render_trend_series_summary(lines, report)
+    lines.extend(["", "## Overall aggregate buckets", ""])
+    _render_trend_point_table(lines, report.aggregate_series.points)
+    if report.series and include_series_details:
+        lines.extend(["", "## Grouped series buckets", ""])
+        _render_trend_series_details(lines, report.series)
+    elif report.series:
+        lines.extend(
+            [
+                "",
+                "Grouped-series bucket details are omitted. Enable detailed series sections to include them.",
+            ]
+        )
+    elif include_series_details:
+        lines.extend(["", "No grouped series are represented by the current selection."])
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_benchmark_run_trend_markdown(
+    report: TrendReport,
+    *,
+    include_series_details: bool = False,
+) -> str:
+    return render_trend_markdown(report, include_series_details=include_series_details)
+
+
+def render_scoreboard_trend_markdown(
+    report: TrendReport,
+    *,
+    include_series_details: bool = False,
+) -> str:
+    return render_trend_markdown(report, include_series_details=include_series_details)
+
+
 def render_markdown(
     report: ReportDocument,
     *,
     template_options: ReportTemplateOptions | None = None,
 ) -> str:
+    if isinstance(report, TrendReport):
+        include_details = template_options.include_record_details if template_options is not None else False
+        return render_trend_markdown(report, include_series_details=include_details)
     if isinstance(report, ModelComparisonResult):
         return render_model_comparison_markdown(report)
     if isinstance(report, SessionComparisonResult):
@@ -2611,6 +2826,7 @@ def write_markdown_report(
     *,
     overwrite: bool = False,
     template_options: ReportTemplateOptions | None = None,
+    include_series_details: bool | None = None,
 ) -> ReportWriteResult:
     """Write UTF-8 Markdown through a same-directory staged replacement.
 
@@ -2637,6 +2853,11 @@ def write_markdown_report(
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.parent.is_dir():
             return ReportWriteResult(ReportWriteStatus.TEMP_WRITE_FAILED, path, "Report parent is not a directory")
+        if isinstance(report, TrendReport) and include_series_details is not None:
+            template_options = replace(
+                template_options or ReportTemplateOptions(),
+                include_record_details=include_series_details,
+            )
         content = report if isinstance(report, str) else render_markdown(report, template_options=template_options)
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         temporary = Path(temporary_name)
@@ -2679,6 +2900,8 @@ render_session_report_markdown = render_session_markdown
 render_hardware_markdown = render_hardware_report_markdown
 render_model_comparison = render_model_comparison_markdown
 render_session_comparison = render_session_comparison_markdown
+render_benchmark_trend_markdown = render_benchmark_run_trend_markdown
+render_scoreboard_trend = render_scoreboard_trend_markdown
 write_report_markdown = write_markdown_report
 
 
@@ -2722,6 +2945,7 @@ __all__ = (
     "SessionComparisonReport",
     "SessionComparisonResult",
     "SessionReportSummary",
+    "TrendReport",
     "build_benchmark_run_report",
     "build_hardware_report",
     "build_model_leaderboard",
@@ -2739,6 +2963,8 @@ __all__ = (
     "normalize_hardware_snapshot",
     "render_benchmark_report_markdown",
     "render_benchmark_run_markdown",
+    "render_benchmark_run_trend_markdown",
+    "render_benchmark_trend_markdown",
     "render_combined_markdown",
     "render_leaderboard_markdown",
     "render_markdown",
@@ -2748,10 +2974,13 @@ __all__ = (
     "render_hardware_report_markdown",
     "render_hardware_markdown",
     "render_scoreboard_markdown",
+    "render_scoreboard_trend",
+    "render_scoreboard_trend_markdown",
     "render_session_markdown",
     "render_session_comparison",
     "render_session_comparison_markdown",
     "render_session_report_markdown",
+    "render_trend_markdown",
     "write_markdown_report",
     "write_report_markdown",
 )

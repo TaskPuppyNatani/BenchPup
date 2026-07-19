@@ -26,6 +26,17 @@ from .comparisons import (
     SessionComparisonReport,
 )
 from .services import BenchmarkService, CatalogService
+from .trends import (
+    BenchmarkTrendGrouping,
+    ScoreboardTrendGrouping,
+    TrendGrouping,
+    TrendMetadata,
+    TrendPoint,
+    TrendReport,
+    TrendSeries,
+    TrendService,
+    TrendType,
+)
 from .statistics import (
     BenchmarkRunGroupBy,
     BenchmarkRunStatistics,
@@ -50,6 +61,7 @@ from .statistics import (
     build_time_buckets,
     categorical_distribution,
     numeric_summary,
+    parse_utc_timestamp,
     time_bucket_for,
 )
 
@@ -60,6 +72,7 @@ __all__ = (
     "BenchmarkRunStatisticsGroup",
     "BenchmarkRunStatisticsSummary",
     "BenchmarkService",
+    "BenchmarkTrendGrouping",
     "AlignedBenchmarkSummary",
     "AlignedEntityStatistics",
     "AlignedModelBenchmarkSummary",
@@ -86,6 +99,7 @@ __all__ = (
     "NumericSummary",
     "PairwiseComparison",
     "ReportingService",
+    "ScoreboardTrendGrouping",
     "ScoreboardGroupBy",
     "ScoreboardEntryStatisticsFilters",
     "ScoreboardStatistics",
@@ -100,7 +114,15 @@ __all__ = (
     "TimeBucketResult",
     "TimeBucketSummary",
     "TimeBucketValue",
+    "TrendGrouping",
+    "TrendMetadata",
+    "TrendPoint",
+    "TrendReport",
+    "TrendSeries",
+    "TrendService",
+    "TrendType",
     "build_time_buckets",
     "numeric_summary",
+    "parse_utc_timestamp",
     "time_bucket_for",
 )

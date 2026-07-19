@@ -125,8 +125,8 @@ normalized to UTC; daily and monthly buckets start at UTC midnight, and weekly
 buckets start Monday at UTC midnight with ISO week labels. Each bucket reports
 its start, label, record count, scored count, score summary, and speed summary.
 Missing or invalid timestamps are excluded and counted separately. These
-results provide structured input for later trend work but do not include trend
-interpretation, comparisons, forecasting, charts, or GUI presentation.
+statistics are consumed by `TrendService`, which adds trend grouping and
+neutral first-to-last deltas without forecasting, charts, or GUI presentation.
 
 ### Model and session comparison reports
 
@@ -165,6 +165,58 @@ and aligned summaries, overlap/non-overlap, categorical distributions,
 pairwise results, rankings where applicable, and a methodology note. It does
 not export raw model output, prompt text, attachments, charts, trends,
 forecasts, significance claims, or confidence claims.
+
+### Trend reports
+
+Trend reports are Markdown renderings of an immutable `TrendReport` returned
+by `TrendService`. `BenchmarkRun` and `ScoreboardEntry` are separate source
+families and are never converted into one another.
+
+Each trend report carries:
+
+- title, generated timestamp, source family, interval, grouping, and selected
+  date range
+- active filters, contributing timestamp-valid record count, and excluded
+  missing/invalid timestamp count
+- an overall aggregate `TrendSeries` and deterministic grouped series
+- ordered `TrendPoint` values with bucket label, record/scored/missing-score
+  counts, `NumericSummary` score and speed values, categorical distributions,
+  and represented snapshot labels
+- first/last available summaries, last-minus-first absolute deltas, and
+  percentage deltas only when the baseline is nonzero and available
+- per-series coverage values, composition notes, excluded-data notes, and a
+  methodology note
+
+Timeline values are normalized to UTC. Day, week, and month boundaries match
+the statistics contract: UTC midnight days, Monday-start ISO weeks, and
+first-of-month UTC buckets. Missing or invalid timestamps are excluded and
+counted. Missing scores and speed values are omitted from calculations rather
+than zero-filled. Empty buckets are omitted by default; the explicit
+`include_empty_buckets` option creates only intervening empty buckets with
+zero counts and unavailable numeric values. Empty buckets do not affect
+deltas and are not interpolated.
+
+Trend deltas are descriptive last-minus-first differences. The format does not
+call a positive delta an improvement or a negative delta a regression, and it
+does not claim causation, statistical significance, confidence, smoothing, or
+forecasting. Coverage warnings such as different date ranges, changing model
+or benchmark composition, hardware composition changes, sparse series, and a
+single populated bucket are descriptive context rather than quality verdicts.
+
+BenchmarkRun grouping uses authoritative model and benchmark snapshots,
+benchmark type, session metadata, and normalized historical hardware
+snapshots. Scoreboard grouping uses model and import-batch metadata with
+`imported_at` as its timeline. Deleted-source and deleted-batch behavior
+follows the existing selection contract; missing grouping metadata is retained
+under stable `Unknown` labels.
+
+The Markdown renderer includes metadata, filters, coverage notes, series
+summary tables, chronological bucket tables, concise distributions, and
+unavailable-value markers. It excludes raw model output, prompt text,
+attachments, and HTML-dependent markup. Output uses the existing staged UTF-8
+writer and explicit overwrite statuses. The screen CLI owns navigation,
+vertical selectors, preview, destination selection, and confirmation only;
+trend calculations remain in `TrendService`.
 
 ## BenchPup Archive
 

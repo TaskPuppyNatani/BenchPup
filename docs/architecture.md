@@ -292,6 +292,62 @@ distributions, overlap/non-overlap, aligned summaries, pairwise deltas,
 rankings, and methodology/unavailable-value notes; it does not include raw
 model output, prompts, or attachment contents.
 
+## Trend Reports Engine and CLI
+
+`engine.trends.TrendService` is the UI-independent Phase 4.4C1 boundary for
+historical trend analysis. It consumes eligible `BenchmarkRunAggregate` and
+`ScoreboardEntryAggregate` values through `StatisticsService`, keeps those
+source families separate, and returns immutable `TrendMetadata`,
+`TrendPoint`, `TrendSeries`, and `TrendReport` values. The service performs
+selection, grouping, UTC day/week/month bucket construction, descriptive
+summaries, neutral first-to-last deltas, and coverage notes. It performs no
+repository writes and does not mutate source snapshots.
+
+Trend buckets reuse the statistics UTC convention: days begin at UTC midnight,
+ISO weeks begin on Monday at UTC midnight, and months begin on the first UTC
+day. Missing or invalid timeline timestamps are excluded from points and
+counted in metadata. Missing scores and tokens-per-second values remain
+unavailable and are omitted from numeric summaries rather than treated as
+zero. First-to-last absolute deltas are always last available mean minus first
+available mean; percentage deltas are unavailable for a missing or zero
+baseline. Deltas are descriptive only: the engine does not label them as
+improvement or regression, smooth or interpolate values, forecast, test
+significance, or infer causation.
+
+BenchmarkRun trends support overall, model, benchmark, benchmark type,
+session, and normalized historical hardware grouping. Snapshot values remain
+authoritative even when linked catalog records have changed or been deleted;
+unknown model, session, benchmark, and hardware values use stable `Unknown`
+labels. Scoreboard trends use `imported_at` and support overall, model, and
+import-batch grouping. Deleted entries and deleted batches follow the existing
+statistics selection rules, and scoreboard entries are never converted into
+BenchmarkRun records. Both families use deterministic series ordering and
+equal record weighting.
+
+Trend reports return populated buckets by default. An explicit
+`include_empty_buckets` option adds only empty buckets between the first and
+last populated bucket, with zero counts and unavailable numeric summaries;
+empty buckets never contribute to deltas and are never interpolated. Reports
+also expose per-series first/last populated buckets, bucket counts, record
+counts, time-range coverage, composition changes, and neutral warnings for
+sparse or non-overlapping series.
+
+`ReportingService` renders typed trend reports as Markdown and reuses the
+existing staged UTF-8 writer and structured overwrite statuses. Trend
+Markdown includes metadata, active filters, coverage/excluded-data notes,
+series summaries, chronological bucket tables, distributions, unavailable
+markers, and methodology. It never includes raw model output, prompts,
+attachments, HTML-dependent markup, significance claims, or causal claims.
+
+The screen-based CLI exposes a separate `Trends` menu for BenchmarkRun and
+historical ScoreboardEntry workflows. It keeps title, interval, grouping,
+filters, empty-bucket inclusion, detail-section inclusion, and destination in
+memory for the current session. Vertical selectors hide enum values and
+internal IDs. The CLI requests typed previews, presents their fields without
+recalculating metrics, and delegates Markdown rendering, staged writing, and
+overwrite confirmation to the existing reporting boundary. Rolling summaries
+and richer chart presentation are outside this foundation slice.
+
 ## Reporting CLI Integration
 
 The screen-based CLI exposes the reporting engine through `Data > Reports`.

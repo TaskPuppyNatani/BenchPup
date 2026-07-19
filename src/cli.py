@@ -40,7 +40,14 @@ from engine.reporting import (
     ScoreboardReportFilters,
     SessionReport,
 )
-from engine.statistics import BenchmarkStatisticsFilters, model_snapshot_name, normalize_model_identity
+from engine.statistics import (
+    BenchmarkStatisticsFilters,
+    ScoreboardStatisticsFilters,
+    TimeBucketGranularity,
+    model_snapshot_name,
+    normalize_model_identity,
+)
+from engine.trends import TrendGrouping, TrendReport, TrendService
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -153,6 +160,32 @@ class SessionComparisonOptions:
         return self.sessions
 
 
+@dataclass(frozen=True)
+class BenchmarkTrendOptions:
+    """Session-local options for historical BenchmarkRun trends."""
+
+    title: str = "Benchmark Run Trends"
+    interval: TimeBucketGranularity = TimeBucketGranularity.DAY
+    grouping: TrendGrouping = TrendGrouping.OVERALL
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    include_empty_buckets: bool = False
+    include_series_details: bool = False
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class ScoreboardTrendOptions:
+    """Session-local options for historical ScoreboardEntry trends."""
+
+    title: str = "Historical Scoreboard Trends"
+    interval: TimeBucketGranularity = TimeBucketGranularity.DAY
+    grouping: TrendGrouping = TrendGrouping.OVERALL
+    filters: ScoreboardStatisticsFilters = field(default_factory=ScoreboardStatisticsFilters)
+    include_empty_buckets: bool = False
+    include_series_details: bool = False
+    destination: str = ""
+
+
 REPORT_BENCHMARK_TYPE_LABELS = {
     "code_review": "Code review",
     "code_generation": "Code generation",
@@ -183,6 +216,7 @@ class TerminalApp:
         self.benchmarks = BenchmarkService(database, self.catalog)
         self.reporting = ReportingService(self.benchmarks, self.catalog)
         self.comparisons = ComparisonService(self.benchmarks, self.catalog)
+        self.trends = TrendService(self.benchmarks, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
         self.archives = ArchiveService(database)
@@ -195,6 +229,8 @@ class TerminalApp:
         self._hardware_report_options = HardwareReportOptions()
         self._model_comparison_options = ModelComparisonOptions()
         self._session_comparison_options = SessionComparisonOptions()
+        self._benchmark_trend_options = BenchmarkTrendOptions()
+        self._scoreboard_trend_options = ScoreboardTrendOptions()
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -314,6 +350,8 @@ class TerminalApp:
             "Markdown report": ("report.md", None),
             "Detailed Benchmark Run Report": ("benchmark-run-report.md", ".md"),
             "Historical Scoreboard Report": ("scoreboard-report.md", ".md"),
+            "Benchmark Run Trends": ("benchmark-run-trends.md", ".md"),
+            "Historical Scoreboard Trends": ("scoreboard-trends.md", ".md"),
             "Model Leaderboard": ("model-leaderboard.md", ".md"),
             "Model Comparison": ("model-comparison.md", ".md"),
             "Session Report": ("session-report.md", ".md"),
@@ -1591,8 +1629,9 @@ class TerminalApp:
         filters: BenchmarkStatisticsFilters,
         *,
         comparison_type: str,
+        clear_model: bool = True,
     ) -> BenchmarkStatisticsFilters:
-        """Configure comparison filters without moving selection logic into the CLI."""
+        """Configure shared BenchmarkRun filters for comparisons or trends."""
 
         while True:
             content = "\n".join((
@@ -1609,7 +1648,7 @@ class TerminalApp:
                 "B) Back",
                 "QA) Quit BenchPup completely",
             ))
-            self.render_screen("Comparison Filters", content)
+            self.render_screen("Comparison Filters" if clear_model else "Trend Filters", content)
             choice = self.ask("Choose an option", navigation=True)
             if isinstance(choice, NavigationSignal):
                 return filters
@@ -1637,8 +1676,9 @@ class TerminalApp:
                     hardware_profile_id=configured.hardware_profile_id,
                     include_run_ids=configured.include_run_ids,
                     exclude_run_ids=configured.exclude_run_ids,
-                    # Entity selection is handled by ComparisonService.
-                    model="",
+                    # Entity selection is handled by ComparisonService; trends
+                    # retain the optional model filter.
+                    model="" if clear_model else configured.model,
                 )
             elif command == "2":
                 start = self.ask("Created start (ISO date/time; blank clears)", navigation=True)
@@ -1676,6 +1716,249 @@ class TerminalApp:
                 filters = BenchmarkStatisticsFilters()
             else:
                 self.output("Choose a number from 1 to 6, or B to return.")
+
+    @staticmethod
+    def _trend_interval_label(value: TimeBucketGranularity | str) -> str:
+        active = value if isinstance(value, TimeBucketGranularity) else TimeBucketGranularity(str(value).strip().casefold())
+        return {
+            TimeBucketGranularity.DAY: "Day (UTC)",
+            TimeBucketGranularity.WEEK: "Week (UTC Monday start)",
+            TimeBucketGranularity.MONTH: "Month (UTC)",
+        }[active]
+
+    @staticmethod
+    def _trend_grouping_label(value: TrendGrouping | str) -> str:
+        active = value if isinstance(value, TrendGrouping) else TrendGrouping(str(value).strip().casefold().replace("-", "_").replace(" ", "_"))
+        return {
+            TrendGrouping.OVERALL: "Overall",
+            TrendGrouping.MODEL: "Model",
+            TrendGrouping.BENCHMARK: "Benchmark",
+            TrendGrouping.BENCHMARK_TYPE: "Benchmark type",
+            TrendGrouping.SESSION: "Session",
+            TrendGrouping.HARDWARE: "Hardware environment",
+            TrendGrouping.IMPORT_BATCH: "Import batch",
+        }[active]
+
+    def _trend_benchmark_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+    ) -> BenchmarkStatisticsFilters:
+        return self._comparison_filters_screen(
+            filters,
+            comparison_type="BenchmarkRun trends",
+            clear_model=False,
+        )
+
+    def _trend_scoreboard_filter_summary(self, filters: ScoreboardStatisticsFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.model:
+            values.append(f"Model text: {filters.model}")
+        if filters.batch_id is not None:
+            batch = self.catalog.scoreboard_import_batches.get(filters.batch_id)
+            values.append(f"Import batch: {batch.name if batch else 'Unavailable selection'}")
+        if filters.date_from:
+            values.append(f"Imported from: {filters.date_from}")
+        if filters.date_to:
+            values.append(f"Imported to: {filters.date_to}")
+        if filters.minimum_score is not None:
+            values.append(f"Minimum score: {filters.minimum_score:g}")
+        if filters.maximum_score is not None:
+            values.append(f"Maximum score: {filters.maximum_score:g}")
+        if filters.hallucination:
+            values.append(f"Hallucination: {filters.hallucination}")
+        if filters.consistency:
+            values.append(f"Consistency: {filters.consistency}")
+        if filters.reliability:
+            values.append(f"Reliability: {filters.reliability}")
+        if filters.include_deleted:
+            values.append("Deleted entries/batches: included")
+        return tuple(values or ("All non-deleted scoreboard entries",))
+
+    def _trend_scoreboard_filters_screen(
+        self,
+        filters: ScoreboardStatisticsFilters,
+    ) -> ScoreboardStatisticsFilters:
+        while True:
+            content = "\n".join((
+                f"1) Model text [{self._report_value(filters.model)}]",
+                f"2) Import batch [{self._report_value(filters.batch_id)}]",
+                f"3) Imported date range [{self._report_value(filters.date_from)} to {self._report_value(filters.date_to)}]",
+                f"4) Score range [{self._report_value(filters.minimum_score)} to {self._report_value(filters.maximum_score)}]",
+                f"5) Hallucination level [{self._report_value(filters.hallucination)}]",
+                f"6) Consistency [{self._report_value(filters.consistency)}]",
+                f"7) Reliability level [{self._report_value(filters.reliability)}]",
+                "8) Reset Trend Filters",
+                "",
+                *self._trend_scoreboard_filter_summary(filters),
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Trend Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Model text (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, model=value)
+            elif command == "2":
+                selected = self._report_catalog_choice(
+                    "Select Import Batch",
+                    self.catalog.scoreboard_import_batches.list(),
+                    lambda item: f"{item.name} ({item.source_file})",
+                    lambda item: item.id,
+                    filters.batch_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, batch_id=selected)
+            elif command == "3":
+                start = self.ask("Imported start (ISO date/time; blank clears)", navigation=True)
+                if isinstance(start, NavigationSignal):
+                    continue
+                end = self.ask("Imported end (ISO date/time; blank clears)", navigation=True)
+                if isinstance(end, NavigationSignal):
+                    continue
+                filters = replace(filters, date_from=start or None, date_to=end or None)
+            elif command == "4":
+                minimum = self.ask_float("Minimum score (blank clears)", navigation=True)
+                if isinstance(minimum, NavigationSignal):
+                    continue
+                maximum = self.ask_float("Maximum score (blank clears)", navigation=True)
+                if isinstance(maximum, NavigationSignal):
+                    continue
+                filters = replace(filters, minimum_score=minimum, maximum_score=maximum)
+            elif command in {"5", "6", "7"}:
+                field_name = {"5": "hallucination", "6": "consistency", "7": "reliability"}[command]
+                selected = self._report_vertical_choice(
+                    field_name.replace("_", " ").title(),
+                    [(level, level) for level in LEVELS],
+                    getattr(filters, field_name) or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, **{field_name: selected or ""})
+            elif command == "8":
+                filters = ScoreboardStatisticsFilters()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _benchmark_trend_options_screen(self, options: BenchmarkTrendOptions) -> BenchmarkTrendOptions:
+        interval_choices = [
+            (self._trend_interval_label(value), value)
+            for value in TimeBucketGranularity
+        ]
+        grouping_choices = [
+            (self._trend_grouping_label(value), value)
+            for value in (
+                TrendGrouping.OVERALL,
+                TrendGrouping.MODEL,
+                TrendGrouping.BENCHMARK,
+                TrendGrouping.BENCHMARK_TYPE,
+                TrendGrouping.SESSION,
+                TrendGrouping.HARDWARE,
+            )
+        ]
+        while True:
+            content = "\n".join((
+                f"1) Trend title [{options.title}]",
+                f"2) Interval [{self._trend_interval_label(options.interval)}]",
+                f"3) Grouping [{self._trend_grouping_label(options.grouping)}]",
+                "4) Configure filters",
+                f"5) Include empty buckets [{'Yes' if options.include_empty_buckets else 'No'}]",
+                f"6) Detailed series sections [{'Yes' if options.include_series_details else 'No'}]",
+                "7) Reset Trend Options",
+                "",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Benchmark Run Trend Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Trend title", navigation=True, default=options.title)
+                if isinstance(value, str) and value:
+                    options = replace(options, title=value)
+            elif command == "2":
+                selected = self._report_vertical_choice("Trend Interval", interval_choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, interval=selected)
+            elif command == "3":
+                selected = self._report_vertical_choice("BenchmarkRun Trend Grouping", grouping_choices, options.grouping)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, grouping=selected)
+            elif command == "4":
+                options = replace(options, filters=self._trend_benchmark_filters_screen(options.filters))
+            elif command in {"5", "6"}:
+                field_name = "include_empty_buckets" if command == "5" else "include_series_details"
+                label = "Include Empty Buckets" if command == "5" else "Detailed Series Sections"
+                value = self._configure_redaction_toggle(label, bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                options = BenchmarkTrendOptions()
+            else:
+                self.output("Choose a number from 1 to 7, or B to return.")
+
+    def _scoreboard_trend_options_screen(self, options: ScoreboardTrendOptions) -> ScoreboardTrendOptions:
+        interval_choices = [
+            (self._trend_interval_label(value), value)
+            for value in TimeBucketGranularity
+        ]
+        grouping_choices = [
+            (self._trend_grouping_label(value), value)
+            for value in (TrendGrouping.OVERALL, TrendGrouping.MODEL, TrendGrouping.IMPORT_BATCH)
+        ]
+        while True:
+            content = "\n".join((
+                f"1) Trend title [{options.title}]",
+                f"2) Interval [{self._trend_interval_label(options.interval)}]",
+                f"3) Grouping [{self._trend_grouping_label(options.grouping)}]",
+                "4) Configure filters",
+                f"5) Include empty buckets [{'Yes' if options.include_empty_buckets else 'No'}]",
+                f"6) Detailed series sections [{'Yes' if options.include_series_details else 'No'}]",
+                "7) Reset Trend Options",
+                "",
+                *self._trend_scoreboard_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Trend Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Trend title", navigation=True, default=options.title)
+                if isinstance(value, str) and value:
+                    options = replace(options, title=value)
+            elif command == "2":
+                selected = self._report_vertical_choice("Trend Interval", interval_choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, interval=selected)
+            elif command == "3":
+                selected = self._report_vertical_choice("Scoreboard Trend Grouping", grouping_choices, options.grouping)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, grouping=selected)
+            elif command == "4":
+                options = replace(options, filters=self._trend_scoreboard_filters_screen(options.filters))
+            elif command in {"5", "6"}:
+                field_name = "include_empty_buckets" if command == "5" else "include_series_details"
+                label = "Include Empty Buckets" if command == "5" else "Detailed Series Sections"
+                value = self._configure_redaction_toggle(label, bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                options = ScoreboardTrendOptions()
+            else:
+                self.output("Choose a number from 1 to 7, or B to return.")
 
     def _comparison_multi_select(
         self,
@@ -2249,7 +2532,7 @@ class TerminalApp:
 
     def _write_report_workflow(
         self,
-        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport | ModelComparisonResult | SessionComparisonResult,
+        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport | ModelComparisonResult | SessionComparisonResult | TrendReport,
         *,
         report_name: str,
         selection_lines: tuple[str, ...],
@@ -2955,6 +3238,281 @@ class TerminalApp:
 
         self.comparisons_screen()
 
+    def _trend_selection_lines(
+        self,
+        report: TrendReport,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        metadata = report.metadata
+        interval = self._trend_interval_label(options.interval)
+        grouping = self._trend_grouping_label(options.grouping)
+        filters = (
+            self._comparison_filter_summary(options.filters)
+            if isinstance(options, BenchmarkTrendOptions)
+            else self._trend_scoreboard_filter_summary(options.filters)
+        )
+        first_score = report.aggregate_series.first_available_score_summary
+        last_score = report.aggregate_series.last_available_score_summary
+        first_speed = report.aggregate_series.first_available_speed_summary
+        last_speed = report.aggregate_series.last_available_speed_summary
+        range_label = "Date range" if isinstance(options, BenchmarkTrendOptions) else "Import-date range"
+        return (
+            f"Contributing {'run' if isinstance(options, BenchmarkTrendOptions) else 'entry'} count: {metadata.contributing_record_count}",
+            f"Excluded missing/invalid timestamp count: {metadata.excluded_timestamp_count}",
+            f"Series count: {len(report.series)}",
+            f"Populated bucket count: {report.populated_bucket_count}",
+            f"{range_label}: {metadata.date_from or 'Not available'} to {metadata.date_to or 'Not available'}",
+            f"Interval: {interval}",
+            f"Grouping: {grouping}",
+            f"Filters: {'; '.join(filters)}",
+            f"First score mean: {self._report_number(first_score.mean if first_score else None)}",
+            f"Last score mean: {self._report_number(last_score.mean if last_score else None)}",
+            f"Score delta (last minus first): {self._report_number(report.aggregate_series.score_absolute_delta)}",
+            f"First speed mean: {self._report_number(first_speed.mean if first_speed else None)}",
+            f"Last speed mean: {self._report_number(last_speed.mean if last_speed else None)}",
+            f"Speed delta (last minus first): {self._report_number(report.aggregate_series.speed_absolute_delta)}",
+            f"Coverage warnings: {', '.join(report.coverage_warnings) if report.coverage_warnings else 'None'}",
+            f"Empty buckets: {'Included' if report.include_empty_buckets else 'Excluded'}",
+        )
+
+    def _trend_terminal_lines(
+        self,
+        report: TrendReport,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        lines = list(self._trend_selection_lines(report, options))
+        lines.extend(("", "Overall bucket preview:"))
+        if not report.aggregate_series.points:
+            lines.append("No valid timestamp buckets are represented.")
+        else:
+            for point in report.aggregate_series.points[:12]:
+                lines.append(
+                    f"{point.label or point.bucket_start} | records={point.record_count} "
+                    f"| scored={point.scored_count} "
+                    f"| score mean={self._report_number(point.overall_score.mean)} "
+                    f"| score median={self._report_number(point.overall_score.median)} "
+                    f"| speed mean={self._report_number(point.tokens_per_second.mean)}"
+                )
+            if len(report.aggregate_series.points) > 12:
+                lines.append(f"... plus {len(report.aggregate_series.points) - 12} more bucket(s).")
+        lines.extend(("", "Series deltas:"))
+        if not report.series:
+            lines.append("No grouped series are represented.")
+        else:
+            for series in report.series:
+                lines.append(
+                    f"{series.label} | records={series.total_contributing_records} "
+                    f"| score delta={self._report_number(series.score_absolute_delta)} "
+                    f"| speed delta={self._report_number(series.speed_absolute_delta)}"
+                )
+        return tuple(lines)
+
+    def _trend_template_options(
+        self,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> ReportTemplateOptions:
+        return ReportTemplateOptions(include_record_details=options.include_series_details)
+
+    def _benchmark_trend_screen(self, options: BenchmarkTrendOptions) -> BenchmarkTrendOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Trend Options",
+                "2) Preview Trend Selection",
+                "3) View Concise Terminal Trend",
+                "4) Write Markdown Trend Report",
+                "",
+                *self._comparison_filter_summary(options.filters),
+                f"Interval: {self._trend_interval_label(options.interval)}",
+                f"Grouping: {self._trend_grouping_label(options.grouping)}",
+                f"Include empty buckets: {'Yes' if options.include_empty_buckets else 'No'}",
+                f"Detailed series sections: {'Yes' if options.include_series_details else 'No'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Benchmark Run Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._benchmark_trend_options_screen(options)
+                continue
+            if command not in {"2", "3", "4"}:
+                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                continue
+            try:
+                report = self.trends.benchmark_run_trend(
+                    interval=options.interval,
+                    grouping=options.grouping,
+                    filters=options.filters,
+                    include_empty_buckets=options.include_empty_buckets,
+                    title=options.title,
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Benchmark Run Trends Failed", f"Could not build the trend report: {error}")
+                continue
+            selection_lines = self._trend_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Benchmark Run Trend Selection", selection_lines)
+                continue
+            if command == "3":
+                self._report_selection_preview("Benchmark Run Trend Preview", self._trend_terminal_lines(report, options))
+                continue
+            if report.contributing_record_count == 0:
+                self._report_empty_screen(
+                    "No BenchmarkRun Trend Data",
+                    selection_lines + (
+                        "No valid timestamped BenchmarkRun snapshots match the current trend options.",
+                    ),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Benchmark Run Trends",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._trend_template_options(options),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _scoreboard_trend_screen(self, options: ScoreboardTrendOptions) -> ScoreboardTrendOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Trend Options",
+                "2) Preview Trend Selection",
+                "3) View Concise Terminal Trend",
+                "4) Write Markdown Trend Report",
+                "",
+                *self._trend_scoreboard_filter_summary(options.filters),
+                f"Interval: {self._trend_interval_label(options.interval)}",
+                f"Grouping: {self._trend_grouping_label(options.grouping)}",
+                f"Include empty buckets: {'Yes' if options.include_empty_buckets else 'No'}",
+                f"Detailed series sections: {'Yes' if options.include_series_details else 'No'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._scoreboard_trend_options_screen(options)
+                continue
+            if command not in {"2", "3", "4"}:
+                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                continue
+            try:
+                report = self.trends.scoreboard_entry_trend(
+                    interval=options.interval,
+                    grouping=options.grouping,
+                    filters=options.filters,
+                    include_empty_buckets=options.include_empty_buckets,
+                    title=options.title,
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Scoreboard Trends Failed", f"Could not build the trend report: {error}")
+                continue
+            selection_lines = self._trend_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Historical Scoreboard Trend Selection", selection_lines)
+                continue
+            if command == "3":
+                self._report_selection_preview("Historical Scoreboard Trend Preview", self._trend_terminal_lines(report, options))
+                continue
+            if report.contributing_record_count == 0:
+                self._report_empty_screen(
+                    "No Scoreboard Trend Data",
+                    selection_lines + (
+                        "No valid timestamped ScoreboardEntry records match the current trend options.",
+                    ),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Historical Scoreboard Trends",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._trend_template_options(options),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _trend_options_lines(
+        self,
+        benchmark: BenchmarkTrendOptions,
+        scoreboard: ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        return (
+            "Benchmark Run Trends",
+            f"  Title: {benchmark.title}",
+            f"  Interval: {self._trend_interval_label(benchmark.interval)}",
+            f"  Grouping: {self._trend_grouping_label(benchmark.grouping)}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(benchmark.filters))}",
+            f"  Empty buckets: {'Included' if benchmark.include_empty_buckets else 'Excluded'}",
+            f"  Detailed series sections: {'Included' if benchmark.include_series_details else 'Excluded'}",
+            f"  Destination: {self._report_value(benchmark.destination)}",
+            "",
+            "Historical Scoreboard Trends",
+            f"  Title: {scoreboard.title}",
+            f"  Interval: {self._trend_interval_label(scoreboard.interval)}",
+            f"  Grouping: {self._trend_grouping_label(scoreboard.grouping)}",
+            f"  Filters: {'; '.join(self._trend_scoreboard_filter_summary(scoreboard.filters))}",
+            f"  Empty buckets: {'Included' if scoreboard.include_empty_buckets else 'Excluded'}",
+            f"  Detailed series sections: {'Included' if scoreboard.include_series_details else 'Excluded'}",
+            f"  Destination: {self._report_value(scoreboard.destination)}",
+            "",
+            "Overwrite: explicit confirmation is required for an existing file.",
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        )
+
+    def trends_screen(self) -> None:
+        """Navigate UI-independent BenchmarkRun and ScoreboardEntry trends."""
+
+        benchmark_options = self._benchmark_trend_options
+        scoreboard_options = self._scoreboard_trend_options
+        while True:
+            content = "\n".join((
+                "1) Benchmark Run Trends",
+                "2) Historical Scoreboard Trends",
+                "3) View Current Trend Options",
+                "",
+                "Trend options are session-local and never written to SQLite.",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                self._benchmark_trend_options = benchmark_options
+                self._scoreboard_trend_options = scoreboard_options
+                return
+            command = self.normalized(choice)
+            if command == "1":
+                benchmark_options = self._benchmark_trend_screen(benchmark_options)
+                self._benchmark_trend_options = benchmark_options
+            elif command == "2":
+                scoreboard_options = self._scoreboard_trend_screen(scoreboard_options)
+                self._scoreboard_trend_options = scoreboard_options
+            elif command == "3":
+                self.render_screen("Current Trend Options", "\n".join(self._trend_options_lines(benchmark_options, scoreboard_options)))
+                self.ask("Choose an option", navigation=True)
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def trend_screen(self) -> None:
+        """Compatibility alias for callers using the singular screen name."""
+
+        self.trends_screen()
+
     def reporting_screen(self) -> None:
         """Navigate report workflows while keeping configuration in memory only."""
 
@@ -3600,7 +4158,7 @@ class TerminalApp:
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
-        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n17) Reports\n18) Comparisons\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n17) Reports\n18) Comparisons\n19) Trends\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
 
     def run(self) -> None:
         try:
@@ -3623,6 +4181,7 @@ class TerminalApp:
             "16": "dataset", "dataset": "dataset",
             "17": "reports", "report": "reports", "reports": "reports", "reporting": "reports",
             "18": "comparisons", "comparison": "comparisons", "comparisons": "comparisons",
+            "19": "trends", "trend": "trends", "trends": "trends",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -3654,6 +4213,7 @@ class TerminalApp:
                 elif command == "dataset": self.dataset_builder_screen()
                 elif command == "reports": self.reporting_screen()
                 elif command == "comparisons": self.comparisons_screen()
+                elif command == "trends": self.trends_screen()
                 elif command == "settings": self.settings_screen()
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")
