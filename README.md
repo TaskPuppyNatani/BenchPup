@@ -12,12 +12,13 @@ Completed:
 
 - interactive screen-based CLI
 - CSV and hardware-profile imports
-- scoreboard browsing and standalone HTML reporting
+- scoreboard browsing, legacy HTML viewing, and standalone HTML analytics
 - JSON backup and restore
 - curated JSONL Dataset Builder with filters, redaction, manifests, and validation
+- descriptive statistics, model/session comparisons, and UTC trend reports
 
-Next: reporting enhancements, statistics, leaderboards, and model comparisons.
-The PySide6 GUI follows those engine/reporting phases.
+Phase 4 reporting and analytics are complete. Next: the PySide6 GUI, which
+will reuse the existing engine/reporting boundaries.
 
 ## Quick Start
 

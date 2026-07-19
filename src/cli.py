@@ -8,10 +8,10 @@ import os
 import re
 import sys
 import webbrowser
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping, TypeAlias, TypedDict, cast
+from typing import Any, Callable, Mapping, Sequence, TypeAlias, TypedDict, cast
 from prompt_toolkit import prompt as toolkit_prompt
 from prompt_toolkit.completion import PathCompleter
 
@@ -26,6 +26,29 @@ from engine.archive import ArchiveError, ArchiveService, TABLES
 from engine.prompt_file_importer import PromptFileError, decode_prompt_file, prompt_preview
 from engine.settings import DefaultWorkingDirectorySettings
 from engine.datasets import DatasetBuilder, DatasetFilters, DatasetWriteResult, DatasetWriteStatus, RedactionConfig
+from engine.comparisons import ComparisonService, ModelComparisonResult, SessionComparisonResult
+from engine.html_reporting import AnalyticsSourceFamily, HtmlAnalyticsReport, HtmlAnalyticsReportOptions
+from engine.reporting import (
+    BenchmarkReportFilters,
+    BenchmarkRunReport,
+    HardwareReport,
+    ModelLeaderboardReport,
+    ReportWriteResult,
+    ReportWriteStatus,
+    ReportTemplateOptions,
+    ReportingService,
+    ScoreboardReport,
+    ScoreboardReportFilters,
+    SessionReport,
+)
+from engine.statistics import (
+    BenchmarkStatisticsFilters,
+    ScoreboardStatisticsFilters,
+    TimeBucketGranularity,
+    model_snapshot_name,
+    normalize_model_identity,
+)
+from engine.trends import TrendGrouping, TrendReport, TrendService
 
 class NavigationSignal:
     """Typed sentinel for returning from a prompt without accepting input."""
@@ -47,6 +70,129 @@ class AttachmentDraft(TypedDict):
     file_path: str
     original_filename: str
     notes: str
+
+
+@dataclass(frozen=True)
+class BenchmarkReportOptions:
+    """Session-local options for detailed benchmark-run reports."""
+
+    title: str = "Benchmark Run Report"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class ScoreboardReportOptions:
+    """Session-local options for historical scoreboard reports."""
+
+    title: str = "Historical Scoreboard Report"
+    filters: ScoreboardReportFilters = field(default_factory=ScoreboardReportFilters)
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class LeaderboardReportOptions:
+    """Session-local options for model leaderboard reports."""
+
+    title: str = "Model Leaderboard"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_model_details: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class SessionReportOptions:
+    """Session-local options for one session report."""
+
+    title: str = "Session Report"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class HardwareReportOptions:
+    """Session-local options for historical hardware reports."""
+
+    title: str = "Hardware Report"
+    filters: BenchmarkReportFilters = field(default_factory=BenchmarkReportFilters)
+    include_prompt_text: bool = False
+    include_raw_model_output: bool = False
+    include_attachment_metadata: bool = False
+    include_hardware_details: bool = False
+    template_id: str = "standard"
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class ModelComparisonOptions:
+    """Session-local options for a snapshot-based model comparison."""
+
+    title: str = "Model Comparison"
+    models: tuple[str, ...] = ()
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    destination: str = ""
+
+    @property
+    def selected_models(self) -> tuple[str, ...]:
+        return self.models
+
+
+@dataclass(frozen=True)
+class SessionComparisonOptions:
+    """Session-local options for a session comparison."""
+
+    title: str = "Session Comparison"
+    sessions: tuple[int, ...] = ()
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    destination: str = ""
+
+    @property
+    def selected_sessions(self) -> tuple[int, ...]:
+        return self.sessions
+
+
+@dataclass(frozen=True)
+class BenchmarkTrendOptions:
+    """Session-local options for historical BenchmarkRun trends."""
+
+    title: str = "Benchmark Run Trends"
+    interval: TimeBucketGranularity = TimeBucketGranularity.DAY
+    grouping: TrendGrouping = TrendGrouping.OVERALL
+    filters: BenchmarkStatisticsFilters = field(default_factory=BenchmarkStatisticsFilters)
+    include_empty_buckets: bool = False
+    include_series_details: bool = False
+    destination: str = ""
+
+
+@dataclass(frozen=True)
+class ScoreboardTrendOptions:
+    """Session-local options for historical ScoreboardEntry trends."""
+
+    title: str = "Historical Scoreboard Trends"
+    interval: TimeBucketGranularity = TimeBucketGranularity.DAY
+    grouping: TrendGrouping = TrendGrouping.OVERALL
+    filters: ScoreboardStatisticsFilters = field(default_factory=ScoreboardStatisticsFilters)
+    include_empty_buckets: bool = False
+    include_series_details: bool = False
+    destination: str = ""
+
+
+REPORT_BENCHMARK_TYPE_LABELS = {
+    "code_review": "Code review",
+    "code_generation": "Code generation",
+    "revision": "Revision",
+    "review_the_review": "Review the review",
+}
 BACK_WORDS = {"b", "back"}
 CANCEL_WORDS = {"c", "cancel"}
 QUIT_WORDS = {"q", "quit", "exit"}
@@ -69,11 +215,24 @@ class TerminalApp:
         database.migrate()
         self.catalog = CatalogService(database)
         self.benchmarks = BenchmarkService(database, self.catalog)
+        self.reporting = ReportingService(self.benchmarks, self.catalog)
+        self.comparisons = ComparisonService(self.benchmarks, self.catalog)
+        self.trends = TrendService(self.benchmarks, self.catalog)
         self.importer = CsvImportService(self.benchmarks)
         self.hardware_importers = HardwareImporterRegistry()
         self.archives = ArchiveService(database)
         self.datasets = DatasetBuilder(self.benchmarks, benchpup_version=APP_VERSION, schema_version=max(version for version, _ in MIGRATIONS))
         self.settings = DefaultWorkingDirectorySettings(database_path)
+        self._benchmark_report_options = BenchmarkReportOptions()
+        self._scoreboard_report_options = ScoreboardReportOptions()
+        self._leaderboard_report_options = LeaderboardReportOptions()
+        self._session_report_options = SessionReportOptions()
+        self._hardware_report_options = HardwareReportOptions()
+        self._html_analytics_options = HtmlAnalyticsReportOptions()
+        self._model_comparison_options = ModelComparisonOptions()
+        self._session_comparison_options = SessionComparisonOptions()
+        self._benchmark_trend_options = BenchmarkTrendOptions()
+        self._scoreboard_trend_options = ScoreboardTrendOptions()
         self.input, self.output = input_fn, output_fn
         self.interactive_input = input_fn is input
         self.last_used: dict[str, int | None] = {"session": None, "model": None, "benchmark": None, "prompt": None, "hardware": None}
@@ -191,6 +350,16 @@ class TerminalApp:
             "Benchmark Runs CSV": ("benchmark_runs.csv", None),
             "JSONL training data": ("training_data.jsonl", None),
             "Markdown report": ("report.md", None),
+            "Detailed Benchmark Run Report": ("benchmark-run-report.md", ".md"),
+            "Historical Scoreboard Report": ("scoreboard-report.md", ".md"),
+            "Benchmark Run Trends": ("benchmark-run-trends.md", ".md"),
+            "Historical Scoreboard Trends": ("scoreboard-trends.md", ".md"),
+            "Model Leaderboard": ("model-leaderboard.md", ".md"),
+            "Model Comparison": ("model-comparison.md", ".md"),
+            "Session Report": ("session-report.md", ".md"),
+            "Session Comparison": ("session-comparison.md", ".md"),
+            "Hardware Report": ("hardware-report.md", ".md"),
+            "HTML Analytics Report": ("benchpup-analytics.html", ".html"),
             "BenchPup Backup": ("benchpup-backup.json", ".json"),
             "JSONL Dataset": ("dataset.jsonl", ".jsonl"),
         }
@@ -1226,12 +1395,15 @@ class TerminalApp:
             self.output(f"Import cancelled: {error}. No rows were written.")
 
     def export_screen(self) -> None:
-        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n\nB) Back\nQA) Quit BenchPup completely")
+        self.render_screen("Export", "1) Benchmark Runs CSV\n2) Scoreboard CSV\n3) JSONL Training Data\n4) Markdown Report\n5) Scoreboard HTML\n6) HTML Analytics Report\n\nB) Back\nQA) Quit BenchPup completely")
         choice = self.ask("Choose an option", navigation=True)
         if choice in (BACK, CANCEL, MAIN): return
+        if self.normalized(str(choice)) == "6":
+            self._html_analytics_options = self._html_analytics_screen(self._html_analytics_options)
+            return
         exporters = {"1": ("Benchmark Runs CSV", export_benchmark_runs_csv), "2": ("Scoreboard CSV", export_scoreboard_csv), "3": ("JSONL training data", export_jsonl_training_data), "4": ("Markdown report", export_combined_markdown), "5": ("Scoreboard HTML", export_scoreboard_html)}
         selected = exporters.get(self.normalized(str(choice)))
-        if not selected: self.output("Choose 1, 2, 3, 4, or 5."); return
+        if not selected: self.output("Choose 1, 2, 3, 4, 5, or 6."); return
         path = self.prompt_path(f"Destination for {selected[0]}", preserve_trailing_separator=True)
         if path is None: return
         if path in (BACK, CANCEL, MAIN): return
@@ -1250,6 +1422,2519 @@ class TerminalApp:
                 webbrowser.open(Path(saved).resolve().as_uri())
             except OSError as error:
                 self.output(f"Could not open HTML report: {error}")
+
+    @staticmethod
+    def _html_analytics_source_label(value: AnalyticsSourceFamily | str) -> str:
+        source = value.value if isinstance(value, AnalyticsSourceFamily) else str(value)
+        return {
+            AnalyticsSourceFamily.BENCHMARK_RUNS.value: "Benchmark Runs",
+            AnalyticsSourceFamily.SCOREBOARD.value: "Historical Scoreboard",
+            AnalyticsSourceFamily.COMBINED.value: "Combined dashboard",
+        }.get(source, source)
+
+    def _html_analytics_source_choice(
+        self,
+        current: AnalyticsSourceFamily | str,
+    ) -> AnalyticsSourceFamily | NavigationSignal:
+        choices = [
+            ("Benchmark Runs", AnalyticsSourceFamily.BENCHMARK_RUNS),
+            ("Historical Scoreboard", AnalyticsSourceFamily.SCOREBOARD),
+            ("Combined dashboard (separate source-family sections)", AnalyticsSourceFamily.COMBINED),
+        ]
+        selected = self._report_vertical_choice("HTML Analytics Source", choices, current)
+        if isinstance(selected, NavigationSignal):
+            return selected
+        return selected if isinstance(selected, AnalyticsSourceFamily) else AnalyticsSourceFamily.BENCHMARK_RUNS
+
+    def _html_analytics_benchmark_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+    ) -> BenchmarkStatisticsFilters:
+        """Reuse the existing catalog/snapshot filter screen for analytics."""
+
+        base = BenchmarkReportFilters(
+            benchmark_type=filters.benchmark_type,
+            benchmark=filters.benchmark,
+            session_id=filters.session_id,
+            session=filters.session,
+            hardware_profile_id=filters.hardware_profile_id,
+            hardware=filters.hardware,
+            model=filters.model,
+            include_run_ids=filters.include_run_ids,
+            exclude_run_ids=filters.exclude_run_ids,
+            include_deleted=filters.include_deleted,
+        )
+        updated = self._report_filters_screen(base)
+        return replace(
+            filters,
+            benchmark_type=updated.benchmark_type,
+            benchmark=updated.benchmark,
+            session_id=updated.session_id,
+            session=updated.session,
+            hardware_profile_id=updated.hardware_profile_id,
+            hardware=updated.hardware,
+            model=updated.model,
+            include_run_ids=updated.include_run_ids,
+            exclude_run_ids=updated.exclude_run_ids,
+            include_deleted=updated.include_deleted,
+        )
+
+    def _html_analytics_scoreboard_filters_screen(
+        self,
+        filters: ScoreboardStatisticsFilters,
+    ) -> ScoreboardStatisticsFilters:
+        while True:
+            batch = self.catalog.scoreboard_import_batches.get(filters.batch_id) if filters.batch_id is not None else None
+            content = "\n".join((
+                f"1) Scoreboard Import Batch [{batch.name if batch else ('Unavailable selection' if filters.batch_id is not None else 'Not set')} ]",
+                f"2) Model Text Filter [{self._report_value(filters.model)}]",
+                "3) Reset Scoreboard Filters",
+                "",
+                f"Active: {self._report_value(filters.model) if filters.model else 'All non-deleted scoreboard entries'}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Scoreboard Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._report_catalog_choice(
+                    "Select Analytics Import Batch",
+                    self.catalog.scoreboard_import_batches.list(),
+                    lambda item: f"{item.name} ({item.source_file})",
+                    lambda item: item.id,
+                    filters.batch_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, batch_id=selected)
+            elif command == "2":
+                value = self.ask("Model text filter (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, model=value)
+            elif command == "3":
+                filters = ScoreboardStatisticsFilters()
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def _html_analytics_sections_screen(
+        self,
+        options: HtmlAnalyticsReportOptions,
+    ) -> HtmlAnalyticsReportOptions:
+        toggles = (
+            ("3", "include_detailed_tables", "Detailed tables"),
+            ("4", "include_model_quality_chart", "Model quality/score chart"),
+            ("5", "include_speed_chart", "Speed charts"),
+            ("6", "include_score_distribution", "Score distributions"),
+            ("7", "include_categorical_distributions", "Categorical distributions"),
+            ("8", "include_trends", "Trend charts"),
+            ("9", "include_hardware_summary", "Hardware summary"),
+            ("10", "compact_layout", "Compact layout"),
+        )
+        while True:
+            lines = [
+                f"1) Source [{self._html_analytics_source_label(options.source_family)}]",
+                "2) Report Title",
+            ]
+            lines.extend(
+                f"{number}) {label} [{'Yes' if bool(getattr(options, field_name)) else 'No'}]"
+                for number, field_name, label in toggles
+            )
+            lines.extend(("11) Reset presentation options", "", "B) Back", "QA) Quit BenchPup completely"))
+            self.render_screen("HTML Analytics Sections", "\n".join(lines))
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._html_analytics_source_choice(cast(AnalyticsSourceFamily, options.source_family))
+                if not isinstance(selected, NavigationSignal):
+                    options = replace(
+                        options,
+                        source_family=selected,
+                        include_benchmark_run_dashboard=None,
+                        include_scoreboard_dashboard=None,
+                    )
+            elif command == "2":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command in {number for number, _, _ in toggles}:
+                field_name = next(field_name for number, field_name, _ in toggles if number == command)
+                value = self._configure_redaction_toggle(str(next(label for number, _, label in toggles if number == command)), bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "11":
+                options = HtmlAnalyticsReportOptions(source_family=options.source_family)
+            else:
+                self.output("Choose a number from 1 to 11, or B to return.")
+
+    def _html_analytics_options_screen(
+        self,
+        options: HtmlAnalyticsReportOptions,
+    ) -> HtmlAnalyticsReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Presentation and Source [{self._html_analytics_source_label(options.source_family)}]",
+                "2) Benchmark Run Filters",
+                "3) Scoreboard Filters",
+                f"4) Trend Interval [{self._trend_interval_label(options.interval)}]",
+                "5) Reset All Analytics Options",
+                "",
+                f"Title: {options.title}",
+                f"Detailed tables: {'Included' if options.include_detailed_tables else 'Excluded'}",
+                f"Quality charts: {'Included' if options.include_model_quality_chart else 'Excluded'}",
+                f"Speed charts: {'Included' if options.include_speed_chart else 'Excluded'}",
+                f"Score distributions: {'Included' if options.include_score_distribution else 'Excluded'}",
+                f"Categorical distributions: {'Included' if options.include_categorical_distributions else 'Excluded'}",
+                f"Trends: {'Included' if options.include_trends else 'Excluded'}",
+                f"Hardware summary: {'Included' if options.include_hardware_summary else 'Excluded'}",
+                f"Compact layout: {'Enabled' if options.compact_layout else 'Disabled'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._html_analytics_sections_screen(options)
+            elif command == "2":
+                options = replace(options, benchmark_filters=self._html_analytics_benchmark_filters_screen(options.benchmark_filters))
+            elif command == "3":
+                options = replace(options, scoreboard_filters=self._html_analytics_scoreboard_filters_screen(options.scoreboard_filters))
+            elif command == "4":
+                choices = [
+                    ("Day", TimeBucketGranularity.DAY),
+                    ("Week", TimeBucketGranularity.WEEK),
+                    ("Month", TimeBucketGranularity.MONTH),
+                ]
+                selected = self._report_vertical_choice("HTML Analytics Trend Interval", choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, trend_interval=selected)
+            elif command == "5":
+                options = HtmlAnalyticsReportOptions(source_family=options.source_family)
+            else:
+                self.output("Choose a number from 1 to 5, or B to return.")
+
+    def _html_analytics_selection_lines(
+        self,
+        report: HtmlAnalyticsReport,
+        options: HtmlAnalyticsReportOptions,
+    ) -> tuple[str, ...]:
+        lines: list[str] = [
+            f"Report title: {report.title}",
+            f"Source: {self._html_analytics_source_label(report.source_family)}",
+            f"Generated at: {report.generated_at}",
+        ]
+        for dashboard in report.dashboards:
+            metadata = dashboard.metadata
+            lines.extend((
+                "",
+                f"{dashboard.title} ({dashboard.source_record_family})",
+                f"  Contributing records: {metadata.contributing_record_count}",
+                f"  Scored records: {metadata.scored_record_count}",
+                f"  Models: {', '.join(metadata.represented_models) or 'None represented'}",
+                f"  Benchmarks: {', '.join(metadata.represented_benchmarks) or 'None represented'}",
+                f"  Sessions: {', '.join(metadata.represented_sessions) or 'None represented'}",
+                f"  Hardware: {', '.join(metadata.represented_hardware_environments) or 'None represented'}",
+                f"  Import batches: {', '.join(metadata.represented_import_batches) or 'None represented'}",
+                f"  Date range: {metadata.date_range[0] or 'Unavailable'} to {metadata.date_range[1] or 'Unavailable'}",
+                f"  Included charts: {', '.join(chart.title for chart in dashboard.charts) or 'None'}",
+                f"  Omitted charts: {', '.join(f'{item.title} ({item.reason})' for item in dashboard.omitted_charts) or 'None'}",
+                f"  Active filters: {'; '.join(f'{key}={value}' for key, value in metadata.active_filters.items()) or 'None'}",
+                f"  Coverage warnings: {'; '.join(metadata.coverage_warnings) or 'None'}",
+            ))
+        if not report.dashboards:
+            lines.append("No dashboards were selected.")
+        lines.extend((
+            "",
+            f"Detailed tables: {'Included' if options.include_detailed_tables else 'Excluded'}",
+            "Missing values remain unavailable; the report never treats them as zero.",
+        ))
+        return tuple(lines)
+
+    def _html_analytics_write_result_screen(self, result: ReportWriteResult) -> None:
+        if result.status is ReportWriteStatus.SUCCESS:
+            title = "HTML Analytics Write Complete"
+            explanation = "The standalone HTML analytics report was staged and finalized successfully."
+        elif result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            title = "HTML Analytics Write Requires Confirmation"
+            explanation = "The destination already exists; no replacement was written."
+        elif result.status is ReportWriteStatus.TEMP_WRITE_FAILED:
+            title = "HTML Analytics Temporary Write Failed"
+            explanation = "The report could not be staged; the final destination was not replaced."
+        elif result.status is ReportWriteStatus.FINALIZE_FAILED:
+            title = "HTML Analytics Finalization Failed"
+            explanation = "The staged report could not be finalized; inspect the destination before retrying."
+        else:
+            title = "HTML Analytics Write Failed"
+            explanation = "The HTML analytics writer returned an unrecognized failure status."
+        lines = [explanation, "", f"Status: {result.status.value}", f"Path: {result.path}"]
+        if result.message:
+            lines.append(f"Message: {result.message}")
+        if result.details:
+            lines.append(f"Details: {result.details}")
+        lines.extend(("", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        self.ask("Choose an option", navigation=True)
+
+    def _write_html_analytics_workflow(
+        self,
+        report: HtmlAnalyticsReport,
+        options: HtmlAnalyticsReportOptions,
+    ) -> str | None:
+        selection_lines = self._html_analytics_selection_lines(report, options)
+        self.render_screen("HTML Analytics Selection", "\n".join(selection_lines))
+        path = self.prompt_path(
+            "HTML Analytics destination",
+            default=str(options.output_path) if options.output_path else None,
+            preserve_trailing_separator=True,
+        )
+        if not isinstance(path, str):
+            return None
+        output_path = self.prepare_export_destination(path, "HTML Analytics Report")
+        if not isinstance(output_path, Path):
+            return None
+        self.render_screen(
+            "Confirm HTML Analytics Report",
+            "\n".join((*selection_lines, "", f"Destination: {output_path}", "The report will be written as one staged UTF-8 HTML file.", "", "Write this report?", "B) Back", "QA) Quit BenchPup completely")),
+        )
+        confirm = self.yes_no("Confirm HTML Analytics Report", navigation=True)
+        if confirm is not True:
+            return None
+        try:
+            result = self.reporting.write_html_analytics_report(report, output_path)
+        except (OSError, ValueError) as error:
+            self._report_error_screen("HTML Analytics Failed", f"Report generation or writing failed: {error}")
+            return str(output_path)
+        if result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            self.render_screen(
+                "Confirm HTML Analytics Overwrite",
+                f"An existing report is at:\n{output_path}\n\nReplace it only after staged validation?\n\nB) Back\nQA) Quit BenchPup completely",
+            )
+            overwrite = self.yes_no("Replace existing HTML analytics report", navigation=True)
+            if overwrite is True:
+                try:
+                    result = self.reporting.write_html_analytics_report(report, output_path, overwrite=True)
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("HTML Analytics Overwrite Failed", f"Report overwrite failed: {error}")
+                    return str(output_path)
+            elif isinstance(overwrite, NavigationSignal):
+                return None
+        self._html_analytics_write_result_screen(result)
+        return str(output_path)
+
+    def _html_analytics_screen(self, options: HtmlAnalyticsReportOptions) -> HtmlAnalyticsReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure HTML Analytics",
+                "2) Preview Typed Analytics",
+                "3) Write Standalone HTML Analytics",
+                "",
+                f"Source: {self._html_analytics_source_label(options.source_family)}",
+                f"Trend interval: {self._trend_interval_label(options.interval)}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("HTML Analytics Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._html_analytics_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.html_analytics_report(options=options)
+            except (OSError, ValueError) as error:
+                self._report_error_screen("HTML Analytics Failed", f"Could not build the analytics report: {error}")
+                continue
+            selection_lines = self._html_analytics_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("HTML Analytics Preview", selection_lines)
+                continue
+            if not report.dashboards:
+                self._report_empty_screen("No Analytics Dashboards", selection_lines + ("No dashboard source was selected.",))
+                continue
+            destination = self._write_html_analytics_workflow(report, options)
+            if destination is not None:
+                options = replace(options, output_destination=destination, destination=destination)
+
+    @staticmethod
+    def _report_value(value: object) -> str:
+        if value is None or value == "" or value == frozenset():
+            return "Not set"
+        if isinstance(value, bool):
+            return "Enabled" if value else "Disabled"
+        return str(value)
+
+    @staticmethod
+    def _report_number(value: float | int | None) -> str:
+        if value is None:
+            return "Not available"
+        return f"{value:g}" if isinstance(value, float) else str(value)
+
+    @staticmethod
+    def _report_benchmark_type_label(value: str) -> str:
+        return REPORT_BENCHMARK_TYPE_LABELS.get(value, value)
+
+    def _report_vertical_choice(
+        self,
+        title: str,
+        choices: list[tuple[str, Any]],
+        current: Any,
+    ) -> Any | None | NavigationSignal:
+        current_label = next((label for label, value in choices if value == current), self._report_value(current))
+        lines = [f"Current: {current_label}", ""]
+        if choices:
+            lines.extend(f"{number}) {label}" for number, (label, _) in enumerate(choices, start=1))
+        else:
+            lines.append("No catalog records are available.")
+        clear_number = len(choices) + 1
+        lines.extend((f"{clear_number}) Clear filter", "", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        while True:
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return choice
+            command = self.normalized(choice)
+            if command.isdigit() and 1 <= int(command) <= len(choices):
+                return choices[int(command) - 1][1]
+            if command == str(clear_number):
+                return None
+            self.output(f"Choose a number from 1 to {clear_number}, or B to return.")
+
+    def _report_catalog_choice(
+        self,
+        title: str,
+        items: list[Any],
+        label: Callable[[Any], str],
+        value: Callable[[Any], Any],
+        current: Any,
+    ) -> Any | None | NavigationSignal:
+        choices = [(label(item), value(item)) for item in items if value(item) is not None]
+        return self._report_vertical_choice(title, choices, current)
+
+    def _report_filter_summary(self, filters: BenchmarkReportFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.benchmark_type:
+            values.append(f"Benchmark type: {self._report_benchmark_type_label(filters.benchmark_type)}")
+        if filters.benchmark:
+            values.append(f"Benchmark: {filters.benchmark}")
+        if filters.session_id is not None:
+            session = self.catalog.sessions.get(filters.session_id)
+            values.append(f"Session: {session.title if session else 'Unavailable selection'}")
+        elif filters.session:
+            values.append(f"Session text: {filters.session}")
+        if filters.hardware_profile_id is not None:
+            hardware = self.catalog.hardware_profiles.get(filters.hardware_profile_id)
+            values.append(f"Hardware profile: {hardware.name if hardware else 'Unavailable selection'}")
+        elif filters.hardware:
+            values.append(f"Hardware snapshot: {filters.hardware}")
+        if filters.model:
+            values.append(f"Model: {filters.model}")
+        return tuple(values or ("All non-deleted benchmark runs",))
+
+    def _report_scoreboard_filter_summary(self, filters: ScoreboardReportFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.batch_id is not None:
+            batch = self.catalog.scoreboard_import_batches.get(filters.batch_id)
+            values.append(f"Import batch: {batch.name if batch else 'Unavailable selection'}")
+        if filters.model:
+            values.append(f"Model text: {filters.model}")
+        return tuple(values or ("All non-deleted scoreboard entries",))
+
+    def _report_filters_screen(self, filters: BenchmarkReportFilters) -> BenchmarkReportFilters:
+        benchmark_type_choices = [
+            (self._report_benchmark_type_label(value), value)
+            for value in BENCHMARK_TYPES
+        ]
+        while True:
+            active = "; ".join(self._report_filter_summary(filters))
+            session = self.catalog.sessions.get(filters.session_id) if filters.session_id is not None else None
+            hardware = self.catalog.hardware_profiles.get(filters.hardware_profile_id) if filters.hardware_profile_id is not None else None
+            content = "\n".join((
+                f"1) Benchmark Type [{self._report_benchmark_type_label(filters.benchmark_type) if filters.benchmark_type else 'Not set'}]",
+                f"2) Benchmark [{self._report_value(filters.benchmark)}]",
+                f"3) Benchmark Snapshot Text [{self._report_value(filters.benchmark if filters.benchmark else '')}]",
+                f"4) Session [{session.title if session else ('Unavailable selection' if filters.session_id is not None else 'Not set')}]",
+                f"5) Hardware Profile [{hardware.name if hardware else ('Unavailable selection' if filters.hardware_profile_id is not None else 'Not set')}]",
+                f"6) Hardware Snapshot Text [{self._report_value(filters.hardware)}]",
+                f"7) Model Profile [{self._report_value(filters.model)}]",
+                f"8) Model Snapshot Text [{self._report_value(filters.model)}]",
+                "9) Reset Selection Filters",
+                "",
+                f"Active: {active}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Report Selection Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._report_vertical_choice("Benchmark Type", benchmark_type_choices, filters.benchmark_type or None)
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, benchmark_type=selected or "")
+            elif command == "2":
+                selected = self._report_catalog_choice(
+                    "Select Benchmark",
+                    self.catalog.benchmark_definitions.list(),
+                    lambda item: f"{item.name} ({item.file_path})",
+                    lambda item: item.name,
+                    filters.benchmark or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, benchmark=selected or "")
+            elif command == "3":
+                value = self.ask("Benchmark snapshot text (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, benchmark=value)
+            elif command == "4":
+                selected = self._report_catalog_choice(
+                    "Select Session",
+                    self.catalog.sessions.list(),
+                    lambda item: item.title,
+                    lambda item: item.id,
+                    filters.session_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, session_id=selected)
+            elif command == "5":
+                selected = self._report_catalog_choice(
+                    "Select Hardware Profile",
+                    self.catalog.hardware_profiles.list(),
+                    lambda item: item.name,
+                    lambda item: item.id,
+                    filters.hardware_profile_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, hardware_profile_id=selected, hardware="")
+            elif command == "6":
+                value = self.ask("Hardware snapshot text (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, hardware_profile_id=None, hardware=value)
+            elif command == "7":
+                selected = self._report_catalog_choice(
+                    "Select Model",
+                    self.catalog.model_profiles.list(),
+                    lambda item: f"{item.name} ({item.model_name})",
+                    lambda item: item.model_name,
+                    filters.model or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, model=selected or "")
+            elif command == "8":
+                value = self.ask("Model snapshot text (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, model=value)
+            elif command == "9":
+                filters = BenchmarkReportFilters()
+            else:
+                self.output("Choose a number from 1 to 9, or B to return.")
+
+    def _comparison_filter_summary(self, filters: BenchmarkStatisticsFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.benchmark_type:
+            values.append(f"Benchmark type: {self._report_benchmark_type_label(filters.benchmark_type)}")
+        if filters.benchmark:
+            values.append(f"Benchmark: {filters.benchmark}")
+        if filters.session_id is not None:
+            session = self.catalog.sessions.get(filters.session_id)
+            values.append(f"Session: {session.title if session else 'Unavailable selection'}")
+        elif filters.session:
+            values.append(f"Session text: {filters.session}")
+        if filters.hardware_profile_id is not None:
+            hardware = self.catalog.hardware_profiles.get(filters.hardware_profile_id)
+            values.append(f"Hardware profile: {hardware.name if hardware else 'Unavailable selection'}")
+        elif filters.hardware:
+            values.append(f"Hardware snapshot: {filters.hardware}")
+        if filters.date_from:
+            values.append(f"Created from: {filters.date_from}")
+        if filters.date_to:
+            values.append(f"Created to: {filters.date_to}")
+        if filters.minimum_score is not None:
+            values.append(f"Minimum overall score: {filters.minimum_score:g}")
+        if filters.maximum_score is not None:
+            values.append(f"Maximum overall score: {filters.maximum_score:g}")
+        if filters.hallucination:
+            values.append(f"Hallucination: {filters.hallucination}")
+        if filters.reliability:
+            values.append(f"Reliability: {filters.reliability}")
+        if filters.include_deleted:
+            values.append("Deleted runs: included")
+        return tuple(values or ("All non-deleted BenchmarkRun snapshots",))
+
+    def _comparison_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+        *,
+        comparison_type: str,
+        clear_model: bool = True,
+    ) -> BenchmarkStatisticsFilters:
+        """Configure shared BenchmarkRun filters for comparisons or trends."""
+
+        while True:
+            content = "\n".join((
+                "1) Benchmark, type, session, and hardware selectors",
+                f"2) Created date range [{self._report_value(filters.date_from)} → {self._report_value(filters.date_to)}]",
+                f"3) Overall score range [{self._report_value(filters.minimum_score)} → {self._report_value(filters.maximum_score)}]",
+                f"4) Hallucination level [{self._report_value(filters.hallucination)}]",
+                f"5) Reliability level [{self._report_value(filters.reliability)}]",
+                "6) Reset Comparison Filters",
+                "",
+                f"Comparison: {comparison_type}",
+                *self._comparison_filter_summary(filters),
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Comparison Filters" if clear_model else "Trend Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                base = BenchmarkReportFilters(
+                    benchmark=filters.benchmark,
+                    benchmark_type=filters.benchmark_type,
+                    session=filters.session,
+                    session_id=filters.session_id,
+                    hardware=filters.hardware,
+                    hardware_profile_id=filters.hardware_profile_id,
+                    include_run_ids=filters.include_run_ids,
+                    exclude_run_ids=filters.exclude_run_ids,
+                    include_deleted=filters.include_deleted,
+                )
+                configured = self._report_filters_screen(base)
+                filters = replace(
+                    filters,
+                    benchmark=configured.benchmark,
+                    benchmark_type=configured.benchmark_type,
+                    session=configured.session,
+                    session_id=configured.session_id,
+                    hardware=configured.hardware,
+                    hardware_profile_id=configured.hardware_profile_id,
+                    include_run_ids=configured.include_run_ids,
+                    exclude_run_ids=configured.exclude_run_ids,
+                    # Entity selection is handled by ComparisonService; trends
+                    # retain the optional model filter.
+                    model="" if clear_model else configured.model,
+                )
+            elif command == "2":
+                start = self.ask("Created start (ISO date/time; blank clears)", navigation=True)
+                if isinstance(start, NavigationSignal):
+                    continue
+                end = self.ask("Created end (ISO date/time; blank clears)", navigation=True)
+                if isinstance(end, NavigationSignal):
+                    continue
+                filters = replace(filters, date_from=start or None, date_to=end or None)
+            elif command == "3":
+                minimum = self.ask_float("Minimum overall score (blank clears)", navigation=True)
+                if isinstance(minimum, NavigationSignal):
+                    continue
+                maximum = self.ask_float("Maximum overall score (blank clears)", navigation=True)
+                if isinstance(maximum, NavigationSignal):
+                    continue
+                filters = replace(filters, minimum_score=minimum, maximum_score=maximum)
+            elif command == "4":
+                selected = self._report_vertical_choice(
+                    "Hallucination Level",
+                    [(level, level) for level in LEVELS],
+                    filters.hallucination or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, hallucination=selected or "")
+            elif command == "5":
+                selected = self._report_vertical_choice(
+                    "Reliability Level",
+                    [(level, level) for level in LEVELS],
+                    filters.reliability or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, reliability=selected or "")
+            elif command == "6":
+                filters = BenchmarkStatisticsFilters()
+            else:
+                self.output("Choose a number from 1 to 6, or B to return.")
+
+    @staticmethod
+    def _trend_interval_label(value: TimeBucketGranularity | str) -> str:
+        active = value if isinstance(value, TimeBucketGranularity) else TimeBucketGranularity(str(value).strip().casefold())
+        return {
+            TimeBucketGranularity.DAY: "Day (UTC)",
+            TimeBucketGranularity.WEEK: "Week (UTC Monday start)",
+            TimeBucketGranularity.MONTH: "Month (UTC)",
+        }[active]
+
+    @staticmethod
+    def _trend_grouping_label(value: TrendGrouping | str) -> str:
+        active = value if isinstance(value, TrendGrouping) else TrendGrouping(str(value).strip().casefold().replace("-", "_").replace(" ", "_"))
+        return {
+            TrendGrouping.OVERALL: "Overall",
+            TrendGrouping.MODEL: "Model",
+            TrendGrouping.BENCHMARK: "Benchmark",
+            TrendGrouping.BENCHMARK_TYPE: "Benchmark type",
+            TrendGrouping.SESSION: "Session",
+            TrendGrouping.HARDWARE: "Hardware environment",
+            TrendGrouping.IMPORT_BATCH: "Import batch",
+        }[active]
+
+    def _trend_benchmark_filters_screen(
+        self,
+        filters: BenchmarkStatisticsFilters,
+    ) -> BenchmarkStatisticsFilters:
+        return self._comparison_filters_screen(
+            filters,
+            comparison_type="BenchmarkRun trends",
+            clear_model=False,
+        )
+
+    def _trend_scoreboard_filter_summary(self, filters: ScoreboardStatisticsFilters) -> tuple[str, ...]:
+        values: list[str] = []
+        if filters.model:
+            values.append(f"Model text: {filters.model}")
+        if filters.batch_id is not None:
+            batch = self.catalog.scoreboard_import_batches.get(filters.batch_id)
+            values.append(f"Import batch: {batch.name if batch else 'Unavailable selection'}")
+        if filters.date_from:
+            values.append(f"Imported from: {filters.date_from}")
+        if filters.date_to:
+            values.append(f"Imported to: {filters.date_to}")
+        if filters.minimum_score is not None:
+            values.append(f"Minimum score: {filters.minimum_score:g}")
+        if filters.maximum_score is not None:
+            values.append(f"Maximum score: {filters.maximum_score:g}")
+        if filters.hallucination:
+            values.append(f"Hallucination: {filters.hallucination}")
+        if filters.consistency:
+            values.append(f"Consistency: {filters.consistency}")
+        if filters.reliability:
+            values.append(f"Reliability: {filters.reliability}")
+        if filters.include_deleted:
+            values.append("Deleted entries/batches: included")
+        return tuple(values or ("All non-deleted scoreboard entries",))
+
+    def _trend_scoreboard_filters_screen(
+        self,
+        filters: ScoreboardStatisticsFilters,
+    ) -> ScoreboardStatisticsFilters:
+        while True:
+            content = "\n".join((
+                f"1) Model text [{self._report_value(filters.model)}]",
+                f"2) Import batch [{self._report_value(filters.batch_id)}]",
+                f"3) Imported date range [{self._report_value(filters.date_from)} to {self._report_value(filters.date_to)}]",
+                f"4) Score range [{self._report_value(filters.minimum_score)} to {self._report_value(filters.maximum_score)}]",
+                f"5) Hallucination level [{self._report_value(filters.hallucination)}]",
+                f"6) Consistency [{self._report_value(filters.consistency)}]",
+                f"7) Reliability level [{self._report_value(filters.reliability)}]",
+                "8) Reset Trend Filters",
+                "",
+                *self._trend_scoreboard_filter_summary(filters),
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Trend Filters", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return filters
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Model text (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    filters = replace(filters, model=value)
+            elif command == "2":
+                selected = self._report_catalog_choice(
+                    "Select Import Batch",
+                    self.catalog.scoreboard_import_batches.list(),
+                    lambda item: f"{item.name} ({item.source_file})",
+                    lambda item: item.id,
+                    filters.batch_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, batch_id=selected)
+            elif command == "3":
+                start = self.ask("Imported start (ISO date/time; blank clears)", navigation=True)
+                if isinstance(start, NavigationSignal):
+                    continue
+                end = self.ask("Imported end (ISO date/time; blank clears)", navigation=True)
+                if isinstance(end, NavigationSignal):
+                    continue
+                filters = replace(filters, date_from=start or None, date_to=end or None)
+            elif command == "4":
+                minimum = self.ask_float("Minimum score (blank clears)", navigation=True)
+                if isinstance(minimum, NavigationSignal):
+                    continue
+                maximum = self.ask_float("Maximum score (blank clears)", navigation=True)
+                if isinstance(maximum, NavigationSignal):
+                    continue
+                filters = replace(filters, minimum_score=minimum, maximum_score=maximum)
+            elif command in {"5", "6", "7"}:
+                field_name = {"5": "hallucination", "6": "consistency", "7": "reliability"}[command]
+                selected = self._report_vertical_choice(
+                    field_name.replace("_", " ").title(),
+                    [(level, level) for level in LEVELS],
+                    getattr(filters, field_name) or None,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    filters = replace(filters, **{field_name: selected or ""})
+            elif command == "8":
+                filters = ScoreboardStatisticsFilters()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _benchmark_trend_options_screen(self, options: BenchmarkTrendOptions) -> BenchmarkTrendOptions:
+        interval_choices = [
+            (self._trend_interval_label(value), value)
+            for value in TimeBucketGranularity
+        ]
+        grouping_choices = [
+            (self._trend_grouping_label(value), value)
+            for value in (
+                TrendGrouping.OVERALL,
+                TrendGrouping.MODEL,
+                TrendGrouping.BENCHMARK,
+                TrendGrouping.BENCHMARK_TYPE,
+                TrendGrouping.SESSION,
+                TrendGrouping.HARDWARE,
+            )
+        ]
+        while True:
+            content = "\n".join((
+                f"1) Trend title [{options.title}]",
+                f"2) Interval [{self._trend_interval_label(options.interval)}]",
+                f"3) Grouping [{self._trend_grouping_label(options.grouping)}]",
+                "4) Configure filters",
+                f"5) Include empty buckets [{'Yes' if options.include_empty_buckets else 'No'}]",
+                f"6) Detailed series sections [{'Yes' if options.include_series_details else 'No'}]",
+                "7) Reset Trend Options",
+                "",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Benchmark Run Trend Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Trend title", navigation=True, default=options.title)
+                if isinstance(value, str) and value:
+                    options = replace(options, title=value)
+            elif command == "2":
+                selected = self._report_vertical_choice("Trend Interval", interval_choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, interval=selected)
+            elif command == "3":
+                selected = self._report_vertical_choice("BenchmarkRun Trend Grouping", grouping_choices, options.grouping)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, grouping=selected)
+            elif command == "4":
+                options = replace(options, filters=self._trend_benchmark_filters_screen(options.filters))
+            elif command in {"5", "6"}:
+                field_name = "include_empty_buckets" if command == "5" else "include_series_details"
+                label = "Include Empty Buckets" if command == "5" else "Detailed Series Sections"
+                value = self._configure_redaction_toggle(label, bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                options = BenchmarkTrendOptions()
+            else:
+                self.output("Choose a number from 1 to 7, or B to return.")
+
+    def _scoreboard_trend_options_screen(self, options: ScoreboardTrendOptions) -> ScoreboardTrendOptions:
+        interval_choices = [
+            (self._trend_interval_label(value), value)
+            for value in TimeBucketGranularity
+        ]
+        grouping_choices = [
+            (self._trend_grouping_label(value), value)
+            for value in (TrendGrouping.OVERALL, TrendGrouping.MODEL, TrendGrouping.IMPORT_BATCH)
+        ]
+        while True:
+            content = "\n".join((
+                f"1) Trend title [{options.title}]",
+                f"2) Interval [{self._trend_interval_label(options.interval)}]",
+                f"3) Grouping [{self._trend_grouping_label(options.grouping)}]",
+                "4) Configure filters",
+                f"5) Include empty buckets [{'Yes' if options.include_empty_buckets else 'No'}]",
+                f"6) Detailed series sections [{'Yes' if options.include_series_details else 'No'}]",
+                "7) Reset Trend Options",
+                "",
+                *self._trend_scoreboard_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Trend Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Trend title", navigation=True, default=options.title)
+                if isinstance(value, str) and value:
+                    options = replace(options, title=value)
+            elif command == "2":
+                selected = self._report_vertical_choice("Trend Interval", interval_choices, options.interval)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, interval=selected)
+            elif command == "3":
+                selected = self._report_vertical_choice("Scoreboard Trend Grouping", grouping_choices, options.grouping)
+                if not isinstance(selected, NavigationSignal) and selected is not None:
+                    options = replace(options, grouping=selected)
+            elif command == "4":
+                options = replace(options, filters=self._trend_scoreboard_filters_screen(options.filters))
+            elif command in {"5", "6"}:
+                field_name = "include_empty_buckets" if command == "5" else "include_series_details"
+                label = "Include Empty Buckets" if command == "5" else "Detailed Series Sections"
+                value = self._configure_redaction_toggle(label, bool(getattr(options, field_name)))
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                options = ScoreboardTrendOptions()
+            else:
+                self.output("Choose a number from 1 to 7, or B to return.")
+
+    def _comparison_multi_select(
+        self,
+        title: str,
+        choices: Sequence[tuple[Any, str]],
+        selected: Sequence[Any],
+    ) -> tuple[Any, ...] | NavigationSignal:
+        selected_values = list(dict.fromkeys(selected))
+        choice_values = [value for value, _ in choices]
+        while True:
+            lines = [
+                "Toggle a number, then choose D when at least two entries are selected.",
+                "",
+            ]
+            if choices:
+                lines.extend(
+                    f"{number}) [{'x' if value in selected_values else ' '}] {label}"
+                    for number, (value, label) in enumerate(choices, start=1)
+                )
+            else:
+                lines.append("No eligible entries are available.")
+            lines.extend(("", f"Selected: {len(selected_values)}", "D) Done", "B) Back", "QA) Quit BenchPup completely"))
+            self.render_screen(title, "\n".join(lines))
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return choice
+            command = self.normalized(choice)
+            if command in {"d", "done"}:
+                return tuple(value for value in choice_values if value in selected_values)
+            if command.isdigit() and 1 <= int(command) <= len(choices):
+                value = choice_values[int(command) - 1]
+                if value in selected_values:
+                    selected_values.remove(value)
+                else:
+                    selected_values.append(value)
+                continue
+            self.output(f"Choose a number from 1 to {len(choices)}, D when finished, or B to return.")
+
+    def _available_comparison_models(self) -> tuple[tuple[str, str], ...]:
+        labels: dict[str, str] = {}
+        for aggregate in self.comparisons.statistics.select_benchmark_runs():
+            label = model_snapshot_name(aggregate.run.model_snapshot)
+            key = normalize_model_identity(label)
+            if key == "unknown":
+                continue
+            current = labels.get(key)
+            labels[key] = label if current is None else min((current, label), key=lambda value: (value.casefold(), value))
+        return tuple(
+            (labels[key], labels[key])
+            for key in sorted(labels, key=lambda item: (labels[item].casefold(), labels[item], item))
+        )
+
+    def _available_comparison_sessions(self) -> tuple[tuple[int, str], ...]:
+        return tuple(
+            (session.id, session.title)
+            for session in sorted(
+                self.catalog.sessions.list(),
+                key=lambda item: ((item.title or "").casefold(), item.title or "", item.id or 0),
+            )
+            if session.id is not None
+        )
+
+    def _report_template_label(self, template_id: str) -> str:
+        template = self.reporting.report_template(template_id)
+        if template is None:
+            return self._report_value(template_id)
+        return f"{template.name} — {template.description}"
+
+    def _report_template_choice(self, current: str) -> str | NavigationSignal:
+        choices = [
+            (f"{template.name} — {template.description}", template.template_id)
+            for template in self.reporting.report_templates()
+        ]
+        selected = self._report_vertical_choice("Report Template", choices, current)
+        return selected if isinstance(selected, NavigationSignal) else str(selected or current)
+
+    def _apply_report_template(self, template_id: str) -> ReportTemplateOptions:
+        return self.reporting.apply_template(template_id)
+
+    def _report_template_options_for(
+        self,
+        template_id: str,
+        **overrides: bool,
+    ) -> ReportTemplateOptions:
+        applied = self.reporting.apply_template(template_id)
+        if not isinstance(applied, ReportTemplateOptions):
+            applied = ReportTemplateOptions(template_id=template_id)
+        for name, value in overrides.items():
+            if hasattr(applied, name):
+                setattr(applied, name, value)
+        return applied
+
+    def _report_template_argument(
+        self,
+        template_id: str,
+        **overrides: bool,
+    ) -> dict[str, Any]:
+        if template_id == "standard":
+            return {}
+        return {"template_options": self._report_template_options_for(template_id, **overrides)}
+
+    def _benchmark_report_options_screen(self, options: BenchmarkReportOptions) -> BenchmarkReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Report Title [{options.title}]",
+                "2) Configure Selection Filters",
+                f"3) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
+                f"4) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
+                f"5) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
+                f"6) Report Template [{self._report_template_label(options.template_id)}]",
+                "7) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Detailed Benchmark Run Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command in {"3", "4", "5"}:
+                field_name = {
+                    "3": "include_prompt_text",
+                    "4": "include_raw_model_output",
+                    "5": "include_attachment_metadata",
+                }[command]
+                value = self._configure_redaction_toggle(
+                    {
+                        "include_prompt_text": "Include Prompt Text",
+                        "include_raw_model_output": "Include Raw Model Output",
+                        "include_attachment_metadata": "Include Attachment Metadata",
+                    }[field_name],
+                    bool(getattr(options, field_name)),
+                )
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "6":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "7":
+                options = BenchmarkReportOptions()
+            else:
+                self.output("Choose a number from 1 to 7, or B to return.")
+
+    def _scoreboard_report_options_screen(self, options: ScoreboardReportOptions) -> ScoreboardReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Report Title [{options.title}]",
+                "2) Scoreboard Import Batch",
+                f"3) Model Text Filter [{self._report_value(options.filters.model)}]",
+                f"4) Report Template [{self._report_template_label(options.template_id)}]",
+                "5) Reset Report Options",
+                "",
+                *self._report_scoreboard_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command == "2":
+                selected = self._report_catalog_choice(
+                    "Select Scoreboard Import Batch",
+                    self.catalog.scoreboard_import_batches.list(),
+                    lambda item: f"{item.name} ({item.source_file})",
+                    lambda item: item.id,
+                    options.filters.batch_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    options = replace(options, filters=replace(options.filters, batch_id=selected))
+            elif command == "3":
+                value = self.ask("Model text filter (blank clears)", navigation=True)
+                if isinstance(value, str):
+                    options = replace(options, filters=replace(options.filters, model=value))
+            elif command == "4":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(options, template_id=applied.template_id)
+            elif command == "5":
+                options = ScoreboardReportOptions()
+            else:
+                self.output("Choose a number from 1 to 5, or B to return.")
+
+    def _leaderboard_report_options_screen(self, options: LeaderboardReportOptions) -> LeaderboardReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Report Title [{options.title}]",
+                "2) Configure Selection Filters",
+                f"3) Include Per-Model Detail Sections [{'Yes' if options.include_model_details else 'No'}]",
+                f"4) Report Template [{self._report_template_label(options.template_id)}]",
+                "5) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Model Leaderboard Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command == "3":
+                value = self._configure_redaction_toggle("Include Per-Model Detail Sections", options.include_model_details)
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, include_model_details=value)
+            elif command == "4":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_model_details=applied.include_model_details,
+                    )
+            elif command == "5":
+                options = LeaderboardReportOptions()
+            else:
+                self.output("Choose a number from 1 to 5, or B to return.")
+
+    def _session_report_options_screen(self, options: SessionReportOptions) -> SessionReportOptions:
+        while True:
+            session = self.catalog.sessions.get(options.filters.session_id) if options.filters.session_id is not None else None
+            content = "\n".join((
+                f"1) Select Session [{session.title if session else 'Not set'}]",
+                "2) Configure Additional Filters",
+                f"3) Report Title [{options.title}]",
+                f"4) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
+                f"5) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
+                f"6) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
+                f"7) Report Template [{self._report_template_label(options.template_id)}]",
+                "8) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._report_catalog_choice(
+                    "Select Session",
+                    self.catalog.sessions.list(),
+                    lambda item: f"{item.title} ({item.started_at or 'date unavailable'})",
+                    lambda item: item.id,
+                    options.filters.session_id,
+                )
+                if not isinstance(selected, NavigationSignal):
+                    options = replace(options, filters=replace(options.filters, session_id=selected))
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command == "3":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command in {"4", "5", "6"}:
+                field_name = {
+                    "4": "include_prompt_text",
+                    "5": "include_raw_model_output",
+                    "6": "include_attachment_metadata",
+                }[command]
+                value = self._configure_redaction_toggle(
+                    {
+                        "include_prompt_text": "Include Prompt Text",
+                        "include_raw_model_output": "Include Raw Model Output",
+                        "include_attachment_metadata": "Include Attachment Metadata",
+                    }[field_name],
+                    bool(getattr(options, field_name)),
+                )
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "8":
+                options = SessionReportOptions()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _hardware_report_options_screen(self, options: HardwareReportOptions) -> HardwareReportOptions:
+        while True:
+            content = "\n".join((
+                f"1) Report Title [{options.title}]",
+                "2) Configure Hardware and Selection Filters",
+                f"3) Include Per-Hardware Detail Sections [{'Yes' if options.include_hardware_details else 'No'}]",
+                f"4) Include Prompt Text [{'Yes' if options.include_prompt_text else 'No'}]",
+                f"5) Include Raw Model Output [{'Yes' if options.include_raw_model_output else 'No'}]",
+                f"6) Include Attachment Metadata [{'Yes' if options.include_attachment_metadata else 'No'}]",
+                f"7) Report Template [{self._report_template_label(options.template_id)}]",
+                "8) Reset Report Options",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Hardware Report Options", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                value = self.ask("Report title", navigation=True, default=options.title)
+                if isinstance(value, str) and value.strip():
+                    options = replace(options, title=value.strip())
+            elif command == "2":
+                options = replace(options, filters=self._report_filters_screen(options.filters))
+            elif command == "3":
+                value = self._configure_redaction_toggle("Include Per-Hardware Detail Sections", options.include_hardware_details)
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, include_hardware_details=value)
+            elif command in {"4", "5", "6"}:
+                field_name = {
+                    "4": "include_prompt_text",
+                    "5": "include_raw_model_output",
+                    "6": "include_attachment_metadata",
+                }[command]
+                value = self._configure_redaction_toggle(
+                    {
+                        "include_prompt_text": "Include Prompt Text",
+                        "include_raw_model_output": "Include Raw Model Output",
+                        "include_attachment_metadata": "Include Attachment Metadata",
+                    }[field_name],
+                    bool(getattr(options, field_name)),
+                )
+                if not isinstance(value, NavigationSignal):
+                    options = replace(options, **{field_name: value})
+            elif command == "7":
+                selected = self._report_template_choice(options.template_id)
+                if not isinstance(selected, NavigationSignal):
+                    applied = self._apply_report_template(selected)
+                    options = replace(
+                        options,
+                        template_id=applied.template_id,
+                        include_hardware_details=applied.include_hardware_details,
+                        include_prompt_text=applied.include_prompt_text,
+                        include_raw_model_output=applied.include_raw_model_output,
+                        include_attachment_metadata=applied.include_attachment_metadata,
+                    )
+            elif command == "8":
+                options = HardwareReportOptions()
+            else:
+                self.output("Choose a number from 1 to 8, or B to return.")
+
+    def _report_configuration_lines(
+        self,
+        benchmark: BenchmarkReportOptions,
+        scoreboard: ScoreboardReportOptions,
+        leaderboard: LeaderboardReportOptions,
+        session: SessionReportOptions,
+        hardware: HardwareReportOptions,
+    ) -> tuple[str, ...]:
+        return (
+            "Detailed Benchmark Run Report",
+            f"  Title: {benchmark.title}",
+            f"  Filters: {'; '.join(self._report_filter_summary(benchmark.filters))}",
+            f"  Prompt text: {'Included' if benchmark.include_prompt_text else 'Excluded'}",
+            f"  Raw model output: {'Included' if benchmark.include_raw_model_output else 'Excluded'}",
+            f"  Attachment metadata: {'Included' if benchmark.include_attachment_metadata else 'Excluded'}",
+            f"  Template: {self._report_template_label(benchmark.template_id)}",
+            f"  Destination: {self._report_value(benchmark.destination)}",
+            "",
+            "Historical Scoreboard Report",
+            f"  Title: {scoreboard.title}",
+            f"  Filters: {'; '.join(self._report_scoreboard_filter_summary(scoreboard.filters))}",
+            f"  Template: {self._report_template_label(scoreboard.template_id)}",
+            f"  Destination: {self._report_value(scoreboard.destination)}",
+            "",
+            "Model Leaderboard",
+            f"  Title: {leaderboard.title}",
+            f"  Filters: {'; '.join(self._report_filter_summary(leaderboard.filters))}",
+            f"  Per-model details: {'Included' if leaderboard.include_model_details else 'Excluded'}",
+            f"  Template: {self._report_template_label(leaderboard.template_id)}",
+            f"  Destination: {self._report_value(leaderboard.destination)}",
+            "",
+            "Session Report",
+            f"  Title: {session.title}",
+            f"  Session: {self._report_filter_summary(session.filters)[0] if session.filters.session_id is not None else 'Not selected'}",
+            f"  Template: {self._report_template_label(session.template_id)}",
+            f"  Prompt text: {'Included' if session.include_prompt_text else 'Excluded'}",
+            f"  Raw model output: {'Included' if session.include_raw_model_output else 'Excluded'}",
+            f"  Attachment metadata: {'Included' if session.include_attachment_metadata else 'Excluded'}",
+            f"  Destination: {self._report_value(session.destination)}",
+            "",
+            "Hardware Report",
+            f"  Title: {hardware.title}",
+            f"  Filters: {'; '.join(self._report_filter_summary(hardware.filters))}",
+            f"  Per-hardware details: {'Included' if hardware.include_hardware_details else 'Excluded'}",
+            f"  Template: {self._report_template_label(hardware.template_id)}",
+            f"  Destination: {self._report_value(hardware.destination)}",
+            "",
+            "Overwrite: explicit confirmation is required for an existing file.",
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        )
+
+    @staticmethod
+    def _report_models(values: list[str]) -> str:
+        distinct = tuple(dict.fromkeys(value for value in values if value))
+        return ", ".join(distinct) if distinct else "None represented"
+
+    def _benchmark_selection_lines(self, report: BenchmarkRunReport, options: BenchmarkReportOptions) -> tuple[str, ...]:
+        return (
+            f"Selected run count: {report.metadata.record_count}",
+            f"Scored run count: {report.summary.scored_count} of {report.summary.count}",
+            f"Selected models: {self._report_models([item.model_name for item in report.records])}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+            f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+            f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            "Soft-deleted runs: excluded by the reporting engine.",
+        )
+
+    def _scoreboard_selection_lines(self, report: ScoreboardReport, options: ScoreboardReportOptions) -> tuple[str, ...]:
+        batch_labels = tuple(dict.fromkeys(section.label for section in report.batch_sections))
+        return (
+            f"Selected entry count: {report.metadata.record_count}",
+            f"Scored entry count: {report.summary.scored_count} of {report.summary.count}",
+            f"Represented models: {self._report_models([entry.entry.model_name for entry in report.entries])}",
+            f"Import batches: {', '.join(batch_labels) if batch_labels else 'None represented'}",
+            f"Filters: {'; '.join(self._report_scoreboard_filter_summary(options.filters))}",
+            "Missing scores remain unavailable; they are not treated as zero.",
+            "Soft-deleted entries and batches: excluded by the reporting engine.",
+            f"Template: {self._report_template_label(options.template_id)}",
+        )
+
+    def _leaderboard_selection_lines(self, report: ModelLeaderboardReport, options: LeaderboardReportOptions) -> tuple[str, ...]:
+        top_model = report.models[0].model_name if report.models else "None available"
+        unscored = tuple(entry.model_name for entry in report.models if entry.scored_run_count == 0)
+        return (
+            f"Ranked model count: {len(report.models)}",
+            f"Contributing run count: {report.metadata.record_count}",
+            f"Top-ranked model: {top_model}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Per-model detail sections: {'Included' if options.include_model_details else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            "Ranking: average overall score descending; scored-run count descending; median overall score descending; deterministic model-name ordering.",
+            f"Models without scored runs: {', '.join(unscored) if unscored else 'None represented'}",
+            "Missing scores and speeds remain unavailable; they are not treated as zero.",
+        )
+
+    def _session_selection_lines(self, report: SessionReport, options: SessionReportOptions) -> tuple[str, ...]:
+        period = " → ".join(
+            value for value in (report.session.started_at, report.session.completed_at) if value
+        ) or "Date range unavailable"
+        return (
+            f"Session: {report.session.title or self._report_value(report.session.id)}",
+            f"Session period: {period}",
+            f"Eligible run count: {report.metadata.record_count}",
+            f"Scored run count: {report.summary.scored_count} of {report.summary.count}",
+            f"Represented models: {self._report_models(list(report.represented_models))}",
+            f"Represented benchmarks: {self._report_models(list(report.represented_benchmarks))}",
+            f"Represented hardware: {self._report_models(list(report.represented_hardware))}",
+            f"Average score: {self._report_number(report.summary.average)}; median: {self._report_number(report.summary.median)}",
+            f"Average tokens/s: {self._report_number(report.average_tokens_per_second)}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+            f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+            f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+            "Soft-deleted sessions and runs: excluded by the reporting engine.",
+        )
+
+    def _hardware_selection_lines(self, report: HardwareReport, options: HardwareReportOptions) -> tuple[str, ...]:
+        fastest = report.fastest_group.label if report.fastest_group else "Not calculable"
+        highest = report.highest_average_score_group.label if report.highest_average_score_group else "Not calculable"
+        return (
+            f"Hardware group count: {len(report.groups)}",
+            f"Contributing run count: {report.metadata.record_count}",
+            f"Scored run count: {report.summary.scored_count} of {report.summary.count}",
+            f"Represented models: {self._report_models(list(report.represented_models))}",
+            f"Fastest group: {fastest}",
+            f"Highest average-score group: {highest}",
+            f"Filters: {'; '.join(self._report_filter_summary(options.filters))}",
+            f"Per-hardware detail sections: {'Included' if options.include_hardware_details else 'Excluded'}",
+            f"Template: {self._report_template_label(options.template_id)}",
+            "Missing scores and speeds remain unavailable; they are not treated as zero.",
+            "Historical hardware snapshots are authoritative; distinct snapshots remain distinct groups.",
+        )
+
+    def _report_empty_screen(self, title: str, lines: tuple[str, ...]) -> None:
+        self.render_screen(title, "\n".join((*lines, "", "B) Back", "QA) Quit BenchPup completely")))
+        self.ask("Choose an option", navigation=True)
+
+    def _report_error_screen(self, title: str, message: str) -> None:
+        self.render_screen(title, f"{message}\n\nB) Back\nQA) Quit BenchPup completely")
+        self.ask("Choose an option", navigation=True)
+
+    def _report_selection_preview(self, title: str, lines: tuple[str, ...]) -> None:
+        self.render_screen(title, "\n".join((*lines, "", "B) Back", "QA) Quit BenchPup completely")))
+        self.ask("Choose an option", navigation=True)
+
+    def _report_write_result_screen(self, result: ReportWriteResult) -> None:
+        if result.status is ReportWriteStatus.SUCCESS:
+            title = "Report Write Complete"
+            explanation = "The staged UTF-8 Markdown report was finalized successfully."
+        elif result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            title = "Report Write Requires Confirmation"
+            explanation = "The destination already exists; no replacement was written."
+        elif result.status is ReportWriteStatus.TEMP_WRITE_FAILED:
+            title = "Report Temporary Write Failed"
+            explanation = "The report could not be staged; the final destination was not replaced."
+        elif result.status is ReportWriteStatus.FINALIZE_FAILED:
+            title = "Report Finalization Failed"
+            explanation = "The staged report could not be finalized; inspect the destination before retrying."
+        else:
+            title = "Report Write Failed"
+            explanation = "The report writer returned an unrecognized failure status."
+        lines = [
+            explanation,
+            "",
+            f"Status: {result.status.value}",
+            f"Path: {result.path}",
+        ]
+        if result.message:
+            lines.append(f"Message: {result.message}")
+        if result.details:
+            lines.append(f"Details: {result.details}")
+        lines.extend(("", "B) Back", "QA) Quit BenchPup completely"))
+        self.render_screen(title, "\n".join(lines))
+        self.ask("Choose an option", navigation=True)
+
+    def _write_report_workflow(
+        self,
+        report: BenchmarkRunReport | ScoreboardReport | ModelLeaderboardReport | SessionReport | HardwareReport | ModelComparisonResult | SessionComparisonResult | TrendReport,
+        *,
+        report_name: str,
+        selection_lines: tuple[str, ...],
+        destination: str,
+        include_model_details: bool = False,
+        template_options: ReportTemplateOptions | None = None,
+    ) -> str | None:
+        self.render_screen(f"{report_name} Selection", "\n".join(selection_lines))
+        path = self.prompt_path(
+            "Markdown destination",
+            default=destination or None,
+            preserve_trailing_separator=True,
+        )
+        if not isinstance(path, str):
+            return None
+        output_path = self.prepare_export_destination(path, report_name)
+        if not isinstance(output_path, Path):
+            return None
+        self.render_screen(
+            f"Confirm {report_name}",
+            "\n".join((
+                *selection_lines,
+                "",
+                f"Destination: {output_path}",
+                "The report will be written with staged UTF-8 output.",
+                "",
+                "Write this report?",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            )),
+        )
+        confirm = self.yes_no(f"Confirm {report_name}", navigation=True)
+        if confirm is not True:
+            return None
+        try:
+            result = self.reporting.write_markdown_report(
+                report,
+                output_path,
+                include_model_details=include_model_details,
+                template_options=template_options,
+            )
+        except (OSError, ValueError) as error:
+            self._report_error_screen(f"{report_name} Failed", f"Report generation or writing failed: {error}")
+            return str(output_path)
+        if result.status is ReportWriteStatus.OVERWRITE_REQUIRED:
+            self.render_screen(
+                "Confirm Report Overwrite",
+                f"An existing report is at:\n{output_path}\n\nReplace it only after staged validation?\n\nB) Back\nQA) Quit BenchPup completely",
+            )
+            overwrite = self.yes_no("Replace existing report", navigation=True)
+            if overwrite is True:
+                try:
+                    result = self.reporting.write_markdown_report(
+                        report,
+                        output_path,
+                        overwrite=True,
+                        include_model_details=include_model_details,
+                        template_options=template_options,
+                    )
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("Report Overwrite Failed", f"Report overwrite failed: {error}")
+                    return str(output_path)
+            elif isinstance(overwrite, NavigationSignal):
+                return None
+        self._report_write_result_screen(result)
+        return str(output_path)
+
+    def _detailed_benchmark_report_screen(self, options: BenchmarkReportOptions) -> BenchmarkReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Report Options",
+                "2) Preview Selection",
+                "3) Write Markdown Report",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+                f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+                f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Detailed Benchmark Run Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._benchmark_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.benchmark_run_report(
+                    filters=options.filters,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                    title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Detailed Report Failed", f"Could not build the report: {error}")
+                continue
+            selection_lines = self._benchmark_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Detailed Benchmark Run Selection", selection_lines)
+                continue
+            if not report.records:
+                self._report_empty_screen("No Benchmark Runs", selection_lines + ("No benchmark runs match the current selection.",))
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Detailed Benchmark Run Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _historical_scoreboard_report_screen(self, options: ScoreboardReportOptions) -> ScoreboardReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Report Options",
+                "2) Preview Selection",
+                "3) Write Markdown Report",
+                "",
+                *self._report_scoreboard_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._scoreboard_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.scoreboard_report(
+                    filters=options.filters,
+                    title=options.title,
+                    **self._report_template_argument(options.template_id),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Scoreboard Report Failed", f"Could not build the report: {error}")
+                continue
+            selection_lines = self._scoreboard_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Historical Scoreboard Selection", selection_lines)
+                continue
+            if not report.entries:
+                self._report_empty_screen("No Scoreboard Entries", selection_lines + ("No scoreboard entries match the current selection.",))
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Historical Scoreboard Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(options.template_id),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _leaderboard_terminal_preview(self, report: ModelLeaderboardReport, options: LeaderboardReportOptions) -> None:
+        lines = list(self._leaderboard_selection_lines(report, options))
+        lines.extend(("", "Leaderboard preview:"))
+        if not report.models:
+            lines.append("No models are represented by the current selection.")
+        else:
+            for entry in report.models[:10]:
+                lines.append(
+                    f"{entry.rank}) {entry.model_name} | average={self._report_number(entry.average_overall_score)} "
+                    f"| scored runs={entry.scored_run_count} | median={self._report_number(entry.median_overall_score)}"
+                )
+            if len(report.models) > 10:
+                lines.append(f"... plus {len(report.models) - 10} more ranked model(s).")
+        self._report_selection_preview("Model Leaderboard Preview", tuple(lines))
+
+    def _model_leaderboard_report_screen(self, options: LeaderboardReportOptions) -> LeaderboardReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Report Options",
+                "2) Preview Ranking",
+                "3) View Concise Terminal Preview",
+                "4) Save Markdown Leaderboard",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Per-model details: {'Included' if options.include_model_details else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Model Leaderboard", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._leaderboard_report_options_screen(options)
+                continue
+            if command not in {"2", "3", "4"}:
+                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                continue
+            try:
+                report = self.reporting.model_leaderboard(
+                    filters=options.filters,
+                    title=options.title,
+                    **self._report_template_argument(options.template_id),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Leaderboard Failed", f"Could not build the leaderboard: {error}")
+                continue
+            selection_lines = self._leaderboard_selection_lines(report, options)
+            if command == "2":
+                if not report.models:
+                    self._report_empty_screen("No Leaderboard Models", selection_lines + ("No models match the current selection.",))
+                elif not any(entry.scored_run_count for entry in report.models):
+                    self._report_empty_screen("No Eligible Leaderboard Scores", selection_lines + ("No eligible scored runs match the current selection.",))
+                else:
+                    self._report_selection_preview("Model Leaderboard Ranking", selection_lines)
+                continue
+            if command == "3":
+                self._leaderboard_terminal_preview(report, options)
+                continue
+            if not report.models or not any(entry.scored_run_count for entry in report.models):
+                self._report_empty_screen("No Eligible Leaderboard Scores", selection_lines + ("No eligible scored runs match the current selection.",))
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Model Leaderboard",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                include_model_details=options.include_model_details,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_model_details=options.include_model_details,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _session_report_screen(self, options: SessionReportOptions) -> SessionReportOptions:
+        while True:
+            session = self.catalog.sessions.get(options.filters.session_id) if options.filters.session_id is not None else None
+            content = "\n".join((
+                "1) Configure Session Report Options",
+                "2) Preview Session Report",
+                "3) Write Markdown Report",
+                "",
+                f"Session: {session.title if session else 'Not selected'}",
+                *self._report_filter_summary(options.filters),
+                f"Template: {self._report_template_label(options.template_id)}",
+                f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+                f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+                f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._session_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            if options.filters.session_id is None:
+                self._report_empty_screen(
+                    "No Session Selected",
+                    ("Select a session before previewing or writing a session report.",),
+                )
+                continue
+            try:
+                report = self.reporting.session_report(
+                    options.filters.session_id,
+                    filters=options.filters,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                    title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Session Report Failed", f"Could not build the session report: {error}")
+                continue
+            selection_lines = self._session_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Session Report Preview", selection_lines)
+                continue
+            if not report.records:
+                self._report_empty_screen(
+                    "No Eligible Session Runs",
+                    selection_lines + ("The selected session has no eligible benchmark runs.",),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Session Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _hardware_report_screen(self, options: HardwareReportOptions) -> HardwareReportOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Hardware Report Options",
+                "2) Preview Hardware Report",
+                "3) Write Markdown Report",
+                "",
+                *self._report_filter_summary(options.filters),
+                f"Template: {self._report_template_label(options.template_id)}",
+                f"Per-hardware details: {'Included' if options.include_hardware_details else 'Excluded'}",
+                f"Prompt text: {'Included' if options.include_prompt_text else 'Excluded'}",
+                f"Raw model output: {'Included' if options.include_raw_model_output else 'Excluded'}",
+                f"Attachment metadata: {'Included' if options.include_attachment_metadata else 'Excluded'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Hardware Report", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._hardware_report_options_screen(options)
+                continue
+            if command not in {"2", "3"}:
+                self.output("Choose 1, 2, or 3, or B to return.")
+                continue
+            try:
+                report = self.reporting.hardware_report(
+                    filters=options.filters,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                    include_hardware_details=options.include_hardware_details,
+                    title=options.title,
+                    **self._report_template_argument(
+                        options.template_id,
+                        include_prompt_text=options.include_prompt_text,
+                        include_raw_model_output=options.include_raw_model_output,
+                        include_attachment_metadata=options.include_attachment_metadata,
+                        include_hardware_details=options.include_hardware_details,
+                    ),
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Hardware Report Failed", f"Could not build the hardware report: {error}")
+                continue
+            selection_lines = self._hardware_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Hardware Report Preview", selection_lines)
+                continue
+            if not report.groups:
+                self._report_empty_screen(
+                    "No Hardware Report Runs",
+                    selection_lines + ("No eligible benchmark runs have hardware report data.",),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Hardware Report",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._report_template_options_for(
+                    options.template_id,
+                    include_hardware_details=options.include_hardware_details,
+                    include_prompt_text=options.include_prompt_text,
+                    include_raw_model_output=options.include_raw_model_output,
+                    include_attachment_metadata=options.include_attachment_metadata,
+                ),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _model_comparison_selection_lines(
+        self,
+        report: ModelComparisonResult,
+        options: ModelComparisonOptions,
+    ) -> tuple[str, ...]:
+        lines = [
+            f"Models: {', '.join(options.models) if options.models else 'None selected'}",
+            *self._comparison_filter_summary(options.filters),
+            f"Contributing records: {report.metadata.contributing_record_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Non-overlapping benchmark identities: {report.alignment.excluded_benchmark_count}",
+        ]
+        if report.ranking:
+            ranked = ", ".join(
+                f"{entry.rank or 'unranked'}. {entry.label}"
+                for entry in report.ranking
+            )
+            lines.append(f"Ranking: {ranked}")
+        return tuple(lines)
+
+    def _session_comparison_selection_lines(
+        self,
+        report: SessionComparisonResult,
+        options: SessionComparisonOptions,
+    ) -> tuple[str, ...]:
+        labels = [session.label for session in report.selected_sessions]
+        return (
+            f"Sessions: {', '.join(labels) if labels else 'None selected'}",
+            *self._comparison_filter_summary(options.filters),
+            f"Contributing records: {report.metadata.contributing_record_count}",
+            f"Shared models: {report.alignment.shared_model_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Shared model/benchmark pairs: {report.alignment.shared_model_benchmark_pair_count}",
+        )
+
+    def _model_comparison_terminal_lines(self, report: ModelComparisonResult) -> tuple[str, ...]:
+        lines = [
+            f"Selected models: {', '.join(report.selected_models)}",
+            f"Contributing BenchmarkRun records: {report.metadata.contributing_record_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            "",
+            "Model | Runs | Scored | Mean score | Median score | Mean tokens/s",
+            "-" * 72,
+        ]
+        for entity in report.entities:
+            lines.append(
+                f"{entity.label} | {entity.record_count} | {entity.scored_count} | "
+                f"{self._report_number(entity.overall_score.mean)} | "
+                f"{self._report_number(entity.overall_score.median)} | "
+                f"{self._report_number(entity.tokens_per_second.mean)}"
+            )
+        lines.extend(("", f"Shared benchmark summaries: {len(report.alignment.aligned_benchmarks)}"))
+        if report.pairwise is not None:
+            lines.append("Pairwise deltas: second selected model minus first selected model")
+        lines.append("Missing values are shown as unavailable; no zero fill is applied.")
+        return tuple(lines)
+
+    def _session_comparison_terminal_lines(self, report: SessionComparisonResult) -> tuple[str, ...]:
+        lines = [
+            f"Selected sessions: {', '.join(report.metadata.selected_entities)}",
+            f"Contributing BenchmarkRun records: {report.metadata.contributing_record_count}",
+            f"Shared models: {report.alignment.shared_model_count}",
+            f"Shared benchmarks: {report.alignment.shared_benchmark_count}",
+            f"Shared model/benchmark pairs: {report.alignment.shared_model_benchmark_pair_count}",
+            "",
+            "Session | Runs | Scored | Mean score | Median score | Mean tokens/s",
+            "-" * 72,
+        ]
+        for entity in report.entities:
+            lines.append(
+                f"{entity.label} | {entity.record_count} | {entity.scored_count} | "
+                f"{self._report_number(entity.overall_score.mean)} | "
+                f"{self._report_number(entity.overall_score.median)} | "
+                f"{self._report_number(entity.tokens_per_second.mean)}"
+            )
+        if report.pairwise is not None:
+            lines.extend(("", "Pairwise deltas: second selected session minus first selected session"))
+        lines.append("Missing values are shown as unavailable; no zero fill is applied.")
+        return tuple(lines)
+
+    def _model_comparison_screen(self, options: ModelComparisonOptions) -> ModelComparisonOptions:
+        while True:
+            content = "\n".join((
+                "1) Select Models",
+                "2) Configure Comparison Filters",
+                "3) Preview Comparison Selection",
+                "4) View Terminal Comparison",
+                "5) Write Markdown Report",
+                "",
+                f"Selected models: {', '.join(options.models) if options.models else 'None'}",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Model Comparison", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                choices = self._available_comparison_models()
+                selected = self._comparison_multi_select("Select Models", choices, options.models)
+                if isinstance(selected, NavigationSignal):
+                    continue
+                if len(selected) < 2:
+                    self.output("Select at least two distinct models before continuing.")
+                else:
+                    options = replace(options, models=tuple(str(value) for value in selected))
+            elif command == "2":
+                options = replace(
+                    options,
+                    filters=self._comparison_filters_screen(options.filters, comparison_type="models"),
+                )
+            elif command not in {"3", "4", "5"}:
+                self.output("Choose a number from 1 to 5, or B to return.")
+                continue
+            if command in {"3", "4", "5"}:
+                if len(options.models) < 2:
+                    self.output("Select at least two distinct models before building a comparison.")
+                    continue
+                try:
+                    report = self.comparisons.compare_models(
+                        options.models,
+                        filters=options.filters,
+                        title=options.title,
+                    )
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("Model Comparison Failed", f"Could not build the model comparison: {error}")
+                    continue
+                selection_lines = self._model_comparison_selection_lines(report, options)
+                if command == "3":
+                    self._report_selection_preview("Model Comparison Selection", selection_lines)
+                elif command == "4":
+                    self._report_selection_preview("Model Comparison", self._model_comparison_terminal_lines(report))
+                elif report.metadata.contributing_record_count == 0:
+                    self._report_empty_screen(
+                        "No Eligible Model Comparison Runs",
+                        selection_lines + ("No eligible BenchmarkRun snapshots match the current comparison.",),
+                    )
+                else:
+                    destination = self._write_report_workflow(
+                        report,
+                        report_name="Model Comparison",
+                        selection_lines=selection_lines,
+                        destination=options.destination,
+                    )
+                    if destination is not None:
+                        options = replace(options, destination=destination)
+
+    def _session_comparison_screen(self, options: SessionComparisonOptions) -> SessionComparisonOptions:
+        while True:
+            labels = []
+            for session_id in options.sessions:
+                session = self.catalog.sessions.get(session_id)
+                labels.append(session.title if session else f"Session {session_id}")
+            content = "\n".join((
+                "1) Select Sessions",
+                "2) Configure Comparison Filters",
+                "3) Preview Comparison Selection",
+                "4) View Terminal Comparison",
+                "5) Write Markdown Report",
+                "",
+                f"Selected sessions: {', '.join(labels) if labels else 'None'}",
+                *self._comparison_filter_summary(options.filters),
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Session Comparison", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                selected = self._comparison_multi_select(
+                    "Select Sessions",
+                    self._available_comparison_sessions(),
+                    options.sessions,
+                )
+                if isinstance(selected, NavigationSignal):
+                    continue
+                if len(selected) < 2:
+                    self.output("Select at least two distinct sessions before continuing.")
+                else:
+                    options = replace(options, sessions=tuple(int(value) for value in selected))
+            elif command == "2":
+                options = replace(
+                    options,
+                    filters=self._comparison_filters_screen(options.filters, comparison_type="sessions"),
+                )
+            elif command not in {"3", "4", "5"}:
+                self.output("Choose a number from 1 to 5, or B to return.")
+                continue
+            if command in {"3", "4", "5"}:
+                if len(options.sessions) < 2:
+                    self.output("Select at least two distinct sessions before building a comparison.")
+                    continue
+                try:
+                    report = self.comparisons.compare_sessions(
+                        options.sessions,
+                        filters=options.filters,
+                        title=options.title,
+                    )
+                except (OSError, ValueError) as error:
+                    self._report_error_screen("Session Comparison Failed", f"Could not build the session comparison: {error}")
+                    continue
+                selection_lines = self._session_comparison_selection_lines(report, options)
+                if command == "3":
+                    self._report_selection_preview("Session Comparison Selection", selection_lines)
+                elif command == "4":
+                    self._report_selection_preview("Session Comparison", self._session_comparison_terminal_lines(report))
+                elif report.metadata.contributing_record_count == 0:
+                    self._report_empty_screen(
+                        "No Eligible Session Comparison Runs",
+                        selection_lines + ("No eligible BenchmarkRun snapshots match the current comparison.",),
+                    )
+                else:
+                    destination = self._write_report_workflow(
+                        report,
+                        report_name="Session Comparison",
+                        selection_lines=selection_lines,
+                        destination=options.destination,
+                    )
+                    if destination is not None:
+                        options = replace(options, destination=destination)
+
+    def _comparison_options_lines(
+        self,
+        model_options: ModelComparisonOptions,
+        session_options: SessionComparisonOptions,
+    ) -> tuple[str, ...]:
+        session_labels = tuple(
+            session.title if (session := self.catalog.sessions.get(session_id)) else f"Unavailable session {session_id}"
+            for session_id in session_options.sessions
+        )
+        return (
+            "Model comparison:",
+            f"  Models: {', '.join(model_options.models) if model_options.models else 'None selected'}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(model_options.filters))}",
+            f"  Destination: {self._report_value(model_options.destination)}",
+            "",
+            "Session comparison:",
+            f"  Sessions: {', '.join(session_labels) if session_labels else 'None selected'}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(session_options.filters))}",
+            f"  Destination: {self._report_value(session_options.destination)}",
+        )
+
+    def comparisons_screen(self) -> None:
+        """Navigate model and session comparisons while retaining options in memory."""
+
+        model_options = self._model_comparison_options
+        session_options = self._session_comparison_options
+        while True:
+            content = "\n".join((
+                "1) Compare Models",
+                "2) Compare Sessions",
+                "3) View Current Comparison Options",
+                "",
+                "Comparisons use immutable BenchmarkRun snapshots and exclude deleted runs by default.",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Comparisons", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                self._model_comparison_options = model_options
+                self._session_comparison_options = session_options
+                return
+            command = self.normalized(choice)
+            if command == "1":
+                model_options = self._model_comparison_screen(model_options)
+                self._model_comparison_options = model_options
+            elif command == "2":
+                session_options = self._session_comparison_screen(session_options)
+                self._session_comparison_options = session_options
+            elif command == "3":
+                self.render_screen("Current Comparison Options", "\n".join(self._comparison_options_lines(model_options, session_options)))
+                self.ask("Choose an option", navigation=True)
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def comparison_screen(self) -> None:
+        """Compatibility alias for callers using the singular screen name."""
+
+        self.comparisons_screen()
+
+    def _trend_selection_lines(
+        self,
+        report: TrendReport,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        metadata = report.metadata
+        interval = self._trend_interval_label(options.interval)
+        grouping = self._trend_grouping_label(options.grouping)
+        filters = (
+            self._comparison_filter_summary(options.filters)
+            if isinstance(options, BenchmarkTrendOptions)
+            else self._trend_scoreboard_filter_summary(options.filters)
+        )
+        first_score = report.aggregate_series.first_available_score_summary
+        last_score = report.aggregate_series.last_available_score_summary
+        first_speed = report.aggregate_series.first_available_speed_summary
+        last_speed = report.aggregate_series.last_available_speed_summary
+        range_label = "Date range" if isinstance(options, BenchmarkTrendOptions) else "Import-date range"
+        return (
+            f"Contributing {'run' if isinstance(options, BenchmarkTrendOptions) else 'entry'} count: {metadata.contributing_record_count}",
+            f"Excluded missing/invalid timestamp count: {metadata.excluded_timestamp_count}",
+            f"Series count: {len(report.series)}",
+            f"Populated bucket count: {report.populated_bucket_count}",
+            f"{range_label}: {metadata.date_from or 'Not available'} to {metadata.date_to or 'Not available'}",
+            f"Interval: {interval}",
+            f"Grouping: {grouping}",
+            f"Filters: {'; '.join(filters)}",
+            f"First score mean: {self._report_number(first_score.mean if first_score else None)}",
+            f"Last score mean: {self._report_number(last_score.mean if last_score else None)}",
+            f"Score delta (last minus first): {self._report_number(report.aggregate_series.score_absolute_delta)}",
+            f"First speed mean: {self._report_number(first_speed.mean if first_speed else None)}",
+            f"Last speed mean: {self._report_number(last_speed.mean if last_speed else None)}",
+            f"Speed delta (last minus first): {self._report_number(report.aggregate_series.speed_absolute_delta)}",
+            f"Coverage warnings: {', '.join(report.coverage_warnings) if report.coverage_warnings else 'None'}",
+            f"Empty buckets: {'Included' if report.include_empty_buckets else 'Excluded'}",
+        )
+
+    def _trend_terminal_lines(
+        self,
+        report: TrendReport,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        lines = list(self._trend_selection_lines(report, options))
+        lines.extend(("", "Overall bucket preview:"))
+        if not report.aggregate_series.points:
+            lines.append("No valid timestamp buckets are represented.")
+        else:
+            for point in report.aggregate_series.points[:12]:
+                lines.append(
+                    f"{point.label or point.bucket_start} | records={point.record_count} "
+                    f"| scored={point.scored_count} "
+                    f"| score mean={self._report_number(point.overall_score.mean)} "
+                    f"| score median={self._report_number(point.overall_score.median)} "
+                    f"| speed mean={self._report_number(point.tokens_per_second.mean)}"
+                )
+            if len(report.aggregate_series.points) > 12:
+                lines.append(f"... plus {len(report.aggregate_series.points) - 12} more bucket(s).")
+        lines.extend(("", "Series deltas:"))
+        if not report.series:
+            lines.append("No grouped series are represented.")
+        else:
+            for series in report.series:
+                lines.append(
+                    f"{series.label} | records={series.total_contributing_records} "
+                    f"| score delta={self._report_number(series.score_absolute_delta)} "
+                    f"| speed delta={self._report_number(series.speed_absolute_delta)}"
+                )
+        return tuple(lines)
+
+    def _trend_template_options(
+        self,
+        options: BenchmarkTrendOptions | ScoreboardTrendOptions,
+    ) -> ReportTemplateOptions:
+        return ReportTemplateOptions(include_record_details=options.include_series_details)
+
+    def _benchmark_trend_screen(self, options: BenchmarkTrendOptions) -> BenchmarkTrendOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Trend Options",
+                "2) Preview Trend Selection",
+                "3) View Concise Terminal Trend",
+                "4) Write Markdown Trend Report",
+                "",
+                *self._comparison_filter_summary(options.filters),
+                f"Interval: {self._trend_interval_label(options.interval)}",
+                f"Grouping: {self._trend_grouping_label(options.grouping)}",
+                f"Include empty buckets: {'Yes' if options.include_empty_buckets else 'No'}",
+                f"Detailed series sections: {'Yes' if options.include_series_details else 'No'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Benchmark Run Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._benchmark_trend_options_screen(options)
+                continue
+            if command not in {"2", "3", "4"}:
+                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                continue
+            try:
+                report = self.trends.benchmark_run_trend(
+                    interval=options.interval,
+                    grouping=options.grouping,
+                    filters=options.filters,
+                    include_empty_buckets=options.include_empty_buckets,
+                    title=options.title,
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Benchmark Run Trends Failed", f"Could not build the trend report: {error}")
+                continue
+            selection_lines = self._trend_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Benchmark Run Trend Selection", selection_lines)
+                continue
+            if command == "3":
+                self._report_selection_preview("Benchmark Run Trend Preview", self._trend_terminal_lines(report, options))
+                continue
+            if report.contributing_record_count == 0:
+                self._report_empty_screen(
+                    "No BenchmarkRun Trend Data",
+                    selection_lines + (
+                        "No valid timestamped BenchmarkRun snapshots match the current trend options.",
+                    ),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Benchmark Run Trends",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._trend_template_options(options),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _scoreboard_trend_screen(self, options: ScoreboardTrendOptions) -> ScoreboardTrendOptions:
+        while True:
+            content = "\n".join((
+                "1) Configure Trend Options",
+                "2) Preview Trend Selection",
+                "3) View Concise Terminal Trend",
+                "4) Write Markdown Trend Report",
+                "",
+                *self._trend_scoreboard_filter_summary(options.filters),
+                f"Interval: {self._trend_interval_label(options.interval)}",
+                f"Grouping: {self._trend_grouping_label(options.grouping)}",
+                f"Include empty buckets: {'Yes' if options.include_empty_buckets else 'No'}",
+                f"Detailed series sections: {'Yes' if options.include_series_details else 'No'}",
+                f"Destination: {self._report_value(options.destination)}",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Historical Scoreboard Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                return options
+            command = self.normalized(choice)
+            if command == "1":
+                options = self._scoreboard_trend_options_screen(options)
+                continue
+            if command not in {"2", "3", "4"}:
+                self.output("Choose 1, 2, 3, or 4, or B to return.")
+                continue
+            try:
+                report = self.trends.scoreboard_entry_trend(
+                    interval=options.interval,
+                    grouping=options.grouping,
+                    filters=options.filters,
+                    include_empty_buckets=options.include_empty_buckets,
+                    title=options.title,
+                )
+            except (OSError, ValueError) as error:
+                self._report_error_screen("Scoreboard Trends Failed", f"Could not build the trend report: {error}")
+                continue
+            selection_lines = self._trend_selection_lines(report, options)
+            if command == "2":
+                self._report_selection_preview("Historical Scoreboard Trend Selection", selection_lines)
+                continue
+            if command == "3":
+                self._report_selection_preview("Historical Scoreboard Trend Preview", self._trend_terminal_lines(report, options))
+                continue
+            if report.contributing_record_count == 0:
+                self._report_empty_screen(
+                    "No Scoreboard Trend Data",
+                    selection_lines + (
+                        "No valid timestamped ScoreboardEntry records match the current trend options.",
+                    ),
+                )
+                continue
+            destination = self._write_report_workflow(
+                report,
+                report_name="Historical Scoreboard Trends",
+                selection_lines=selection_lines,
+                destination=options.destination,
+                template_options=self._trend_template_options(options),
+            )
+            if destination is not None:
+                options = replace(options, destination=destination)
+
+    def _trend_options_lines(
+        self,
+        benchmark: BenchmarkTrendOptions,
+        scoreboard: ScoreboardTrendOptions,
+    ) -> tuple[str, ...]:
+        return (
+            "Benchmark Run Trends",
+            f"  Title: {benchmark.title}",
+            f"  Interval: {self._trend_interval_label(benchmark.interval)}",
+            f"  Grouping: {self._trend_grouping_label(benchmark.grouping)}",
+            f"  Filters: {'; '.join(self._comparison_filter_summary(benchmark.filters))}",
+            f"  Empty buckets: {'Included' if benchmark.include_empty_buckets else 'Excluded'}",
+            f"  Detailed series sections: {'Included' if benchmark.include_series_details else 'Excluded'}",
+            f"  Destination: {self._report_value(benchmark.destination)}",
+            "",
+            "Historical Scoreboard Trends",
+            f"  Title: {scoreboard.title}",
+            f"  Interval: {self._trend_interval_label(scoreboard.interval)}",
+            f"  Grouping: {self._trend_grouping_label(scoreboard.grouping)}",
+            f"  Filters: {'; '.join(self._trend_scoreboard_filter_summary(scoreboard.filters))}",
+            f"  Empty buckets: {'Included' if scoreboard.include_empty_buckets else 'Excluded'}",
+            f"  Detailed series sections: {'Included' if scoreboard.include_series_details else 'Excluded'}",
+            f"  Destination: {self._report_value(scoreboard.destination)}",
+            "",
+            "Overwrite: explicit confirmation is required for an existing file.",
+            "",
+            "B) Back",
+            "QA) Quit BenchPup completely",
+        )
+
+    def trends_screen(self) -> None:
+        """Navigate UI-independent BenchmarkRun and ScoreboardEntry trends."""
+
+        benchmark_options = self._benchmark_trend_options
+        scoreboard_options = self._scoreboard_trend_options
+        while True:
+            content = "\n".join((
+                "1) Benchmark Run Trends",
+                "2) Historical Scoreboard Trends",
+                "3) View Current Trend Options",
+                "",
+                "Trend options are session-local and never written to SQLite.",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Trends", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                self._benchmark_trend_options = benchmark_options
+                self._scoreboard_trend_options = scoreboard_options
+                return
+            command = self.normalized(choice)
+            if command == "1":
+                benchmark_options = self._benchmark_trend_screen(benchmark_options)
+                self._benchmark_trend_options = benchmark_options
+            elif command == "2":
+                scoreboard_options = self._scoreboard_trend_screen(scoreboard_options)
+                self._scoreboard_trend_options = scoreboard_options
+            elif command == "3":
+                self.render_screen("Current Trend Options", "\n".join(self._trend_options_lines(benchmark_options, scoreboard_options)))
+                self.ask("Choose an option", navigation=True)
+            else:
+                self.output("Choose 1, 2, or 3, or B to return.")
+
+    def trend_screen(self) -> None:
+        """Compatibility alias for callers using the singular screen name."""
+
+        self.trends_screen()
+
+    def reporting_screen(self) -> None:
+        """Navigate report workflows while keeping configuration in memory only."""
+
+        benchmark_options = self._benchmark_report_options
+        scoreboard_options = self._scoreboard_report_options
+        leaderboard_options = self._leaderboard_report_options
+        session_options = self._session_report_options
+        hardware_options = self._hardware_report_options
+        while True:
+            content = "\n".join((
+                "1) Detailed Benchmark Run Report",
+                "2) Historical Scoreboard Report",
+                "3) Model Leaderboard",
+                "4) Session Report",
+                "5) Hardware Report",
+                "6) View Current Report Options",
+                "",
+                "Options are session-local and are never written to SQLite.",
+                "",
+                "B) Back",
+                "QA) Quit BenchPup completely",
+            ))
+            self.render_screen("Reporting", content)
+            choice = self.ask("Choose an option", navigation=True)
+            if isinstance(choice, NavigationSignal):
+                self._benchmark_report_options = benchmark_options
+                self._scoreboard_report_options = scoreboard_options
+                self._leaderboard_report_options = leaderboard_options
+                self._session_report_options = session_options
+                self._hardware_report_options = hardware_options
+                return
+            command = self.normalized(choice)
+            if command == "1":
+                benchmark_options = self._detailed_benchmark_report_screen(benchmark_options)
+                self._benchmark_report_options = benchmark_options
+            elif command == "2":
+                scoreboard_options = self._historical_scoreboard_report_screen(scoreboard_options)
+                self._scoreboard_report_options = scoreboard_options
+            elif command == "3":
+                leaderboard_options = self._model_leaderboard_report_screen(leaderboard_options)
+                self._leaderboard_report_options = leaderboard_options
+            elif command == "4":
+                session_options = self._session_report_screen(session_options)
+                self._session_report_options = session_options
+            elif command == "5":
+                hardware_options = self._hardware_report_screen(hardware_options)
+                self._hardware_report_options = hardware_options
+            elif command == "6":
+                self.render_screen(
+                    "Current Report Options",
+                    "\n".join(
+                        self._report_configuration_lines(
+                            benchmark_options,
+                            scoreboard_options,
+                            leaderboard_options,
+                            session_options,
+                            hardware_options,
+                        )
+                    ),
+                )
+                self.ask("Choose an option", navigation=True)
+            else:
+                self.output("Choose 1, 2, 3, 4, 5, or 6, or B to return.")
+
+    def reports_screen(self) -> None:
+        """Compatibility alias for callers that use the shorter screen name."""
+
+        self.reporting_screen()
 
     @staticmethod
     def _dataset_filter_value(value: object) -> str:
@@ -1827,7 +4512,7 @@ class TerminalApp:
         models = len(self.catalog.model_profiles.list())
         sessions = len(self.catalog.sessions.list())
         database_name = self.benchmarks.database.path.name
-        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
+        self.render_screen("Main", f"Database : {database_name}\nRuns     : {runs}\nScoreboard entries : {scoreboard_entries}\nModels   : {models}\nSessions : {sessions}\n\nRuns\n----\n1) Add Run\n2) List Runs\n3) View Run\n4) Edit Run\n5) Delete Run\n\nReference Data\n--------------\n6) Sessions\n7) Models\n8) Benchmarks\n9) Prompt Templates\n10) Hardware Profiles\n\nData\n----\n11) Import\n12) Export\n13) Scoreboard\n14) Backup\n15) Restore\n16) Dataset Builder\n17) Reports\n18) Comparisons\n19) Trends\n\nHelp\n----\nH) Help\nS) Settings\nQ) Quit\nQA) Quit BenchPup completely")
 
     def run(self) -> None:
         try:
@@ -1848,6 +4533,9 @@ class TerminalApp:
             "13": "scoreboard", "scoreboard": "scoreboard",
             "14": "backup", "backup": "backup", "15": "restore", "restore": "restore",
             "16": "dataset", "dataset": "dataset",
+            "17": "reports", "report": "reports", "reports": "reports", "reporting": "reports",
+            "18": "comparisons", "comparison": "comparisons", "comparisons": "comparisons",
+            "19": "trends", "trend": "trends", "trends": "trends",
             "reference": "sessions", "reference-data": "sessions", "s": "settings", "settings": "settings", "h": "help", "help": "help",
         }
         while True:
@@ -1877,6 +4565,9 @@ class TerminalApp:
                 elif command == "backup": self.backup_data()
                 elif command == "restore": self.restore_data()
                 elif command == "dataset": self.dataset_builder_screen()
+                elif command == "reports": self.reporting_screen()
+                elif command == "comparisons": self.comparisons_screen()
+                elif command == "trends": self.trends_screen()
                 elif command == "settings": self.settings_screen()
                 elif command == "help": self.help()
                 else: self.output("Choose a menu number or command. Type H for help.")
