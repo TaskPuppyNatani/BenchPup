@@ -12,6 +12,8 @@ All notable changes to BenchPup will be documented in this file.
 - Dataset filters, duplicate policy, and configurable sensitive-text redaction
 - Dataset JSONL v1 validation, companion manifests, and pair verification
 - Screen-based dataset preview, build, overwrite confirmation, and validation workflows
+- Descriptive statistics, model/session comparisons, and UTC trend reports
+- Typed standalone HTML analytics dashboards for BenchmarkRun and ScoreboardEntry data
 
 ### Improved
 - Windows path prompt reliability
@@ -19,6 +21,9 @@ All notable changes to BenchPup will be documented in this file.
 - Restore summary formatting
 - Help screen navigation
 - Dataset export safety through structured staged-write outcomes
+- Offline HTML analytics with inline SVG, accessible fallback tables, safe JSON
+  embedding, and no external dependencies
+- Existing Export workflow integration for HTML Analytics Report option 6
 
 ### Fixed
 - Windows path prompt rendering
@@ -26,7 +31,7 @@ All notable changes to BenchPup will be documented in this file.
 - CLI navigation consistency
 
 ### Quality
-- 145 passing unit tests
+- 227 passing unit tests at Phase 4 closure
 - 0 Pyright errors / warnings
 
 ## [0.4.0-alpha] - 2026-07-10
