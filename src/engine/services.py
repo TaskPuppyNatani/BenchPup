@@ -45,7 +45,7 @@ class BenchmarkService:
         if run.prompt_template_id and not template: raise ValueError("prompt_template_id does not exist")
         if run.hardware_profile_id and not hardware: raise ValueError("hardware_profile_id does not exist")
         if run.session_id and not self.catalog.sessions.get(run.session_id): raise ValueError("session_id does not exist")
-        prompt_snapshot = run.prompt_snapshot or (self._snapshot(template) if template else {})
+        prompt_snapshot = dict(run.prompt_snapshot) if run.prompt_snapshot else (self._snapshot(template) if template else {})
         if template: prompt_snapshot["prompt_text"] = template.prompt_text
         updated = replace(run,
             model_snapshot=run.model_snapshot or (self._snapshot(model) if model else {}),
@@ -58,10 +58,22 @@ class BenchmarkService:
         return replace(updated, fingerprint=hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest())
 
     def save_run(self, run: BenchmarkRun, score: ReviewScore | None = None) -> tuple[BenchmarkRun, ReviewScore | None]:
-        saved = self.runs.create(self._resolved_run(run))
-        if score is None: return saved, None
-        saved_score = self.scores.create(replace(score, run_id=saved.id))
-        return saved, saved_score
+        """Persist a run and optional review as one engine-owned transaction."""
+
+        return self.save_run_atomic(run, score)
+
+    def save_run_atomic(self, run: BenchmarkRun, score: ReviewScore | None = None) -> tuple[BenchmarkRun, ReviewScore | None]:
+        """Create a run and optional review without leaving a partial aggregate."""
+
+        resolved = self._resolved_run(run)
+        with self.database.connection() as connection:
+            saved = self.runs.create_in_connection(resolved, connection)
+            if score is None:
+                return saved, None
+            if saved.id is None:
+                raise ValueError("saved benchmark run is missing its ID")
+            saved_score = self.scores.create_in_connection(replace(score, run_id=saved.id), connection)
+            return saved, saved_score
 
     def update_run(self, run: BenchmarkRun) -> BenchmarkRun:
         return self.runs.update(self._resolved_run(run))

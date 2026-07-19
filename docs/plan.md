@@ -163,7 +163,7 @@ Completed:
 
 ## Phase 5 — GUI
 
-**Status: In progress — Phase 5A complete**
+**Status: In progress — Phase 5B complete**
 
 ### Phase 5A — PySide6 application shell
 
@@ -186,11 +186,24 @@ Dataset Builder forms, packaging, or persistence for GUI presentation state.
 
 ### Phase 5B — GUI Runs and Add Run workflows
 
-Next recommended slice, subject to current repository priorities:
+Completed:
 
-- read-only Runs browsing and run detail presentation
-- an Add Run workflow over the existing benchmark service
-- explicit validation and error states without duplicating engine rules
+- read-only Runs browsing with deterministic newest-first ordering
+- free-text, model, benchmark, session, and scored/unscored filtering
+- complete read-only Run Details over `BenchmarkRunAggregate`
+- review-before-save Add Run wizard with current catalog selectors
+- manual/custom entry without hidden catalog creation
+- nullable numeric review fields with genuine unrecorded states
+- engine-owned snapshot and fingerprint resolution
+- atomic run-plus-review creation through the UI-independent benchmark service
+- duplicate, validation, cancellation, and unexpected-error presentation
+- Runs and Dashboard refresh after successful creation
+- offscreen GUI coverage for empty, populated, filtered, detailed, and saved runs
+
+Phase 5 remains in progress. Phase 5C is the next recommended slice for GUI
+catalog management for Sessions, Models, Benchmarks, Prompt Templates, and
+Hardware Profiles. Run editing/deletion, imports/exports, reports, Dataset
+Builder, and other workflow forms remain out of scope.
 
 ## Phase 6 — Advanced Research Features
 

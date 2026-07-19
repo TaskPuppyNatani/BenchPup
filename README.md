@@ -17,10 +17,10 @@ Completed:
 - curated JSONL Dataset Builder with filters, redaction, manifests, and validation
 - descriptive statistics, model/session comparisons, and UTC trend reports
 
-Phase 4 reporting and analytics are complete. Phase 5A is in progress: the
-initial PySide6 desktop shell and read-only Dashboard reuse the existing
-engine/reporting boundaries. The CLI remains a permanent first-class
-interface.
+Phase 4 reporting and analytics are complete. Phase 5 is in progress: the
+PySide6 desktop shell now includes a read-only Dashboard, Runs browser, run
+details, and review-before-save Add Run workflow over the existing engine
+boundaries. The CLI remains a permanent first-class interface.
 
 ## Quick Start
 
@@ -31,16 +31,20 @@ python src/main.py
 Choose an action from the interactive menu. Use the Dataset Builder to preview,
 build, and validate curated JSONL datasets from detailed BenchmarkRun records.
 
-To launch the Phase 5A desktop shell:
+To launch the Phase 5 desktop shell:
 
 ```powershell
 python -m src.gui
 ```
 
 The GUI uses the same `data/benchmark.db` and `config/settings.json` location
-resolution as the CLI. Phase 5A provides navigation, a read-only Dashboard,
-and honest placeholders; CRUD forms and workflow dialogs are not implemented
-yet.
+resolution as the CLI. Runs browsing supports free-text search, model,
+benchmark, session, and scored/unscored filters. Run Details is read-only,
+and Add Run supports existing catalog selections or manual/custom entry,
+optional review scores, engine-owned snapshots and fingerprints, and atomic
+run-plus-review creation. Dashboard and Runs refresh after a successful save.
+Catalog CRUD, editing/deleting runs, imports/exports, reports, and other
+workflow forms remain future GUI slices.
 
 ## Requirements
 

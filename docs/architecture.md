@@ -70,7 +70,7 @@ The CLI and GUI are two different front ends over the same engine.
 
 Adding a new interface should require little more than a new presentation layer.
 
-## Phase 5A GUI Application Architecture
+## Phase 5 GUI Application Architecture
 
 The initial PySide6 desktop interface lives under `src/gui` and is launched
 with `python -m src.gui`. Its package is deliberately split by ownership:
@@ -85,10 +85,15 @@ src/gui/
     navigation.py     keyboard-reachable sidebar destinations
     theme.py          centralized dark-mode tokens and stylesheet
     models/
-        dashboard.py  immutable dashboard read models/provider
+        dashboard.py       immutable dashboard read models/provider
+        runs.py             immutable Runs browser rows/provider
+        run_table_model.py  read-only Qt table model
     views/
-        dashboard.py  read-only cards, table, and refresh state
-        placeholder.py future-slice navigation pages
+        dashboard.py    read-only cards, table, and refresh state
+        runs.py         read-only Runs browser and proxy filters
+        run_details.py  read-only complete aggregate dialog
+        add_run.py      review-before-save Add Run wizard
+        placeholder.py  future-slice navigation pages
 ```
 
 The GUI entry point creates one `QApplication`, sets BenchPup application
@@ -120,14 +125,29 @@ refresh state. Missing scores and speeds remain visibly unavailable instead
 of being converted to zero. The CLI entry point and engine remain free of
 PySide6 imports.
 
-Phase 5A's `QMainWindow` has a BenchPup/version header, disabled future-action
-placeholders, a sidebar for Dashboard, Runs, Sessions, Models, Benchmarks,
-Scoreboards, Reports, Dataset Builder, Comparisons, Trends, and Settings, a
-single `QStackedWidget` page instance for each destination, and a status bar
-with database path, current page, and application status. Dashboard is the
-default page and refreshes synchronously through the existing small local
-service reads. Future blocking workflows have room for worker-thread work but
-do not add asynchronous infrastructure in this slice.
+The Phase 5 `QMainWindow` has a BenchPup/version header, an enabled global Add
+Run action, a disabled future Export action, a sidebar for Dashboard, Runs,
+Sessions, Models, Benchmarks, Scoreboards, Reports, Dataset Builder,
+Comparisons, Trends, and Settings, a single `QStackedWidget` page instance
+for each destination, and a status bar with database path, current page, and
+application status. Dashboard is the default page and refreshes synchronously
+through the existing small local service reads. The Runs page consumes
+`StatisticsService.select_benchmark_runs()` so ordinary browsing excludes
+soft-deleted runs, then uses a Qt proxy only for presentation filters. Its
+read-only table is newest-first with a deterministic ID tiebreaker, and its
+detail dialog reloads a complete `BenchmarkRunAggregate` through the reporting
+boundary.
+
+The Add Run wizard populates selectors from current catalog services, supports
+unselected nullable relationships and manual/custom entry, and does not create
+catalog records. `BenchmarkService.save_run()` now delegates to the
+UI-independent `save_run_atomic()` boundary; snapshot resolution,
+fingerprinting, validation, timestamps, and rollback remain engine-owned.
+The optional `ReviewScore` is created in the same transaction. A successful
+save refreshes both Runs and Dashboard, selects the new row when practical,
+and reports success through the existing status area. Future blocking
+workflows have room for worker-thread work but do not add asynchronous
+infrastructure in this slice.
 
 The theme is centralized in `src/gui/theme.py`, uses system fonts and Qt's
 Fusion style, provides distinct surface levels, visible focus rings, readable
@@ -138,10 +158,12 @@ Qt/text labels and starts without an optional icon dependency.
 
 GUI tests set `QT_QPA_PLATFORM=offscreen` and use temporary databases through
 the same service boundaries as the application. They cover context startup and
-cleanup, page reuse/navigation, empty and populated Dashboard states,
-missing-value display, refresh/error behavior, theme/accessibility basics,
-and a bounded shell smoke path. Phase 5B is the next recommended slice for
-Runs browsing and Add Run workflows; Phase 5 is not complete.
+cleanup, page reuse/navigation, empty and populated Dashboard and Runs states,
+ordering, filtering, soft-delete exclusion, missing-value display, read-only
+details, copy actions, Add Run validation/cancellation/duplicates, atomic
+review creation, theme/accessibility basics, and bounded shell smoke paths.
+Phase 5 remains in progress; Phase 5C is the next recommended slice for GUI
+catalog management.
 
 
 ## Domain Data Classes

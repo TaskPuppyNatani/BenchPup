@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,16 @@ class GuiApplicationTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), "False")
+
+    def test_gui_boundary_does_not_construct_repositories_or_execute_sql(self) -> None:
+        source_root = Path(__file__).parents[1] / "src"
+        gui_text = "\n".join(path.read_text(encoding="utf-8") for path in (source_root / "gui").rglob("*.py"))
+        engine_text = "\n".join(path.read_text(encoding="utf-8") for path in (source_root / "engine").rglob("*.py"))
+        self.assertNotIn("from cli", gui_text)
+        self.assertNotIn("import cli", gui_text)
+        self.assertIsNone(re.search(r"(?im)^\s*(SELECT|INSERT|UPDATE|DELETE)\s", gui_text))
+        self.assertNotIn("Repository(", gui_text)
+        self.assertNotIn("PySide6", engine_text)
 
     def test_startup_error_uses_friendly_gui_error_boundary(self) -> None:
         logger = Mock()

@@ -43,7 +43,7 @@ currently supported or documented as a cancellation command.
 
 ## Current Polish Task
 
-- [ ] Confirm temporary path-completion diagnostics are removed
+- [X] Confirm temporary path-completion diagnostics are removed
 - [x] Remove temporary hardware-import diagnostics from normal CLI output
 - [x] Keep technical details in logs when needed
 - [x] Default backups to `<project_root>/backups/`

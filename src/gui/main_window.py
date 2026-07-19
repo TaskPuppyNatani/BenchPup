@@ -18,12 +18,14 @@ from PySide6.QtWidgets import (
 
 from .context import GuiApplicationContext
 from .navigation import NAVIGATION_DESTINATIONS, NavigationSidebar
+from .views.add_run import AddRunWizard
 from .views.dashboard import DashboardView
 from .views.placeholder import PlaceholderPage
+from .views.runs import RunsView
 
 
 class MainWindow(QMainWindow):
-    """The Phase 5A desktop shell with one stable page instance per destination."""
+    """The Phase 5 desktop shell with one stable page instance per destination."""
 
     def __init__(self, context: GuiApplicationContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -77,8 +79,12 @@ class MainWindow(QMainWindow):
             page = (
                 DashboardView(self.context)
                 if destination.key == "dashboard"
+                else RunsView(self.context)
+                if destination.key == "runs"
                 else PlaceholderPage(destination.label, destination.description)
             )
+            if isinstance(page, RunsView):
+                page.add_run_requested.connect(self.open_add_run)
             self.pages[destination.key] = page
             self.page_indices[destination.key] = self.page_stack.addWidget(page)
 
@@ -107,9 +113,9 @@ class MainWindow(QMainWindow):
         layout.addLayout(brand, 1)
 
         self.add_run_button = QPushButton("Add Run")
-        self.add_run_button.setEnabled(False)
-        self.add_run_button.setAccessibleName("Add Run, planned")
-        self.add_run_button.setToolTip("Add Run is coming in a later Phase 5 slice")
+        self.add_run_button.setAccessibleName("Add benchmark run")
+        self.add_run_button.setToolTip("Open the review-before-save Add Run workflow")
+        self.add_run_button.clicked.connect(self.open_add_run)
         self.export_button = QPushButton("Export")
         self.export_button.setEnabled(False)
         self.export_button.setAccessibleName("Export, planned")
@@ -128,6 +134,8 @@ class MainWindow(QMainWindow):
         page = self.pages[key]
         if key == "dashboard" and isinstance(page, DashboardView) and not page.has_loaded:
             page.refresh()
+        if key == "runs" and isinstance(page, RunsView) and not page.has_loaded:
+            page.refresh()
 
     def navigate_to(self, key: str) -> None:
         """Select a destination without constructing a second page."""
@@ -137,10 +145,35 @@ class MainWindow(QMainWindow):
     def current_page_key(self) -> str | None:
         return self.navigation.current_page()
 
+    def open_add_run(self) -> None:
+        """Open the shared Add Run workflow from either shell entry point."""
+
+        wizard = AddRunWizard(self.context, self)
+        wizard.run_created.connect(self._handle_run_created)
+        self._active_add_run = wizard
+        try:
+            wizard.exec()
+        finally:
+            self._active_add_run = None
+
+    def _handle_run_created(self, run_id: int) -> None:
+        runs = self.runs
+        runs.refresh()
+        self.dashboard.refresh()
+        self.navigate_to("runs")
+        runs.select_run(run_id, reveal=True)
+        self.status_bar.showMessage(f"Run #{run_id} saved successfully.", 6000)
+
     @property
     def dashboard(self) -> DashboardView:
         page = self.pages["dashboard"]
         assert isinstance(page, DashboardView)
+        return page
+
+    @property
+    def runs(self) -> RunsView:
+        page = self.pages["runs"]
+        assert isinstance(page, RunsView)
         return page
 
     def closeEvent(self, event: object) -> None:

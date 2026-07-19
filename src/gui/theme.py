@@ -36,7 +36,8 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         font-size: 10pt;
         color: {tokens.text};
     }}
-    QMainWindow, QWidget#mainShell, QWidget#dashboardPage, QWidget#placeholderPage {{
+    QMainWindow, QWidget#mainShell, QWidget#dashboardPage, QWidget#runsPage,
+    QWidget#placeholderPage, QDialog, QWizard {{
         background: {tokens.background};
     }}
     QFrame#appHeader, QWidget#navigationSidebar, QFrame#summaryCard,
@@ -44,6 +45,20 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         background: {tokens.surface};
         border: 1px solid {tokens.border};
         border-radius: 8px;
+    }}
+    QFrame#runFilterPanel, QGroupBox {{
+        background: {tokens.surface};
+        border: 1px solid {tokens.border};
+        border-radius: 6px;
+        margin-top: 8px;
+        padding: 8px;
+    }}
+    QGroupBox::title {{
+        subcontrol-origin: margin;
+        left: 10px;
+        padding: 0 5px;
+        color: {tokens.muted_text};
+        font-weight: 700;
     }}
     QFrame#appHeader {{
         border: 1px solid {tokens.border};
@@ -83,9 +98,14 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         font-weight: 700;
         color: {tokens.accent};
     }}
-    QLabel#emptyState, QLabel#placeholderState {{
+    QLabel#emptyState, QLabel#placeholderState, QLabel#validationError,
+    QLabel#errorState, QLabel#fieldHint, QLabel#catalogStatus, QLabel#copyStatus {{
         color: {tokens.muted_text};
         padding: 8px;
+    }}
+    QLabel#validationError, QLabel#errorState {{
+        color: {tokens.warning};
+        font-weight: 600;
     }}
     QLabel#placeholderState {{
         font-size: 12pt;
@@ -117,7 +137,7 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
     QPushButton#secondaryButton {{
         color: {tokens.accent};
     }}
-    QLineEdit, QComboBox, QTextEdit, QPlainTextEdit {{
+    QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QDoubleSpinBox {{
         background: {tokens.surface};
         color: {tokens.text};
         border: 1px solid {tokens.border};
@@ -125,12 +145,42 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         padding: 6px 8px;
         selection-background-color: {tokens.surface_selected};
     }}
-    QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus {{
+    QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus,
+    QDoubleSpinBox:focus, QCheckBox:focus, QTabWidget:focus {{
         border: 2px solid {tokens.focus};
     }}
-    QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled, QPlainTextEdit:disabled {{
+    QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+    QDoubleSpinBox:disabled, QCheckBox:disabled {{
         color: {tokens.disabled_text};
         background: {tokens.disabled_surface};
+    }}
+    QComboBox QAbstractItemView {{
+        background: {tokens.surface_elevated};
+        color: {tokens.text};
+        selection-background-color: {tokens.surface_selected};
+        selection-color: {tokens.text};
+    }}
+    QCheckBox {{
+        spacing: 7px;
+    }}
+    QCheckBox::indicator {{
+        width: 15px;
+        height: 15px;
+    }}
+    QTabWidget::pane {{
+        border: 1px solid {tokens.border};
+        background: {tokens.surface};
+    }}
+    QTabBar::tab {{
+        background: {tokens.surface_elevated};
+        color: {tokens.muted_text};
+        padding: 8px 12px;
+        border: 1px solid {tokens.border};
+    }}
+    QTabBar::tab:selected {{
+        color: {tokens.text};
+        background: {tokens.surface_selected};
+        border-bottom-color: {tokens.accent};
     }}
     QListWidget {{
         background: transparent;

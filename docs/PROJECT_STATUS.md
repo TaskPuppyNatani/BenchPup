@@ -56,17 +56,23 @@ Status: In progress.
 - [x] Read-only Dashboard with real engine data
 - [x] Navigation placeholders for future GUI slices
 - [x] Offscreen GUI tests and smoke coverage
-- [ ] Phase 5B Runs browsing and Add Run workflow
+- [x] Phase 5B Runs browsing and Add Run workflow
 
-Phase 5A is intentionally limited to architecture, navigation, and read-only
-Dashboard presentation. CRUD forms, import/export dialogs, report dialogs,
-Dataset Builder forms, packaging, and installers are not implemented.
+Phase 5B adds a read-only Runs browser with search and filters, complete
+historical Run Details, and a review-before-save Add Run wizard. Catalog
+selectors use current service records, manual/custom relationships remain
+nullable where the engine permits them, and no catalog records are created
+implicitly. Snapshots, fingerprints, validation, timestamps, and atomic
+run-plus-review creation remain engine-owned. A successful save refreshes Runs
+and Dashboard.
+
+Run editing/deletion, catalog CRUD, import/export dialogs, report dialogs,
+Dataset Builder forms, packaging, and installers are not implemented in the
+GUI.
 
 ## Next
 
-- [ ] Phase 5B GUI Runs and Add Run workflows
-
-## Planned
+- [ ] Phase 5C GUI catalog management
 
 Phase 4 is complete and Phase 5 is in progress. The CLI remains a permanent
 first-class interface and coexists with the PySide6 GUI over the same engine

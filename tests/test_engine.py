@@ -68,6 +68,20 @@ class EngineTests(unittest.TestCase):
     def test_validation_rejects_invalid_scores(self):
         with self.assertRaises(ValueError): ReviewScore(run_id=1, overall_score=6).validate()
 
+    def test_run_and_review_are_atomic_when_review_validation_fails(self):
+        with self.assertRaises(ValueError):
+            self.service.save_run_atomic(
+                BenchmarkRun(raw_model_output="will be rolled back"),
+                ReviewScore(run_id=0, hallucination_level="Not a level"),
+            )
+        self.assertEqual(self.service.runs.list(), [])
+
+    def test_save_run_keeps_duplicate_fingerprint_protection(self):
+        self.service.save_run(BenchmarkRun(raw_model_output="same output"))
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.save_run(BenchmarkRun(raw_model_output="same output"))
+        self.assertEqual(len(self.service.runs.list()), 1)
+
     def test_catalog_records_support_update_and_delete(self):
         session = self.catalog.sessions.create(BenchmarkSession(title="Original"))
         self.assertEqual(self.catalog.sessions.update(replace(session, title="Renamed")).title, "Renamed")

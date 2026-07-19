@@ -64,9 +64,9 @@ class GuiMainWindowTests(unittest.TestCase):
     def test_navigation_and_controls_have_keyboard_accessibility_foundation(self) -> None:
         self.assertNotEqual(self.window.navigation.list_widget.focusPolicy(), Qt.FocusPolicy.NoFocus)
         self.assertNotEqual(self.window.dashboard.recent_table.focusPolicy(), Qt.FocusPolicy.NoFocus)
-        self.assertFalse(self.window.add_run_button.isEnabled())
+        self.assertTrue(self.window.add_run_button.isEnabled())
         self.assertFalse(self.window.export_button.isEnabled())
-        self.assertIn("planned", self.window.add_run_button.accessibleName().lower())
+        self.assertNotIn("planned", self.window.add_run_button.accessibleName().lower())
         self.assertIn("planned", self.window.export_button.accessibleName().lower())
         self.assertEqual(
             self.window.dashboard.recent_table.model().headerData(0, Qt.Orientation.Horizontal),

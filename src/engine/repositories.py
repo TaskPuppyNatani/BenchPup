@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from typing import Any, Generic, Protocol, TypeVar, cast
@@ -38,14 +39,28 @@ class Repository(Generic[T]):
         return self.model(**values)
 
     def create(self, item: T) -> T:
+        with self.database.connection() as connection:
+            return self.create_in_connection(item, connection)
+
+    def create_in_connection(self, item: T, connection: sqlite3.Connection) -> T:
+        """Create one item without committing the caller's transaction.
+
+        Normal callers should continue to use :meth:`create`.  Service-level
+        aggregate workflows can use this narrow primitive to persist multiple
+        related records on one connection while keeping transaction ownership
+        in the engine rather than in a UI.
+        """
+
         item.validate()
         values = self._values(item)
         marks = ", ".join("?" for _ in self.columns)
-        with self.database.connection() as connection:
-            cursor = connection.execute(f"INSERT INTO {self.table} ({', '.join(self.columns)}) VALUES ({marks})", [values[column] for column in self.columns])
-            item_id = cursor.lastrowid
-            assert item_id is not None, f"Insert into {self.table} did not return an ID"
-            created = self.get(item_id, connection=connection)
+        cursor = connection.execute(
+            f"INSERT INTO {self.table} ({', '.join(self.columns)}) VALUES ({marks})",
+            [values[column] for column in self.columns],
+        )
+        item_id = cursor.lastrowid
+        assert item_id is not None, f"Insert into {self.table} did not return an ID"
+        created = self.get(item_id, connection=connection)
         if created is None:
             raise KeyError(f"{self.table} {item_id} could not be reloaded after insert")
         return created
