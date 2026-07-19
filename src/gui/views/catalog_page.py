@@ -325,8 +325,10 @@ class CatalogPage(QWidget):
         self.error_state.setText(message)
         self.error_state.setVisible(True)
 
-    def notify_changed(self, message: str) -> None:
+    def notify_changed(self, message: str, *, select_id: int | None = None) -> None:
         self.refresh()
+        if select_id is not None:
+            self.select_record(select_id)
         self.catalog_changed.emit(self.record_label.casefold())
         self.status_message.emit(message)
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import csv
@@ -16,7 +15,7 @@ from prompt_toolkit import prompt as toolkit_prompt
 from prompt_toolkit.completion import PathCompleter
 
 from engine.database import EngineDatabase, MIGRATIONS
-from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardImportBatch, now
+from engine.domain import ATTACHMENT_TYPES, BENCHMARK_TYPES, LEVELS, BenchmarkDefinition, BenchmarkRun, BenchmarkSession, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardImportBatch, now, prompt_hash_for
 from engine.services import BenchmarkService, CatalogService
 from engine.importers import CsvImportService, ImportPreview, MAPPING_FIELDS, SUMMARY_MAPPING_FIELDS
 from engine.exporters import export_benchmark_runs_csv, export_combined_markdown, export_jsonl_training_data, export_scoreboard_csv, export_scoreboard_html
@@ -536,7 +535,7 @@ class TerminalApp:
         if isinstance(notes, NavigationSignal): return notes
         return self.catalog.prompt_templates.create(PromptTemplate(
             name=name, version=version, prompt_text=prompt_text,
-            prompt_hash=hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(), benchmark_type=benchmark_type, notes=notes,
+            prompt_hash=prompt_hash_for(prompt_text), benchmark_type=benchmark_type, notes=notes,
         ))
 
     def import_prompt_template_file(self) -> None:
@@ -599,7 +598,7 @@ class TerminalApp:
         active = self.yes_no("Active", default=True, navigation=True)
         if active is not True and active is not False:
             return
-        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        prompt_hash = prompt_hash_for(prompt_text)
         hash_match = next((item for item in self.catalog.prompt_templates.list()
                            if item.prompt_hash == prompt_hash and (item.name != name or item.version != version)), None)
         if hash_match:
@@ -675,7 +674,7 @@ class TerminalApp:
         if duplicate is not None:
             self.output(f'Another template already uses "{name}" version {version}.')
             return
-        prompt_hash = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+        prompt_hash = prompt_hash_for(prompt_text)
         changed_text = prompt_text != template.prompt_text
         if changed_text:
             self.output(f"Replacement prompt: {len(prompt_text)} characters, {len(prompt_text.splitlines())} lines, SHA-256 {prompt_hash}")

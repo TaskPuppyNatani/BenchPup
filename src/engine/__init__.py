@@ -1,7 +1,7 @@
 """Phase 1, UI-independent benchmark recorder engine."""
 
 from .database import EngineDatabase
-from .domain import serialize_utc_timestamp
+from .domain import prompt_hash_for, serialize_utc_timestamp
 from .reporting import ReportingService
 from .html_reporting import (
     AnalyticsDashboard,
@@ -140,6 +140,7 @@ __all__ = (
     "OmittedChart",
     "PairwiseComparison",
     "ReportingService",
+    "prompt_hash_for",
     "serialize_utc_timestamp",
     "ScoreboardTrendGrouping",
     "ScoreboardGroupBy",

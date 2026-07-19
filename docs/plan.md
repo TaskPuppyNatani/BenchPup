@@ -163,7 +163,7 @@ Completed:
 
 ## Phase 5 — GUI
 
-**Status: In progress — Phase 5C1 complete**
+**Status: In progress — Phase 5C2 complete**
 
 ### Phase 5A — PySide6 application shell
 
@@ -219,13 +219,25 @@ Completed:
 - historical snapshot preservation after catalog edits and lifecycle changes
 - offscreen service, table-model, editor, page, refresh, and shell coverage
 
-Prompt Template and Hardware Profile management are intentionally deferred.
-Run editing/deletion, imports/exports, reports, Dataset Builder, packaging,
-and other workflow forms remain out of scope.
+### Phase 5C2 — GUI management for Prompt Templates and Hardware Profiles
 
-Phase 5C2 is the next recommended slice: GUI Prompt Template and Hardware
-Profile management, including prompt versioning and hardware backend-version
-editing.
+Completed:
+
+- typed `CatalogService` list/get/create/update operations for Prompt Templates
+  and Hardware Profiles, plus Prompt Template active/inactive lifecycle
+- engine-owned Prompt Template SHA-256 derivation from exact UTF-8 text
+- Prompt Templates page and editor with exact multiline preservation, read-only
+  stored hash display, active/inactive filtering, lifecycle actions, and
+  duplicate/validation/cancellation handling
+- Hardware Profiles page and editor with optional numeric fields, structured
+  backend-version key/value editing, and read-only imported provenance
+- Add Run refresh through typed active Prompt Template and Hardware Profile
+  catalog operations
+- offscreen CRUD, lifecycle, provenance, import-parser round-trip, validation,
+  cancellation, selection, navigation, and historical snapshot coverage
+
+Remaining GUI workflow forms, imports/exports, reports, Dataset Builder,
+packaging, and other later Phase 5 slices remain out of scope.
 
 ## Phase 6 — Advanced Research Features
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable
 from typing import Any
 
@@ -19,6 +18,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..context import GuiApplicationContext
+
+try:
+    from ...engine.services import is_database_integrity_error
+except ImportError:  # pragma: no cover - exercised by top-level test imports.
+    from engine.services import is_database_integrity_error  # type: ignore[no-redef]
 
 
 class CatalogEditorDialog(QDialog):
@@ -111,18 +115,17 @@ class CatalogEditorDialog(QDialog):
             self._dirty = False
             self.accept()
             return True
-        except sqlite3.IntegrityError:
-            self._show_failure("A record with that name already exists. Nothing was changed.")
-            return False
-        except ValueError as error:
-            self._show_failure(f"The record could not be saved: {error}", error)
-            return False
         except Exception as error:
-            self.context.logger.error(
-                "Catalog editor save failed",
-                exc_info=(type(error), error, error.__traceback__),
-            )
-            self._show_failure("The record could not be saved. See logs/error.log for details.")
+            if is_database_integrity_error(error):
+                self._show_failure("A record with that name already exists. Nothing was changed.")
+            elif isinstance(error, ValueError):
+                self._show_failure(f"The record could not be saved: {error}", error)
+            else:
+                self.context.logger.error(
+                    "Catalog editor save failed",
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+                self._show_failure("The record could not be saved. See logs/error.log for details.")
             return False
         finally:
             self._saving = False

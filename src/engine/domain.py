@@ -18,6 +18,12 @@ def serialize_utc_timestamp(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def prompt_hash_for(prompt_text: str) -> str:
+    """Return the authoritative SHA-256 hash for exact UTF-8 prompt text."""
+
+    return hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+
+
 def now() -> str:
     return serialize_utc_timestamp(datetime.now(timezone.utc))
 
@@ -154,7 +160,7 @@ class PromptTemplate:
         require(self.name, "name"); require(self.version, "version")
         require(self.prompt_text, "prompt_text"); require(self.prompt_hash, "prompt_hash")
         if self.benchmark_type not in BENCHMARK_TYPES: raise ValueError("invalid benchmark_type")
-        expected = hashlib.sha256(self.prompt_text.encode("utf-8")).hexdigest()
+        expected = prompt_hash_for(self.prompt_text)
         if self.prompt_hash != expected: raise ValueError("prompt_hash does not match prompt_text")
 
 

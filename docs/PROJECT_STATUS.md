@@ -58,6 +58,7 @@ Status: In progress.
 - [x] Offscreen GUI tests and smoke coverage
 - [x] Phase 5B Runs browsing and Add Run workflow
 - [x] Phase 5C1 Sessions, Model Profiles, and Benchmark Definitions catalog GUI
+- [x] Phase 5C2 Prompt Templates and Hardware Profiles catalog GUI
 
 Phase 5B adds a read-only Runs browser with search and filters, complete
 historical Run Details, and a review-before-save Add Run wizard. Catalog
@@ -74,21 +75,25 @@ management; and Benchmark Definitions support active/inactive/all visibility,
 editing, and deactivate/reactivate. Catalog editors preserve nullable values,
 use explicit 24-hour local timestamp entry with system-timezone/DST-aware UTC
 serialization, and preserve run snapshots. Add Run reloads eligible selectors
-after a catalog change without creating catalog records implicitly. Prompt
-Template and Hardware Profile management remain deferred.
+after a catalog change without creating catalog records implicitly.
+
+Phase 5C2 adds functional Prompt Templates and Hardware Profiles pages. Prompt
+Template editors preserve exact multiline text, derive hashes through the engine,
+and support active/inactive lifecycle changes. Hardware Profile editors preserve
+optional numeric values, structured backend-version mappings, and imported
+provenance metadata. Historical prompt and hardware snapshots remain unchanged
+after reusable catalog edits.
 
 Run editing/deletion, import/export dialogs, report dialogs, Dataset Builder
 forms, packaging, and installers are not implemented in the GUI.
 
 ## Next
 
-- [ ] Phase 5C2 GUI Prompt Template and Hardware Profile management
+- [ ] Remaining Phase 5 GUI workflow slices
 
-Phase 4 is complete and Phase 5 is in progress. Phase 5C2 is the next
-recommended GUI slice, covering Prompt Template versioning and Hardware
-Profile backend-version editing. The CLI remains a permanent first-class
-interface and coexists with the PySide6 GUI over the same engine and database
-boundaries.
+Phase 4 is complete and Phase 5 is in progress. Remaining GUI workflow slices
+are intentionally deferred. The CLI remains a permanent first-class interface
+and coexists with the PySide6 GUI over the same engine and database boundaries.
 
 - [ ] Knowledge base
 - [ ] AI lab notebook

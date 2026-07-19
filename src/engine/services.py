@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import replace
 from typing import Any, TypeVar
 
 from .database import EngineDatabase
-from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now
+from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now, prompt_hash_for
 from .repositories import Repository
 
 _T = TypeVar("_T")
+
+
+def is_database_integrity_error(error: BaseException) -> bool:
+    """Expose the engine's persistence-conflict classification without leaking it into UI code."""
+
+    return isinstance(error, sqlite3.IntegrityError)
 
 
 class CatalogService:
@@ -149,6 +156,55 @@ class CatalogService:
         if definition.is_active:
             return definition
         return self.benchmark_definitions.update(replace(definition, is_active=True))
+
+    def list_prompt_templates(self, *, include_inactive: bool = False) -> list[PromptTemplate]:
+        records = self.prompt_templates.list()
+        if not include_inactive:
+            records = [record for record in records if record.is_active]
+        return self._ordered(records, lambda record: (record.name, record.version))
+
+    def get_prompt_template(self, template_id: int) -> PromptTemplate | None:
+        return self.prompt_templates.get(template_id)
+
+    @staticmethod
+    def _with_prompt_hash(template: PromptTemplate) -> PromptTemplate:
+        """Prepare prompt text through the engine-owned hash contract."""
+
+        return replace(template, prompt_hash=prompt_hash_for(template.prompt_text))
+
+    def create_prompt_template(self, template: PromptTemplate) -> PromptTemplate:
+        return self.prompt_templates.create(self._with_prompt_hash(template))
+
+    def update_prompt_template(self, template: PromptTemplate) -> PromptTemplate:
+        return self.prompt_templates.update(self._with_prompt_hash(template))
+
+    def deactivate_prompt_template(self, template_id: int) -> PromptTemplate:
+        template = self.prompt_templates.get(template_id)
+        if template is None:
+            raise KeyError(f"prompt_templates {template_id} does not exist")
+        if not template.is_active:
+            return template
+        return self.prompt_templates.update(replace(template, is_active=False))
+
+    def reactivate_prompt_template(self, template_id: int) -> PromptTemplate:
+        template = self.prompt_templates.get(template_id)
+        if template is None:
+            raise KeyError(f"prompt_templates {template_id} does not exist")
+        if template.is_active:
+            return template
+        return self.prompt_templates.update(replace(template, is_active=True))
+
+    def list_hardware_profiles(self) -> list[HardwareProfile]:
+        return self._ordered(self.hardware_profiles.list(), lambda record: record.name)
+
+    def get_hardware_profile(self, profile_id: int) -> HardwareProfile | None:
+        return self.hardware_profiles.get(profile_id)
+
+    def create_hardware_profile(self, profile: HardwareProfile) -> HardwareProfile:
+        return self.hardware_profiles.create(profile)
+
+    def update_hardware_profile(self, profile: HardwareProfile) -> HardwareProfile:
+        return self.hardware_profiles.update(profile)
 
 
 class BenchmarkService:

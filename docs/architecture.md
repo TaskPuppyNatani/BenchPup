@@ -172,6 +172,16 @@ explicit 24-hour format, convert them to canonical UTC using the system
 timezone and DST rules, and route validation through the engine. GUI failure
 states log details while showing short user-facing messages.
 
+Phase 5C2 extends the same service boundary to Prompt Templates and Hardware
+Profiles. Prompt Template writes derive the SHA-256 from exact UTF-8 prompt text
+through the engine-owned helper before domain validation; the GUI never accepts
+or calculates a hash field. Hardware Profile writes pass the existing
+`dict[str, str]` backend-version mapping through the repository's established
+JSON field, while imported `computer_name`, `import_source`, and `imported_at`
+provenance remain engine-owned values during editing. The two new pages reuse
+the shared catalog table/editor patterns, and Add Run consumes their typed
+active/available service lists.
+
 The catalog pages never create records implicitly. After a successful catalog
 change, the page refreshes itself and notifies the main window so an open Add
 Run workflow can reload eligible selectors and Dashboard/Runs can refresh
@@ -193,9 +203,9 @@ catalog states, ordering, filtering, lifecycle changes, missing-value display,
 read-only details, copy actions, Add Run validation/cancellation/duplicates and
 catalog refresh, atomic review creation, snapshot preservation,
 theme/accessibility basics, and bounded shell smoke paths.
-Phase 5 remains in progress. Phase 5C2 is the next recommended slice for GUI
-Prompt Template and Hardware Profile management, including prompt versioning
-and hardware backend-version editing.
+Phase 5 remains in progress. Remaining GUI workflow slices are deferred; the
+CLI, importers, archive boundary, and historical run snapshots remain
+unchanged by Phase 5C2.
 
 
 ## Domain Data Classes

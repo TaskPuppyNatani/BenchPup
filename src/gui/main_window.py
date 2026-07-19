@@ -22,8 +22,10 @@ from .views.add_run import AddRunWizard
 from .views.benchmarks import BenchmarksView
 from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
+from .views.hardware_profiles import HardwareProfilesView
 from .views.models import ModelsView
 from .views.placeholder import PlaceholderPage
+from .views.prompt_templates import PromptTemplatesView
 from .views.runs import RunsView
 from .views.sessions import SessionsView
 
@@ -92,6 +94,10 @@ class MainWindow(QMainWindow):
                 if destination.key == "models"
                 else BenchmarksView(self.context)
                 if destination.key == "benchmarks"
+                else PromptTemplatesView(self.context)
+                if destination.key == "prompt_templates"
+                else HardwareProfilesView(self.context)
+                if destination.key == "hardware_profiles"
                 else PlaceholderPage(destination.label, destination.description)
             )
             if isinstance(page, RunsView):
@@ -150,7 +156,7 @@ class MainWindow(QMainWindow):
             page.refresh()
         if key == "runs" and isinstance(page, RunsView) and not page.has_loaded:
             page.refresh()
-        if key in {"sessions", "models", "benchmarks"} and isinstance(page, CatalogPage) and not page.has_loaded:
+        if key in {"sessions", "models", "benchmarks", "prompt_templates", "hardware_profiles"} and isinstance(page, CatalogPage) and not page.has_loaded:
             page.refresh()
 
     def navigate_to(self, key: str) -> None:
@@ -218,6 +224,18 @@ class MainWindow(QMainWindow):
     def benchmarks(self) -> BenchmarksView:
         page = self.pages["benchmarks"]
         assert isinstance(page, BenchmarksView)
+        return page
+
+    @property
+    def prompt_templates(self) -> PromptTemplatesView:
+        page = self.pages["prompt_templates"]
+        assert isinstance(page, PromptTemplatesView)
+        return page
+
+    @property
+    def hardware_profiles(self) -> HardwareProfilesView:
+        page = self.pages["hardware_profiles"]
+        assert isinstance(page, HardwareProfilesView)
         return page
 
     def closeEvent(self, event: object) -> None:

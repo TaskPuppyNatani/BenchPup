@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -31,8 +30,10 @@ from ..context import GuiApplicationContext
 
 try:
     from ...engine.domain import LEVELS, BenchmarkRun, ReviewScore
+    from ...engine.services import is_database_integrity_error
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine.domain import LEVELS, BenchmarkRun, ReviewScore  # type: ignore[no-redef]
+    from engine.services import is_database_integrity_error  # type: ignore[no-redef]
 
 
 NOT_SELECTED = "Not selected"
@@ -338,8 +339,8 @@ class AddRunWizard(QWizard):
             sessions = self.context.catalog.list_sessions()
             models = self.context.catalog.list_model_profiles()
             benchmarks = self.context.catalog.list_benchmark_definitions()
-            templates = self.context.catalog.prompt_templates.list()
-            hardware = self.context.catalog.hardware_profiles.list()
+            templates = self.context.catalog.list_prompt_templates()
+            hardware = self.context.catalog.list_hardware_profiles()
             self._populate(self.session_combo, sessions, lambda value: value.title, selected_id=previous["session"], preserve_selection=preserve_selection)
             default_model = next((value.id for value in models if value.is_default), None)
             self._populate(self.model_combo, models, lambda value: value.name, default_id=default_model, selected_id=previous["model"], preserve_selection=preserve_selection)
@@ -384,7 +385,7 @@ class AddRunWizard(QWizard):
         template_id = self._selected_id(self.prompt_template_combo)
         if template_id is None or not hasattr(self, "prompt_name_edit"):
             return
-        template = self.context.catalog.prompt_templates.get(template_id)
+        template = self.context.catalog.get_prompt_template(template_id)
         if template is None:
             return
         if not self.prompt_name_edit.text().strip():
@@ -507,17 +508,16 @@ class AddRunWizard(QWizard):
             self._dirty = False
             self.run_created.emit(run.id)
             return True
-        except sqlite3.IntegrityError as error:
-            self.context.logger.info("Add Run rejected by database constraint: %s", error)
-            self._show_save_error("This run matches an existing run or another database constraint. Nothing was saved.")
-            return False
-        except ValueError as error:
-            self.context.logger.info("Add Run validation failed: %s", error)
-            self._show_save_error(f"The run could not be saved: {error}")
-            return False
-        except Exception:
-            self.context.logger.exception("Add Run failed")
-            self._show_save_error("The run could not be saved. See logs/error.log for details; no partial run was kept.")
+        except Exception as error:
+            if is_database_integrity_error(error):
+                self.context.logger.info("Add Run rejected by database constraint: %s", error)
+                self._show_save_error("This run matches an existing run or another database constraint. Nothing was saved.")
+            elif isinstance(error, ValueError):
+                self.context.logger.info("Add Run validation failed: %s", error)
+                self._show_save_error(f"The run could not be saved: {error}")
+            else:
+                self.context.logger.exception("Add Run failed")
+                self._show_save_error("The run could not be saved. See logs/error.log for details; no partial run was kept.")
             return False
         finally:
             self._saving = False

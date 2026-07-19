@@ -47,10 +47,12 @@ run-plus-review creation. Dashboard and Runs refresh after a successful save.
 Sessions support active/archived/all visibility and archive/restore; Models
 support explicit profile editing and engine-owned default management; and
 Benchmarks support active/inactive/all visibility, editing, and lifecycle
-changes. Catalog edits preserve stored run snapshots, and Add Run refreshes
-its eligible selectors after catalog changes. Prompt Template and Hardware
-Profile management, run editing/deletion, imports/exports, reports, and other
-workflow forms remain future GUI slices.
+changes. Prompt Templates support exact multiline editing, engine-owned hashes,
+and active/inactive lifecycle management. Hardware Profiles support structured
+backend-version editing and imported provenance preservation. Catalog edits
+preserve stored run snapshots, and Add Run refreshes its eligible selectors
+after catalog changes. Run editing/deletion, imports/exports, reports, and
+other workflow forms remain future GUI slices.
 
 ## Requirements
 
