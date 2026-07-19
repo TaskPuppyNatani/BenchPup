@@ -321,23 +321,35 @@ class AddRunWizard(QWizard):
         combo.setCurrentText("Medium")
         return combo
 
-    def _load_catalog_choices(self) -> None:
+    def refresh_catalog_choices(self) -> None:
+        """Reload current eligible catalog records without restarting the GUI."""
+
+        self._load_catalog_choices(preserve_selection=True)
+
+    def _load_catalog_choices(self, *, preserve_selection: bool = False) -> None:
         try:
-            sessions = self.context.catalog.sessions.list()
-            models = self.context.catalog.model_profiles.list()
-            benchmarks = self.context.catalog.benchmark_definitions.list()
+            previous = {
+                "session": self._selected_id(self.session_combo) if preserve_selection else None,
+                "model": self._selected_id(self.model_combo) if preserve_selection else None,
+                "benchmark": self._selected_id(self.benchmark_combo) if preserve_selection else None,
+                "prompt": self._selected_id(self.prompt_template_combo) if preserve_selection else None,
+                "hardware": self._selected_id(self.hardware_combo) if preserve_selection else None,
+            }
+            sessions = self.context.catalog.list_sessions()
+            models = self.context.catalog.list_model_profiles()
+            benchmarks = self.context.catalog.list_benchmark_definitions()
             templates = self.context.catalog.prompt_templates.list()
             hardware = self.context.catalog.hardware_profiles.list()
-            self._populate(self.session_combo, sessions, lambda value: value.title)
+            self._populate(self.session_combo, sessions, lambda value: value.title, selected_id=previous["session"], preserve_selection=preserve_selection)
             default_model = next((value.id for value in models if value.is_default), None)
-            self._populate(self.model_combo, models, lambda value: value.name, default_id=default_model)
-            self._populate(self.benchmark_combo, benchmarks, lambda value: value.name)
-            self._populate(self.prompt_template_combo, templates, lambda value: f"{value.name} v{value.version}")
-            self._populate(self.hardware_combo, hardware, lambda value: value.name)
+            self._populate(self.model_combo, models, lambda value: value.name, default_id=default_model, selected_id=previous["model"], preserve_selection=preserve_selection)
+            self._populate(self.benchmark_combo, benchmarks, lambda value: value.name, selected_id=previous["benchmark"], preserve_selection=preserve_selection)
+            self._populate(self.prompt_template_combo, templates, lambda value: f"{value.name} v{value.version}", selected_id=previous["prompt"], preserve_selection=preserve_selection)
+            self._populate(self.hardware_combo, hardware, lambda value: value.name, selected_id=previous["hardware"], preserve_selection=preserve_selection)
             if not any((sessions, models, benchmarks, templates, hardware)):
                 self.catalog_status.setText("No catalog records are available. Manual/custom entry is supported; this workflow will not create catalog records automatically.")
             else:
-                self.catalog_status.setText("Catalog selectors use current records only. Leaving a selector unselected keeps that relationship absent.")
+                self.catalog_status.setText("Catalog selectors use current active records where lifecycle rules apply. Leaving a selector unselected keeps that relationship absent.")
         except Exception:
             self.context.logger.exception("Add Run catalog loading failed")
             self.catalog_status.setText("Catalog records could not be loaded. You can still enter a manual/custom run; see logs/error.log for details.")
@@ -349,6 +361,8 @@ class AddRunWizard(QWizard):
         labeler: Callable[[Any], str],
         *,
         default_id: int | None = None,
+        selected_id: int | None = None,
+        preserve_selection: bool = False,
     ) -> None:
         ordered = sorted(
             (record for record in records if getattr(record, "id", None) is not None),
@@ -359,8 +373,9 @@ class AddRunWizard(QWizard):
         combo.addItem(NOT_SELECTED, None)
         for record in ordered:
             combo.addItem(labeler(record), record.id)
-        if default_id is not None:
-            index = combo.findData(default_id)
+        target_id = selected_id if preserve_selection else default_id
+        if target_id is not None:
+            index = combo.findData(target_id)
             if index >= 0:
                 combo.setCurrentIndex(index)
         combo.blockSignals(False)
@@ -381,7 +396,7 @@ class AddRunWizard(QWizard):
         definition_id = self._selected_id(self.benchmark_combo)
         if definition_id is None or not hasattr(self, "prompt_text_edit"):
             return
-        definition = self.context.catalog.benchmark_definitions.get(definition_id)
+        definition = self.context.catalog.get_benchmark_definition(definition_id)
         if definition is not None and definition.default_prompt and not self.prompt_text_edit.toPlainText():
             self.prompt_text_edit.setPlainText(definition.default_prompt)
 

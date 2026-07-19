@@ -79,15 +79,26 @@ class Repository(Generic[T]):
             return [self._item(row) for row in connection.execute(statement)]
 
     def update(self, item: T) -> T:
+        with self.database.connection() as connection:
+            updated = self.update_in_connection(item, connection)
+        return updated
+
+    def update_in_connection(self, item: T, connection: sqlite3.Connection) -> T:
+        """Update one item without committing the caller's transaction."""
+
         item_id = item.id
-        if item_id is None: raise ValueError("id is required for update")
+        if item_id is None:
+            raise ValueError("id is required for update")
         if "updated_at" in self.columns:
             item = cast(T, replace(cast(Any, item), updated_at=datetime.now(timezone.utc).isoformat()))
-        item.validate(); values = self._values(item)
+        item.validate()
+        values = self._values(item)
         assignments = ", ".join(f"{column} = ?" for column in self.columns)
-        with self.database.connection() as connection:
-            connection.execute(f"UPDATE {self.table} SET {assignments} WHERE id = ?", [values[column] for column in self.columns] + [item_id])
-            updated = self.get(item_id, connection)
+        connection.execute(
+            f"UPDATE {self.table} SET {assignments} WHERE id = ?",
+            [values[column] for column in self.columns] + [item_id],
+        )
+        updated = self.get(item_id, connection)
         if updated is None: raise KeyError(f"{self.table} {item_id} does not exist")
         return updated
 

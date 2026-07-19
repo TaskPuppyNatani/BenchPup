@@ -163,7 +163,7 @@ Completed:
 
 ## Phase 5 — GUI
 
-**Status: In progress — Phase 5B complete**
+**Status: In progress — Phase 5C1 complete**
 
 ### Phase 5A — PySide6 application shell
 
@@ -200,10 +200,32 @@ Completed:
 - Runs and Dashboard refresh after successful creation
 - offscreen GUI coverage for empty, populated, filtered, detailed, and saved runs
 
-Phase 5 remains in progress. Phase 5C is the next recommended slice for GUI
-catalog management for Sessions, Models, Benchmarks, Prompt Templates, and
-Hardware Profiles. Run editing/deletion, imports/exports, reports, Dataset
-Builder, and other workflow forms remain out of scope.
+### Phase 5C1 — GUI catalog foundation for Sessions, Models, and Benchmarks
+
+Completed:
+
+- typed `CatalogService` list/get/create/update operations for Sessions,
+  Model Profiles, and Benchmark Definitions
+- engine-owned Session archive/restore, Benchmark Definition
+  deactivate/reactivate, and Model Profile default management
+- shared read-only sortable catalog table, search, visibility filters,
+  empty/error states, selection, keyboard activation, and confirmation flows
+- explicit Add/Edit forms for all live fields in the three catalog domains
+- explicit 24-hour local timestamp display with system-timezone/DST-aware UTC
+  serialization, plus nullable numeric editors that preserve unrecorded values
+  versus zero
+- Add Run refresh of eligible catalog selectors after catalog changes without
+  implicit catalog creation
+- historical snapshot preservation after catalog edits and lifecycle changes
+- offscreen service, table-model, editor, page, refresh, and shell coverage
+
+Prompt Template and Hardware Profile management are intentionally deferred.
+Run editing/deletion, imports/exports, reports, Dataset Builder, packaging,
+and other workflow forms remain out of scope.
+
+Phase 5C2 is the next recommended slice: GUI Prompt Template and Hardware
+Profile management, including prompt versioning and hardware backend-version
+editing.
 
 ## Phase 6 — Advanced Research Features
 

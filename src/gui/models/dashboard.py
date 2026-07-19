@@ -85,8 +85,8 @@ class DashboardDataProvider:
             summary=DashboardSummary(
                 benchmark_run_count=summary.total_eligible_runs,
                 scored_run_count=summary.scored_runs,
-                model_count=len(self.context.catalog.model_profiles.list()),
-                session_count=len(self.context.catalog.sessions.list()),
+                model_count=len(self.context.catalog.list_model_profiles()),
+                session_count=len(self.context.catalog.list_sessions()),
                 scoreboard_entry_count=len(self.context.catalog.scoreboard_entries.list()),
                 average_overall_score=summary.overall_score.mean,
             ),

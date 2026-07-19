@@ -19,8 +19,9 @@ Completed:
 
 Phase 4 reporting and analytics are complete. Phase 5 is in progress: the
 PySide6 desktop shell now includes a read-only Dashboard, Runs browser, run
-details, and review-before-save Add Run workflow over the existing engine
-boundaries. The CLI remains a permanent first-class interface.
+details, review-before-save Add Run workflow, and functional Sessions, Models,
+and Benchmarks catalog pages over the existing engine boundaries. The CLI
+remains a permanent first-class interface.
 
 ## Quick Start
 
@@ -43,7 +44,12 @@ benchmark, session, and scored/unscored filters. Run Details is read-only,
 and Add Run supports existing catalog selections or manual/custom entry,
 optional review scores, engine-owned snapshots and fingerprints, and atomic
 run-plus-review creation. Dashboard and Runs refresh after a successful save.
-Catalog CRUD, editing/deleting runs, imports/exports, reports, and other
+Sessions support active/archived/all visibility and archive/restore; Models
+support explicit profile editing and engine-owned default management; and
+Benchmarks support active/inactive/all visibility, editing, and lifecycle
+changes. Catalog edits preserve stored run snapshots, and Add Run refreshes
+its eligible selectors after catalog changes. Prompt Template and Hardware
+Profile management, run editing/deletion, imports/exports, reports, and other
 workflow forms remain future GUI slices.
 
 ## Requirements

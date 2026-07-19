@@ -46,7 +46,7 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         border: 1px solid {tokens.border};
         border-radius: 8px;
     }}
-    QFrame#runFilterPanel, QGroupBox {{
+    QFrame#runFilterPanel, QFrame#catalogToolbar, QGroupBox {{
         background: {tokens.surface};
         border: 1px solid {tokens.border};
         border-radius: 6px;
@@ -99,7 +99,8 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         color: {tokens.accent};
     }}
     QLabel#emptyState, QLabel#placeholderState, QLabel#validationError,
-    QLabel#errorState, QLabel#fieldHint, QLabel#catalogStatus, QLabel#copyStatus {{
+    QLabel#errorState, QLabel#fieldHint, QLabel#catalogStatus, QLabel#copyStatus,
+    QLabel#validationSummary, QLabel#resultCount {{
         color: {tokens.muted_text};
         padding: 8px;
     }}
@@ -137,7 +138,7 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
     QPushButton#secondaryButton {{
         color: {tokens.accent};
     }}
-    QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QDoubleSpinBox {{
+    QLineEdit, QComboBox, QTextEdit, QPlainTextEdit, QDoubleSpinBox, QSpinBox {{
         background: {tokens.surface};
         color: {tokens.text};
         border: 1px solid {tokens.border};
@@ -146,11 +147,11 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         selection-background-color: {tokens.surface_selected};
     }}
     QLineEdit:focus, QComboBox:focus, QTextEdit:focus, QPlainTextEdit:focus,
-    QDoubleSpinBox:focus, QCheckBox:focus, QTabWidget:focus {{
+    QDoubleSpinBox:focus, QSpinBox:focus, QCheckBox:focus, QTabWidget:focus {{
         border: 2px solid {tokens.focus};
     }}
     QLineEdit:disabled, QComboBox:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
-    QDoubleSpinBox:disabled, QCheckBox:disabled {{
+    QDoubleSpinBox:disabled, QSpinBox:disabled, QCheckBox:disabled {{
         color: {tokens.disabled_text};
         background: {tokens.disabled_surface};
     }}

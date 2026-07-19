@@ -3,16 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from typing import Any
+from typing import Any, TypeVar
 
 from .database import EngineDatabase
 from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now
 from .repositories import Repository
 
+_T = TypeVar("_T")
+
 
 class CatalogService:
-    """CRUD services for reusable catalog records."""
+    """Typed, UI-independent operations for reusable catalog records."""
+
     def __init__(self, database: EngineDatabase):
+        self.database = database
         self.sessions = Repository(database, "benchmark_sessions", BenchmarkSession, bool_fields={"is_deleted"})
         self.model_profiles = Repository(database, "model_profiles", ModelProfile, bool_fields={"thinking_enabled", "flash_attention", "is_default"})
         self.hardware_profiles = Repository(database, "hardware_profiles", HardwareProfile, json_fields={"backend_versions"})
@@ -21,6 +25,130 @@ class CatalogService:
         self.export_profiles = Repository(database, "export_profiles", ExportProfile, json_fields={"field_selection", "filter_json"})
         self.scoreboard_entries = Repository(database, "scoreboard_entries", ScoreboardEntry, bool_fields={"is_deleted"})
         self.scoreboard_import_batches = Repository(database, "scoreboard_import_batches", ScoreboardImportBatch, bool_fields={"is_deleted"})
+
+    @staticmethod
+    def _record_id(record: object) -> int:
+        value = getattr(record, "id", None)
+        return int(value) if value is not None else -1
+
+    @staticmethod
+    def _ordered(records: list[_T], label: Any) -> list[_T]:
+        return sorted(
+            records,
+            key=lambda record: (
+                str(label(record)).casefold(),
+                str(label(record)),
+                CatalogService._record_id(record),
+            ),
+        )
+
+    def list_sessions(self, *, include_deleted: bool = False) -> list[BenchmarkSession]:
+        return self._ordered(self.sessions.list(include_deleted=include_deleted), lambda record: record.title)
+
+    def get_session(self, session_id: int) -> BenchmarkSession | None:
+        return self.sessions.get(session_id)
+
+    def create_session(self, session: BenchmarkSession) -> BenchmarkSession:
+        return self.sessions.create(session)
+
+    def update_session(self, session: BenchmarkSession) -> BenchmarkSession:
+        return self.sessions.update(session)
+
+    def archive_session(self, session_id: int) -> BenchmarkSession:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"benchmark_sessions {session_id} does not exist")
+        if session.is_deleted:
+            return session
+        return self.sessions.update(replace(session, is_deleted=True))
+
+    def restore_session(self, session_id: int) -> BenchmarkSession:
+        session = self.sessions.get(session_id)
+        if session is None:
+            raise KeyError(f"benchmark_sessions {session_id} does not exist")
+        if not session.is_deleted:
+            return session
+        return self.sessions.update(replace(session, is_deleted=False))
+
+    def session_run_counts(self) -> dict[int, int]:
+        """Return ordinary, non-deleted run counts grouped by session."""
+
+        with self.database.connection() as connection:
+            rows = connection.execute(
+                "SELECT session_id, COUNT(*) AS run_count "
+                "FROM benchmark_runs "
+                "WHERE session_id IS NOT NULL AND is_deleted = 0 "
+                "GROUP BY session_id"
+            )
+            return {int(row["session_id"]): int(row["run_count"]) for row in rows}
+
+    def list_model_profiles(self) -> list[ModelProfile]:
+        return self._ordered(self.model_profiles.list(), lambda record: record.name)
+
+    def get_model_profile(self, profile_id: int) -> ModelProfile | None:
+        return self.model_profiles.get(profile_id)
+
+    def save_model_profile(self, profile: ModelProfile, *, make_default: bool | None = None) -> ModelProfile:
+        """Create or update a profile while enforcing one engine-owned default."""
+
+        desired_default = profile.is_default if make_default is None else make_default
+        with self.database.connection() as connection:
+            if desired_default:
+                if profile.id is None:
+                    connection.execute("UPDATE model_profiles SET is_default = 0")
+                else:
+                    connection.execute("UPDATE model_profiles SET is_default = 0 WHERE id <> ?", (profile.id,))
+            replacement = replace(profile, is_default=desired_default)
+            if replacement.id is None:
+                return self.model_profiles.create_in_connection(replacement, connection)
+            return self.model_profiles.update_in_connection(replacement, connection)
+
+    def create_model_profile(self, profile: ModelProfile, *, make_default: bool | None = None) -> ModelProfile:
+        return self.save_model_profile(profile, make_default=make_default)
+
+    def update_model_profile(self, profile: ModelProfile, *, make_default: bool | None = None) -> ModelProfile:
+        return self.save_model_profile(profile, make_default=make_default)
+
+    def set_default_model_profile(self, profile_id: int) -> ModelProfile:
+        profile = self.model_profiles.get(profile_id)
+        if profile is None:
+            raise KeyError(f"model_profiles {profile_id} does not exist")
+        if profile.is_default:
+            return profile
+        with self.database.connection() as connection:
+            connection.execute("UPDATE model_profiles SET is_default = 0 WHERE id <> ?", (profile_id,))
+            return self.model_profiles.update_in_connection(replace(profile, is_default=True), connection)
+
+    def list_benchmark_definitions(self, *, include_inactive: bool = False) -> list[BenchmarkDefinition]:
+        records = self.benchmark_definitions.list()
+        if not include_inactive:
+            records = [record for record in records if record.is_active]
+        return self._ordered(records, lambda record: record.name)
+
+    def get_benchmark_definition(self, definition_id: int) -> BenchmarkDefinition | None:
+        return self.benchmark_definitions.get(definition_id)
+
+    def create_benchmark_definition(self, definition: BenchmarkDefinition) -> BenchmarkDefinition:
+        return self.benchmark_definitions.create(definition)
+
+    def update_benchmark_definition(self, definition: BenchmarkDefinition) -> BenchmarkDefinition:
+        return self.benchmark_definitions.update(definition)
+
+    def deactivate_benchmark_definition(self, definition_id: int) -> BenchmarkDefinition:
+        definition = self.benchmark_definitions.get(definition_id)
+        if definition is None:
+            raise KeyError(f"benchmark_definitions {definition_id} does not exist")
+        if not definition.is_active:
+            return definition
+        return self.benchmark_definitions.update(replace(definition, is_active=False))
+
+    def reactivate_benchmark_definition(self, definition_id: int) -> BenchmarkDefinition:
+        definition = self.benchmark_definitions.get(definition_id)
+        if definition is None:
+            raise KeyError(f"benchmark_definitions {definition_id} does not exist")
+        if definition.is_active:
+            return definition
+        return self.benchmark_definitions.update(replace(definition, is_active=True))
 
 
 class BenchmarkService:

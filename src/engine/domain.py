@@ -10,8 +10,16 @@ BENCHMARK_TYPES = ("code_review", "code_generation", "revision", "review_the_rev
 ATTACHMENT_TYPES = ("screenshot", "raw_text", "log", "other")
 
 
+def serialize_utc_timestamp(value: datetime) -> str:
+    """Serialize a timezone-aware instant as canonical UTC ISO-8601 text."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("timestamp must be timezone-aware")
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return serialize_utc_timestamp(datetime.now(timezone.utc))
 
 
 def require(value: str, name: str) -> None:
@@ -22,6 +30,17 @@ def require(value: str, name: str) -> None:
 def score(value: float | None, name: str) -> None:
     if value is not None and not 0 <= value <= 5:
         raise ValueError(f"{name} must be between 0 and 5")
+
+
+def _optional_timestamp(value: str | None, name: str) -> datetime | None:
+    """Validate an optional ISO timestamp without changing its stored text."""
+
+    if value in (None, ""):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError(f"{name} must be a valid ISO 8601 timestamp") from None
 
 
 @dataclass
@@ -36,7 +55,15 @@ class BenchmarkSession:
     is_deleted: bool = False
     id: int | None = None
 
-    def validate(self) -> None: require(self.title, "title")
+    def validate(self) -> None:
+        require(self.title, "title")
+        started = _optional_timestamp(self.started_at, "started_at")
+        completed = _optional_timestamp(self.completed_at, "completed_at")
+        if started is not None and completed is not None:
+            if (started.tzinfo is None) != (completed.tzinfo is None):
+                raise ValueError("started_at and completed_at must use matching timezone awareness")
+            if completed < started:
+                raise ValueError("completed_at must be at or after started_at")
 
 
 @dataclass
@@ -67,6 +94,7 @@ class ModelProfile:
             if value is not None and not 0 <= value <= 1: raise ValueError(f"{name} must be between 0 and 1")
         if self.top_k is not None and self.top_k < 0: raise ValueError("top_k must be non-negative")
         if self.context_length is not None and self.context_length <= 0: raise ValueError("context_length must be positive")
+        if self.tokens_per_second is not None and self.tokens_per_second < 0: raise ValueError("tokens_per_second must be non-negative")
 
 
 @dataclass

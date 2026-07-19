@@ -61,6 +61,19 @@ class CliPolishTests(unittest.TestCase):
         self.assertIsNone(session.started_at)
         self.assertIsNone(session.completed_at)
 
+    def test_create_session_from_cli_preserves_valid_iso_timestamps(self):
+        app, _ = self.app_with(iter([
+            "CLI timestamp",
+            "Historical entries",
+            "2026-07-18T14:30:00+00:00",
+            "2026-07-18T15:30:00+00:00",
+            "Imported from CLI",
+        ]))
+        session = app.create_session()
+        self.assertEqual(session.started_at, "2026-07-18T14:30:00+00:00")
+        self.assertEqual(session.completed_at, "2026-07-18T15:30:00+00:00")
+        session.validate()
+
     def test_invalid_integer_and_float_are_reprompted(self):
         app, output = self.app_with(iter(["abc", "3", "bad", "2.5"]))
         self.assertEqual(app.ask_id(), 3)

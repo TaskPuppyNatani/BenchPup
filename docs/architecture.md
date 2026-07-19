@@ -88,11 +88,22 @@ src/gui/
         dashboard.py       immutable dashboard read models/provider
         runs.py             immutable Runs browser rows/provider
         run_table_model.py  read-only Qt table model
+        catalog.py          missing-value and stored-timestamp display helpers
+        catalog_table_model.py  read-only sortable catalog table model
+    dialogs/
+        base.py             shared editor validation and close safety
+        session_editor.py   BenchmarkSession Add/Edit form
+        model_editor.py     ModelProfile Add/Edit form
+        benchmark_editor.py BenchmarkDefinition Add/Edit form
     views/
         dashboard.py    read-only cards, table, and refresh state
         runs.py         read-only Runs browser and proxy filters
         run_details.py  read-only complete aggregate dialog
         add_run.py      review-before-save Add Run wizard
+        catalog_page.py shared catalog search/filter/action behavior
+        sessions.py     Sessions catalog page
+        models.py       Model Profiles catalog page
+        benchmarks.py   Benchmark Definitions catalog page
         placeholder.py  future-slice navigation pages
 ```
 
@@ -149,6 +160,25 @@ and reports success through the existing status area. Future blocking
 workflows have room for worker-thread work but do not add asynchronous
 infrastructure in this slice.
 
+Phase 5C1 adds typed, UI-independent catalog operations to `CatalogService`
+for `BenchmarkSession`, `ModelProfile`, and `BenchmarkDefinition`. The GUI
+catalog pages use those operations for deterministic listing, search, sorting,
+editing, lifecycle changes, and Model Profile default management. Session
+archive/restore and Benchmark Definition deactivate/reactivate actions are
+soft lifecycle changes; ordinary Add Run selectors continue to show only
+eligible records. The editor forms expose the live domain fields, keep
+optional numeric values distinct from zero, display local timestamps in an
+explicit 24-hour format, convert them to canonical UTC using the system
+timezone and DST rules, and route validation through the engine. GUI failure
+states log details while showing short user-facing messages.
+
+The catalog pages never create records implicitly. After a successful catalog
+change, the page refreshes itself and notifies the main window so an open Add
+Run workflow can reload eligible selectors and Dashboard/Runs can refresh
+their dependent views. `BenchmarkService._resolved_run()` continues to fill a
+run snapshot only when that snapshot is empty, so editing or retiring a
+catalog record cannot rewrite historical run context.
+
 The theme is centralized in `src/gui/theme.py`, uses system fonts and Qt's
 Fusion style, provides distinct surface levels, visible focus rings, readable
 disabled states, table headers, tooltips, and non-icon-only text controls. No
@@ -158,12 +188,14 @@ Qt/text labels and starts without an optional icon dependency.
 
 GUI tests set `QT_QPA_PLATFORM=offscreen` and use temporary databases through
 the same service boundaries as the application. They cover context startup and
-cleanup, page reuse/navigation, empty and populated Dashboard and Runs states,
-ordering, filtering, soft-delete exclusion, missing-value display, read-only
-details, copy actions, Add Run validation/cancellation/duplicates, atomic
-review creation, theme/accessibility basics, and bounded shell smoke paths.
-Phase 5 remains in progress; Phase 5C is the next recommended slice for GUI
-catalog management.
+cleanup, page reuse/navigation, empty and populated Dashboard, Runs, and
+catalog states, ordering, filtering, lifecycle changes, missing-value display,
+read-only details, copy actions, Add Run validation/cancellation/duplicates and
+catalog refresh, atomic review creation, snapshot preservation,
+theme/accessibility basics, and bounded shell smoke paths.
+Phase 5 remains in progress. Phase 5C2 is the next recommended slice for GUI
+Prompt Template and Hardware Profile management, including prompt versioning
+and hardware backend-version editing.
 
 
 ## Domain Data Classes

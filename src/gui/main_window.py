@@ -19,9 +19,13 @@ from PySide6.QtWidgets import (
 from .context import GuiApplicationContext
 from .navigation import NAVIGATION_DESTINATIONS, NavigationSidebar
 from .views.add_run import AddRunWizard
+from .views.benchmarks import BenchmarksView
+from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
+from .views.models import ModelsView
 from .views.placeholder import PlaceholderPage
 from .views.runs import RunsView
+from .views.sessions import SessionsView
 
 
 class MainWindow(QMainWindow):
@@ -41,6 +45,7 @@ class MainWindow(QMainWindow):
         self.page_stack.setAccessibleName("BenchPup page content")
         self.pages: dict[str, QWidget] = {}
         self.page_indices: dict[str, int] = {}
+        self._active_add_run: AddRunWizard | None = None
         self._build_shell()
         self.navigation.page_changed.connect(self._show_page)
         self.navigation.set_current_page("dashboard")
@@ -81,10 +86,19 @@ class MainWindow(QMainWindow):
                 if destination.key == "dashboard"
                 else RunsView(self.context)
                 if destination.key == "runs"
+                else SessionsView(self.context)
+                if destination.key == "sessions"
+                else ModelsView(self.context)
+                if destination.key == "models"
+                else BenchmarksView(self.context)
+                if destination.key == "benchmarks"
                 else PlaceholderPage(destination.label, destination.description)
             )
             if isinstance(page, RunsView):
                 page.add_run_requested.connect(self.open_add_run)
+            if isinstance(page, CatalogPage):
+                page.catalog_changed.connect(self._handle_catalog_changed)
+                page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
             self.pages[destination.key] = page
             self.page_indices[destination.key] = self.page_stack.addWidget(page)
 
@@ -136,6 +150,8 @@ class MainWindow(QMainWindow):
             page.refresh()
         if key == "runs" and isinstance(page, RunsView) and not page.has_loaded:
             page.refresh()
+        if key in {"sessions", "models", "benchmarks"} and isinstance(page, CatalogPage) and not page.has_loaded:
+            page.refresh()
 
     def navigate_to(self, key: str) -> None:
         """Select a destination without constructing a second page."""
@@ -156,6 +172,16 @@ class MainWindow(QMainWindow):
         finally:
             self._active_add_run = None
 
+    def _handle_catalog_changed(self, _entity: str) -> None:
+        """Keep catalog-dependent pages and an open Add Run wizard current."""
+
+        if self._active_add_run is not None:
+            self._active_add_run.refresh_catalog_choices()
+        if self.dashboard.has_loaded:
+            self.dashboard.refresh()
+        if self.runs.has_loaded:
+            self.runs.refresh()
+
     def _handle_run_created(self, run_id: int) -> None:
         runs = self.runs
         runs.refresh()
@@ -174,6 +200,24 @@ class MainWindow(QMainWindow):
     def runs(self) -> RunsView:
         page = self.pages["runs"]
         assert isinstance(page, RunsView)
+        return page
+
+    @property
+    def sessions(self) -> SessionsView:
+        page = self.pages["sessions"]
+        assert isinstance(page, SessionsView)
+        return page
+
+    @property
+    def models(self) -> ModelsView:
+        page = self.pages["models"]
+        assert isinstance(page, ModelsView)
+        return page
+
+    @property
+    def benchmarks(self) -> BenchmarksView:
+        page = self.pages["benchmarks"]
+        assert isinstance(page, BenchmarksView)
         return page
 
     def closeEvent(self, event: object) -> None:

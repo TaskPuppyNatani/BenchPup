@@ -6,7 +6,7 @@
 
 ## Current Test Status
 
-**227 passing**
+**282 passing**
 
 ## Completed
 
@@ -57,6 +57,7 @@ Status: In progress.
 - [x] Navigation placeholders for future GUI slices
 - [x] Offscreen GUI tests and smoke coverage
 - [x] Phase 5B Runs browsing and Add Run workflow
+- [x] Phase 5C1 Sessions, Model Profiles, and Benchmark Definitions catalog GUI
 
 Phase 5B adds a read-only Runs browser with search and filters, complete
 historical Run Details, and a review-before-save Add Run wizard. Catalog
@@ -66,17 +67,28 @@ implicitly. Snapshots, fingerprints, validation, timestamps, and atomic
 run-plus-review creation remain engine-owned. A successful save refreshes Runs
 and Dashboard.
 
-Run editing/deletion, catalog CRUD, import/export dialogs, report dialogs,
-Dataset Builder forms, packaging, and installers are not implemented in the
-GUI.
+Phase 5C1 adds typed engine catalog operations and functional Sessions, Models,
+and Benchmarks pages. Sessions support active/archived/all visibility and
+archive/restore; Model Profiles support explicit editing and default
+management; and Benchmark Definitions support active/inactive/all visibility,
+editing, and deactivate/reactivate. Catalog editors preserve nullable values,
+use explicit 24-hour local timestamp entry with system-timezone/DST-aware UTC
+serialization, and preserve run snapshots. Add Run reloads eligible selectors
+after a catalog change without creating catalog records implicitly. Prompt
+Template and Hardware Profile management remain deferred.
+
+Run editing/deletion, import/export dialogs, report dialogs, Dataset Builder
+forms, packaging, and installers are not implemented in the GUI.
 
 ## Next
 
-- [ ] Phase 5C GUI catalog management
+- [ ] Phase 5C2 GUI Prompt Template and Hardware Profile management
 
-Phase 4 is complete and Phase 5 is in progress. The CLI remains a permanent
-first-class interface and coexists with the PySide6 GUI over the same engine
-and database boundaries.
+Phase 4 is complete and Phase 5 is in progress. Phase 5C2 is the next
+recommended GUI slice, covering Prompt Template versioning and Hardware
+Profile backend-version editing. The CLI remains a permanent first-class
+interface and coexists with the PySide6 GUI over the same engine and database
+boundaries.
 
 - [ ] Knowledge base
 - [ ] AI lab notebook
