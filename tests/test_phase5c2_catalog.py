@@ -10,7 +10,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLineEdit, QSizePolicy
 
 from engine.domain import BenchmarkRun, HardwareProfile, PromptTemplate, prompt_hash_for
 from engine.hardware_importers import DXDiagParser, LshwShortParser, MSInfo32Parser
@@ -202,6 +202,69 @@ class Phase5C2GuiTests(unittest.TestCase):
         self.assertEqual(zero.vram_gb, 0.0)
         self.assertIsNone(zero.ram_gb)
         self.assertEqual(self.context.catalog.list_hardware_profiles()[0].name, "Workstation")
+
+    def test_backend_version_buttons_keep_string_api_and_consistent_editor_sizing(self) -> None:
+        manual = HardwareProfileEditorDialog(self.context, confirm_close=lambda: True)
+        imported = HardwareProfileEditorDialog(
+            self.context,
+            HardwareProfile(
+                name="Imported rig",
+                cpu="Imported CPU",
+                backend_versions={"LM Studio": "1.2.3"},
+                import_source="MSInfo32",
+                imported_at="2026-07-18T12:00:00+00:00",
+            ),
+            confirm_close=lambda: True,
+        )
+        self.widgets.extend((manual, imported))
+
+        editor = manual.backend_versions_edit
+        editor.add_button.click()
+        editor.add_button.click()
+        self.assertEqual(editor.table.rowCount(), 2)
+
+        editor.add_row("LM Studio", "1.2.3")
+        self.assertEqual(editor.table.rowCount(), 3)
+        backend = editor.table.cellWidget(2, 0)
+        version = editor.table.cellWidget(2, 1)
+        self.assertIsInstance(backend, QLineEdit)
+        self.assertIsInstance(version, QLineEdit)
+        assert isinstance(backend, QLineEdit)
+        assert isinstance(version, QLineEdit)
+        self.assertEqual(backend.text(), "LM Studio")
+        self.assertEqual(version.text(), "1.2.3")
+
+        row_heights = {editor.table.rowHeight(row) for row in range(editor.table.rowCount())}
+        self.assertEqual(len(row_heights), 1)
+        self.assertGreaterEqual(editor.table.verticalHeader().minimumSectionSize(), 30)
+        self.assertGreaterEqual(editor.table.verticalHeader().defaultSectionSize(), 30)
+        for row in range(editor.table.rowCount()):
+            for column in (0, 1):
+                widget = editor.table.cellWidget(row, column)
+                self.assertIsInstance(widget, QLineEdit)
+                assert isinstance(widget, QLineEdit)
+                self.assertGreaterEqual(widget.minimumHeight(), widget.sizeHint().height())
+                self.assertEqual(widget.sizePolicy().verticalPolicy(), QSizePolicy.Policy.Expanding)
+
+        # The real remove button also receives clicked(bool); the selected row is removed cleanly.
+        editor.remove_button.click()
+        self.assertEqual(editor.table.rowCount(), 2)
+
+        imported_editor = imported.backend_versions_edit
+        existing_backend = imported_editor.table.cellWidget(0, 0)
+        existing_version = imported_editor.table.cellWidget(0, 1)
+        self.assertIsInstance(existing_backend, QLineEdit)
+        self.assertIsInstance(existing_version, QLineEdit)
+        assert isinstance(existing_backend, QLineEdit)
+        assert isinstance(existing_version, QLineEdit)
+        imported_editor.add_button.click()
+        self.assertEqual(imported_editor.table.rowCount(), 2)
+        self.assertEqual(imported_editor.table.rowHeight(0), editor.table.rowHeight(0))
+        self.assertEqual(imported_editor.table.rowHeight(1), editor.table.rowHeight(0))
+        self.assertEqual(existing_backend.text(), "LM Studio")
+        self.assertEqual(existing_version.text(), "1.2.3")
+        imported_editor.remove_button.click()
+        self.assertEqual(imported_editor.mapping(), {"LM Studio": "1.2.3"})
 
     def test_hardware_profile_edit_preserves_imported_provenance_and_snapshot_fields(self) -> None:
         original = self.context.catalog.create_hardware_profile(

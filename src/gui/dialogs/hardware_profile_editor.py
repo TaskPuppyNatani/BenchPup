@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QTableWidget,
     QVBoxLayout,
     QWidget,
@@ -30,6 +31,9 @@ except ImportError:  # pragma: no cover - exercised by top-level test imports.
 from ..models.catalog import NOT_RECORDED, display_timestamp
 from .base import CatalogEditorDialog
 from .model_editor import OptionalNumericField
+
+
+_BACKEND_VERSION_ROW_HEIGHT = 32
 
 
 class BackendVersionsEditor(QWidget):
@@ -52,13 +56,15 @@ class BackendVersionsEditor(QWidget):
         self.table.setMinimumHeight(120)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setMinimumSectionSize(_BACKEND_VERSION_ROW_HEIGHT)
+        self.table.verticalHeader().setDefaultSectionSize(_BACKEND_VERSION_ROW_HEIGHT)
 
         self.add_button = QPushButton("Add backend version")
         self.add_button.setAccessibleName("Add backend version")
-        self.add_button.clicked.connect(self.add_row)
+        self.add_button.clicked.connect(self._on_add_row_clicked)
         self.remove_button = QPushButton("Remove selected")
         self.remove_button.setAccessibleName("Remove selected backend version")
-        self.remove_button.clicked.connect(self.remove_selected)
+        self.remove_button.clicked.connect(self._on_remove_selected_clicked)
 
         actions = QWidget()
         actions_layout = QVBoxLayout(actions)
@@ -83,11 +89,22 @@ class BackendVersionsEditor(QWidget):
         key_edit.setAccessibleName(f"Backend name row {row + 1}")
         value_edit = QLineEdit(value)
         value_edit.setAccessibleName(f"Backend version row {row + 1}")
+        editor_height = max(key_edit.sizeHint().height(), value_edit.sizeHint().height())
+        for editor in (key_edit, value_edit):
+            editor.setMinimumHeight(editor_height)
+            editor.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.table.setCellWidget(row, 0, key_edit)
         self.table.setCellWidget(row, 1, value_edit)
+        self.table.setRowHeight(row, max(_BACKEND_VERSION_ROW_HEIGHT, editor_height))
         key_edit.textChanged.connect(lambda _value: self.changed.emit())
         value_edit.textChanged.connect(lambda _value: self.changed.emit())
         self.table.selectRow(row)
+
+    def _on_add_row_clicked(self, _checked: bool = False) -> None:
+        self.add_row()
+
+    def _on_remove_selected_clicked(self, _checked: bool = False) -> None:
+        self.remove_selected()
 
     def remove_selected(self) -> None:
         row = self.table.currentRow()

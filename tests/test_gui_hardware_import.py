@@ -121,6 +121,18 @@ class HardwareImportGuiTests(unittest.TestCase):
         self.assertEqual(preferences.source_directory, source.parent)
         self.assertEqual(preferences.parser_override, "auto")
 
+    def test_hardware_import_dialog_uses_shared_backend_version_button_handlers(self) -> None:
+        dialog = self._open(self._write_msinfo())
+        self.assertIsNotNone(dialog.fields_editor)
+        assert dialog.fields_editor is not None
+        editor = dialog.fields_editor.backend_versions_edit
+
+        for _ in range(3):
+            editor.add_button.click()
+        self.assertEqual(editor.table.rowCount(), 3)
+        editor.remove_button.click()
+        self.assertEqual(editor.table.rowCount(), 2)
+
     def test_ambiguous_detection_requires_explicit_parser_and_clears_state(self) -> None:
         source = self.root / "reports" / "ambiguous.txt"
         source.parent.mkdir(parents=True, exist_ok=True)
