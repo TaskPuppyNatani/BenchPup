@@ -7,7 +7,21 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from cli import TerminalApp
 from engine.domain import HardwareProfile
-from engine.hardware_importers import DXDiagParser, LshwShortParser, MSInfo32Parser
+from engine.hardware_importers import (
+    DXDiagParser,
+    HardwareDecodeAmbiguityError,
+    HardwareImportDecodeError,
+    HardwareImporterRegistry,
+    HardwareParserDetectionError,
+    HardwareTextCandidate,
+    LshwShortParser,
+    MSInfo32Parser,
+    UnknownHardwareParserError,
+    UnsupportedHardwareEncodingError,
+    decode_hardware_text_candidates,
+    decode_hardware_text_strict,
+    read_hardware_text,
+)
 
 
 class HardwareImporterTests(unittest.TestCase):
@@ -56,6 +70,164 @@ class HardwareImporterTests(unittest.TestCase):
     def test_lshw_parser(self):
         draft = LshwShortParser().parse("/0/0 processor AMD Ryzen\n/0/1 memory 32GiB System Memory\n/0/2 display AMD Radeon\nhostname: penguin\n")
         self.assertEqual((draft.name, draft.cpu, draft.gpu, draft.ram_gb), ("penguin", "AMD Ryzen", "AMD Radeon", 32.0))
+
+    def test_registry_returns_parser_candidates_without_file_io(self):
+        registry = HardwareImporterRegistry()
+        matched = registry.detect_parser_candidates(
+            "System Information\nOS Name: Windows 11\nSystem Name: DESKTOP\n"
+        )
+        self.assertEqual((matched.status, matched.parser_name, matched.candidates), ("matched", "MSInfo32", ("MSInfo32",)))
+
+        ambiguous = registry.detect_parser_candidates(
+            "System Information\nOS Name: Windows 11\nMachine name: DESKTOP\nOperating System: Windows 11\n"
+        )
+        self.assertEqual(ambiguous.status, "ambiguous")
+        self.assertEqual(ambiguous.candidates, ("MSInfo32", "DXDiag"))
+
+        unsupported = registry.detect_parser_candidates("plain notes without hardware markers")
+        self.assertEqual((unsupported.status, unsupported.candidates), ("unsupported", ()))
+
+    def test_explicit_parser_override_validates_lookup_separately(self):
+        registry = HardwareImporterRegistry()
+        draft = registry.parse_selected("DXDiag", "Machine name: DESKTOP\nOperating System: Windows 11\n")
+        self.assertEqual(draft.source_name, "DXDiag")
+        with self.assertRaises(UnknownHardwareParserError):
+            registry.parse_selected("Removed parser", "text")
+
+    def test_detection_failure_is_not_reported_as_a_parser_match(self):
+        class BrokenParser:
+            source_name = "Broken"
+
+            def can_parse(self, _text):
+                raise RuntimeError("broken detector")
+
+            def parse(self, _text):
+                raise AssertionError("not reached")
+
+        with self.assertRaises(HardwareParserDetectionError):
+            HardwareImporterRegistry(parsers=(BrokenParser(),)).detect_parser_candidates("text")
+
+    def test_strict_gui_read_supports_bom_and_reports_decode_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            utf8 = root / "utf8.txt"
+            utf8.write_bytes(b"\xef\xbb\xbfSystem Information\n")
+            decoded = read_hardware_text(utf8)
+            self.assertEqual((decoded.encoding, decoded.text), ("utf-8-sig", "System Information\n"))
+
+            utf8_plain = root / "utf8-plain.txt"
+            utf8_plain.write_bytes(b"System Information\n")
+            self.assertEqual(read_hardware_text(utf8_plain).text, "System Information\n")
+
+            utf16 = root / "utf16.txt"
+            utf16.write_bytes(b"\xff\xfe" + "System Information\n".encode("utf-16-le"))
+            self.assertEqual(read_hardware_text(utf16).encoding, "utf-16")
+
+            utf16_be = root / "utf16-be-bom.txt"
+            utf16_be.write_bytes(b"\xfe\xff" + "System Information\n".encode("utf-16-be"))
+            self.assertEqual(read_hardware_text(utf16_be).encoding, "utf-16")
+
+            invalid = root / "invalid.txt"
+            invalid.write_bytes(b"\xff\xfe\x00")
+            with self.assertRaises(HardwareImportDecodeError):
+                read_hardware_text(invalid)
+
+            utf32 = root / "utf32.txt"
+            utf32.write_bytes(b"\xff\xfe\x00\x00" + "hardware".encode("utf-32-le"))
+            with self.assertRaises(UnsupportedHardwareEncodingError):
+                read_hardware_text(utf32)
+
+    def test_strict_gui_read_rejects_bomless_utf32_and_binary_but_accepts_bomless_utf16(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, encoding in (("utf32-le.txt", "utf-32-le"), ("utf32-be.txt", "utf-32-be")):
+                source = root / name
+                source.write_bytes("System Information\n".encode(encoding))
+                with self.subTest(encoding=encoding):
+                    with self.assertRaises(UnsupportedHardwareEncodingError):
+                        read_hardware_text(source)
+
+            binary = root / "binary.bin"
+            binary.write_bytes(b"\x00\xff\x01\xfe\x02\xfd\x03\xfc")
+            with self.assertRaises(UnsupportedHardwareEncodingError):
+                read_hardware_text(binary)
+
+            utf16_le = root / "utf16-le.txt"
+            utf16_le.write_bytes("System Information\n".encode("utf-16-le"))
+            self.assertEqual(read_hardware_text(utf16_le).text, "System Information\n")
+
+            utf16_be = root / "utf16-be.txt"
+            utf16_be.write_bytes("System Information\n".encode("utf-16-be"))
+            self.assertEqual(read_hardware_text(utf16_be).text, "System Information\n")
+
+    def test_strict_gui_rejects_printable_high_byte_binary(self):
+        for raw in (
+            b"A\x00\xff\x00B\x00\xfe\x00",
+            b"C\x00\xfe\x00D\x00\xfd\x00",
+        ):
+            with self.subTest(raw=raw):
+                with self.assertRaises(UnsupportedHardwareEncodingError):
+                    decode_hardware_text_candidates(raw)
+
+    def test_strict_gui_rejects_invalid_unicode_and_control_heavy_text(self):
+        with self.assertRaises(HardwareImportDecodeError):
+            decode_hardware_text_candidates("\ufffd".encode("utf-8"))
+        with self.assertRaises(HardwareImportDecodeError):
+            decode_hardware_text_candidates("\ufdd0".encode("utf-8"))
+        with self.assertRaises(HardwareImportDecodeError):
+            decode_hardware_text_candidates(b"\x01\x02\x03")
+
+    def test_strict_gui_edge_payloads_are_typed_and_odd_utf16_is_not_tried(self):
+        self.assertEqual(decode_hardware_text_candidates(b"")[0].text, "")
+        self.assertEqual(decode_hardware_text_candidates(b"A")[0].encoding, "utf-8")
+        odd_candidates = decode_hardware_text_candidates(b"ABC")
+        self.assertTrue(all(candidate.encoding == "utf-8" for candidate in odd_candidates))
+        with self.assertRaises(UnsupportedHardwareEncodingError):
+            decode_hardware_text_candidates(b"\x00" * 8)
+        with self.assertRaises(UnsupportedHardwareEncodingError):
+            decode_hardware_text_candidates(b"A\x00\x00\x00\x00\x00B\x00")
+        with self.assertRaises(UnsupportedHardwareEncodingError):
+            decode_hardware_text_candidates(b"A\x00B\x00CDEFGH")
+
+    def test_bomless_non_ascii_utf16_is_kept_as_candidates_until_parser_resolution(self):
+        sample = (
+            "System Information\nSystem Name: 漢字\n"
+            "OS Name: Windows 11\nProcessor: International CPU\n"
+        )
+        registry = HardwareImporterRegistry()
+        for encoding in ("utf-16-le", "utf-16-be"):
+            with self.subTest(encoding=encoding):
+                candidates = decode_hardware_text_candidates(sample.encode(encoding))
+                resolution = registry.resolve_decode_candidates(candidates)
+                self.assertEqual(resolution.status, "matched")
+                self.assertIsNotNone(resolution.selected)
+                assert resolution.selected is not None
+                self.assertEqual(resolution.selected.candidate.encoding, encoding)
+
+    def test_ambiguous_decode_candidates_require_typed_resolution(self):
+        class MarkerParser:
+            source_name = "Marker"
+
+            def can_parse(self, text):
+                return text in {"LE", "BE"}
+
+            def parse(self, text):
+                return MSInfo32Parser().parse(text)
+
+        registry = HardwareImporterRegistry(parsers=(MarkerParser(),))
+        candidates = (
+            HardwareTextCandidate(encoding="utf-8", text="LE"),
+            HardwareTextCandidate(encoding="utf-16-le", text="BE"),
+        )
+        resolution = registry.resolve_decode_candidates(candidates)
+        self.assertEqual(resolution.status, "ambiguous")
+        self.assertEqual(len(resolution.matches), 2)
+
+        explicit = registry.resolve_parser_candidates("Marker", candidates[:1])
+        self.assertEqual(explicit.status, "matched")
+        self.assertEqual(explicit.selected.candidate.encoding, "utf-8")  # type: ignore[union-attr]
+        with self.assertRaises(HardwareDecodeAmbiguityError):
+            decode_hardware_text_strict("漢字".encode("utf-16-le"))
 
     def test_hardware_import_preview_cancel_and_create(self):
         with tempfile.TemporaryDirectory() as directory:

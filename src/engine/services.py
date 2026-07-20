@@ -4,12 +4,13 @@ import hashlib
 import json
 import shutil
 import sqlite3
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from .database import EngineDatabase
 from .domain import BenchmarkDefinition, BenchmarkRun, BenchmarkSession, ExportProfile, HardwareProfile, ModelProfile, PromptTemplate, ReviewScore, RunAttachment, ScoreboardEntry, ScoreboardImportBatch, now, prompt_hash_for, resolve_prompt_text
+from .hardware_importers import HardwareProfileDraft
 from .repositories import Repository
 
 _T = TypeVar("_T")
@@ -23,6 +24,25 @@ def is_database_integrity_error(error: BaseException) -> bool:
 
 class AttachmentStorageError(ValueError):
     """A user-actionable failure while resolving an attachment source or copy."""
+
+
+class HardwareProfileImportValidationError(ValueError):
+    """An imported hardware profile has no meaningful hardware values."""
+
+
+class HardwareProfileNameConflictError(ValueError):
+    """An imported hardware profile name collides after normalization."""
+
+
+HardwareProfileConflictReason = Literal["name", "computer_name", "cpu_gpu"]
+
+
+@dataclass(frozen=True)
+class HardwareProfileConflict:
+    """One existing hardware profile matched an imported candidate."""
+
+    profile: HardwareProfile
+    reasons: tuple[HardwareProfileConflictReason, ...]
 
 
 class CatalogService:
@@ -211,6 +231,139 @@ class CatalogService:
 
     def update_hardware_profile(self, profile: HardwareProfile) -> HardwareProfile:
         return self.hardware_profiles.update(profile)
+
+    @staticmethod
+    def _normalized_import_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            pairs = []
+            for key, item in value.items():
+                normalized_key = " ".join(str(key).split())
+                normalized_item = " ".join(str(item).split())
+                if normalized_key and normalized_item:
+                    pairs.append(f"{normalized_key}={normalized_item}")
+            return " ".join(pairs)
+        return " ".join(str(value).split())
+
+    @classmethod
+    def has_meaningful_imported_hardware_data(cls, profile: HardwareProfile) -> bool:
+        """Return whether an import contains data beyond its generated name/provenance."""
+
+        for field_name in (
+            "computer_name",
+            "cpu",
+            "gpu",
+            "vram_gb",
+            "ram_gb",
+            "operating_system",
+            "backend_versions",
+        ):
+            if cls._normalized_import_value(getattr(profile, field_name)):
+                return True
+        return False
+
+    def validate_imported_hardware_profile(self, profile: HardwareProfile) -> None:
+        """Apply import-only validation without changing manual profile rules."""
+
+        profile.validate()
+        if not self._normalize_hardware_match(profile.name):
+            raise HardwareProfileImportValidationError("a hardware profile name is required")
+        if not self.has_meaningful_imported_hardware_data(profile):
+            raise HardwareProfileImportValidationError(
+                "at least one meaningful hardware value is required"
+            )
+
+    def create_imported_hardware_profile(self, profile: HardwareProfile) -> HardwareProfile:
+        """Create an imported profile with normalized-name validation in one transaction."""
+
+        self.validate_imported_hardware_profile(profile)
+        normalized_name = self._normalize_hardware_match(profile.name)
+        with self.database.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_names = connection.execute("SELECT name FROM hardware_profiles").fetchall()
+            if any(
+                normalized_name == self._normalize_hardware_match(str(row["name"]))
+                for row in existing_names
+            ):
+                raise HardwareProfileNameConflictError(
+                    f"a hardware profile named {profile.name!r} already exists"
+                )
+            return self.hardware_profiles.create_in_connection(profile, connection)
+
+    @staticmethod
+    def _normalize_hardware_match(value: str) -> str:
+        return " ".join(value.split()).casefold()
+
+    def build_imported_hardware_profile(
+        self,
+        draft: HardwareProfileDraft,
+        *,
+        existing: HardwareProfile | None = None,
+        imported_at: str | None = None,
+    ) -> HardwareProfile:
+        """Build imported profile data without writing it to the database."""
+
+        name = draft.name.strip() or draft.computer_name.strip() or f"{draft.source_name} hardware"
+        values = {
+            "name": name,
+            "computer_name": draft.computer_name,
+            "cpu": draft.cpu,
+            "gpu": draft.gpu,
+            "vram_gb": draft.vram_gb,
+            "ram_gb": draft.ram_gb,
+            "operating_system": draft.operating_system,
+            "backend_versions": dict(draft.backend_versions),
+            "notes": draft.notes,
+            "import_source": draft.source_name,
+            "imported_at": imported_at or now(),
+        }
+        if existing is not None:
+            return replace(existing, **values)
+        return HardwareProfile(**values)
+
+    def find_hardware_profile_conflicts(
+        self,
+        candidate: HardwareProfile,
+    ) -> tuple[HardwareProfileConflict, ...]:
+        """Find deterministic, non-empty identity matches for an imported candidate."""
+
+        normalized = {
+            "name": self._normalize_hardware_match(candidate.name),
+            "computer_name": self._normalize_hardware_match(candidate.computer_name),
+            "cpu": self._normalize_hardware_match(candidate.cpu),
+            "gpu": self._normalize_hardware_match(candidate.gpu),
+        }
+        conflicts: list[HardwareProfileConflict] = []
+        for profile in self.list_hardware_profiles():
+            if candidate.id is not None and profile.id == candidate.id:
+                continue
+            reasons: list[HardwareProfileConflictReason] = []
+            if normalized["name"] and normalized["name"] == self._normalize_hardware_match(profile.name):
+                reasons.append("name")
+            if normalized["computer_name"] and normalized["computer_name"] == self._normalize_hardware_match(profile.computer_name):
+                reasons.append("computer_name")
+            if normalized["cpu"] and normalized["gpu"]:
+                if normalized["cpu"] == self._normalize_hardware_match(profile.cpu) and normalized["gpu"] == self._normalize_hardware_match(profile.gpu):
+                    reasons.append("cpu_gpu")
+            if reasons:
+                conflicts.append(HardwareProfileConflict(profile, tuple(reasons)))
+        return tuple(conflicts)
+
+    def next_available_hardware_profile_name(self, base_name: str) -> str:
+        """Return the first deterministic, case-insensitively unused profile name."""
+
+        base = " ".join(base_name.split()) or "Imported hardware profile"
+        names = {
+            self._normalize_hardware_match(profile.name)
+            for profile in self.list_hardware_profiles()
+        }
+        if self._normalize_hardware_match(base) not in names:
+            return base
+        suffix = 2
+        while self._normalize_hardware_match(f"{base} ({suffix})") in names:
+            suffix += 1
+        return f"{base} ({suffix})"
 
 
 class BenchmarkService:

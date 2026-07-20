@@ -5,6 +5,10 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
+
+
+DEFAULT_HARDWARE_PARSER_NAMES = ("MSInfo32", "DXDiag", "lshw --short")
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,14 @@ class ImportPreferences:
     source_directory: Path | None = None
     import_type: str = "auto"
     duplicate_policy: str = "skip"
+
+
+@dataclass(frozen=True)
+class HardwareImportPreferences:
+    """Last GUI hardware-import location and parser selection."""
+
+    source_directory: Path | None = None
+    parser_override: str = "auto"
 
 
 class DefaultWorkingDirectorySettings:
@@ -69,6 +81,26 @@ class DefaultWorkingDirectorySettings:
             duplicate_policy=duplicate_policy if isinstance(duplicate_policy, str) and duplicate_policy in {"skip", "replace", "keep"} else "skip",
         )
 
+    def get_hardware_import_preferences(
+        self,
+        valid_parser_names: Iterable[str] | None = None,
+    ) -> HardwareImportPreferences:
+        data = self._settings_data().get("hardware_import_preferences")
+        if not isinstance(data, dict):
+            return HardwareImportPreferences()
+
+        source = data.get("source_directory")
+        parser_override = data.get("parser_override")
+        allowed = set(DEFAULT_HARDWARE_PARSER_NAMES if valid_parser_names is None else valid_parser_names)
+        if not isinstance(parser_override, str) or not parser_override:
+            parser_override = "auto"
+        elif parser_override != "auto" and allowed and parser_override not in allowed:
+            parser_override = "auto"
+        return HardwareImportPreferences(
+            source_directory=Path(source) if isinstance(source, str) and source else None,
+            parser_override=parser_override,
+        )
+
     @staticmethod
     def _read(path: Path) -> dict[str, object] | None:
         try:
@@ -104,6 +136,15 @@ class DefaultWorkingDirectorySettings:
             "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
             "import_type": preferences.import_type if isinstance(preferences.import_type, str) and preferences.import_type in {"auto", "benchmark_run", "scoreboard"} else "auto",
             "duplicate_policy": preferences.duplicate_policy if isinstance(preferences.duplicate_policy, str) and preferences.duplicate_policy in {"skip", "replace", "keep"} else "skip",
+        }
+        self._write(data)
+
+    def set_hardware_import_preferences(self, preferences: HardwareImportPreferences) -> None:
+        data = self._settings_data()
+        parser_override = preferences.parser_override if isinstance(preferences.parser_override, str) and preferences.parser_override else "auto"
+        data["hardware_import_preferences"] = {
+            "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
+            "parser_override": parser_override,
         }
         self._write(data)
 

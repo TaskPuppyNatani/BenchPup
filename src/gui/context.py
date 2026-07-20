@@ -18,6 +18,7 @@ try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH
         TrendService,
     )
     from ..engine.importers import CsvImportService
+    from ..engine.hardware_importers import HardwareImporterRegistry
     from ..engine.settings import DefaultWorkingDirectorySettings
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine import (  # type: ignore[no-redef]
@@ -30,6 +31,7 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
         TrendService,
     )
     from engine.importers import CsvImportService  # type: ignore[no-redef]
+    from engine.hardware_importers import HardwareImporterRegistry  # type: ignore[no-redef]
     from engine.settings import DefaultWorkingDirectorySettings  # type: ignore[no-redef]
 
 
@@ -117,6 +119,7 @@ class GuiApplicationContext:
     comparisons: ComparisonService
     trends: TrendService
     csv_importer: CsvImportService
+    hardware_importers: HardwareImporterRegistry
     settings: DefaultWorkingDirectorySettings
     default_working_directory: Path | None
     version: str
@@ -146,6 +149,7 @@ class GuiApplicationContext:
         comparisons = ComparisonService(benchmarks, catalog)
         trends = TrendService(benchmarks, catalog)
         csv_importer = CsvImportService(benchmarks)
+        hardware_importers = HardwareImporterRegistry()
         settings = DefaultWorkingDirectorySettings(paths.database_path)
         return cls(
             paths=paths,
@@ -157,6 +161,7 @@ class GuiApplicationContext:
             comparisons=comparisons,
             trends=trends,
             csv_importer=csv_importer,
+            hardware_importers=hardware_importers,
             settings=settings,
             default_working_directory=settings.get_default_working_directory(),
             version=version,

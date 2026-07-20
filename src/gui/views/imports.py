@@ -7,12 +7,14 @@ from PySide6.QtWidgets import QGroupBox, QHBoxLayout, QLabel, QPushButton, QVBox
 
 from ..context import GuiApplicationContext
 from ..dialogs.csv_import import CsvImportWizard
+from ..dialogs.hardware_import import HardwareImportDialog
 
 
 class ImportsView(QWidget):
-    """Small launcher page that keeps the detailed CSV workflow modal."""
+    """Small launcher page that keeps detailed import workflows modal."""
 
     import_completed = Signal(str)
+    hardware_import_completed = Signal(int)
 
     def __init__(self, context: GuiApplicationContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -39,7 +41,12 @@ class ImportsView(QWidget):
 
         hardware_note = QGroupBox("Hardware profile imports")
         hardware_layout = QVBoxLayout(hardware_note)
-        hardware_layout.addWidget(QLabel("Hardware profile imports are planned for Phase 5D1B."))
+        hardware_layout.addWidget(QLabel("Import MSInfo32, DXDiag, or lshw --short reports into reusable hardware profiles."))
+        self.import_hardware_button = QPushButton("Import Hardware Profile")
+        self.import_hardware_button.setObjectName("primaryButton")
+        self.import_hardware_button.setAccessibleName("Import Hardware Profile")
+        self.import_hardware_button.clicked.connect(self.open_hardware_import)
+        hardware_layout.addWidget(self.import_hardware_button, 0)
 
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("importStatus")
@@ -60,6 +67,13 @@ class ImportsView(QWidget):
         dialog.import_completed.connect(self.import_completed)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_import_type is not None:
             self.status_label.setText("CSV import completed successfully.")
+        dialog.deleteLater()
+
+    def open_hardware_import(self) -> None:
+        dialog = HardwareImportDialog(self.context, self)
+        dialog.import_completed.connect(self.hardware_import_completed)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.saved_profile is not None:
+            self.status_label.setText("Hardware profile imported successfully.")
         dialog.deleteLater()
 
 

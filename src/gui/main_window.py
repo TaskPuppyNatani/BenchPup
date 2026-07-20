@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
                 page.add_run_requested.connect(self.open_add_run)
             if isinstance(page, ImportsView):
                 page.import_completed.connect(self._handle_import_completed)
+                page.hardware_import_completed.connect(self._handle_hardware_import_completed)
             if isinstance(page, CatalogPage):
                 page.catalog_changed.connect(self._handle_catalog_changed)
                 page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
@@ -208,6 +209,14 @@ class MainWindow(QMainWindow):
             if self.dashboard.has_loaded:
                 self.dashboard.refresh()
         self.status_bar.showMessage("CSV import completed successfully.", 6000)
+
+    def _handle_hardware_import_completed(self, profile_id: int) -> None:
+        if self._active_add_run is not None:
+            self._active_add_run.refresh_catalog_choices()
+        if self.hardware_profiles.has_loaded:
+            self.hardware_profiles.refresh()
+            self.hardware_profiles.select_record(profile_id)
+        self.status_bar.showMessage("Hardware profile imported successfully.", 6000)
 
     @property
     def dashboard(self) -> DashboardView:
