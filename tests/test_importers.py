@@ -1,3 +1,4 @@
+import codecs
 import sys
 import tempfile
 import unittest
@@ -7,7 +8,17 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.database import EngineDatabase
 from engine.exporters import export_combined_markdown, export_scoreboard_csv, export_scoreboard_html
-from engine.importers import CsvImportService, normalize_context_length, normalize_heading
+from engine.importers import (
+    AMBIGUOUS_IMPORT,
+    BENCHMARK_RUN_IMPORT,
+    UNSUPPORTED_IMPORT,
+    SCOREBOARD_IMPORT,
+    CsvImportService,
+    ImportMappingError,
+    UnsupportedCsvEncodingError,
+    normalize_context_length,
+    normalize_heading,
+)
 from engine.domain import PromptTemplate
 from engine.services import BenchmarkService
 
@@ -37,6 +48,113 @@ class CsvImportTests(unittest.TestCase):
         self.assertEqual(preview.unknown_headings, ["LEGEND", "IT"])
         self.assertEqual(normalize_heading(" Top P "), "top_p")
         self.assertEqual(normalize_heading("Modle"), "model_name")  # fuzzy match after aliases
+
+    def test_detection_reports_type_encoding_and_source_rows(self):
+        path = Path(self.directory.name) / "runs.csv"
+        path.write_text(
+            "Model,Benchmark,Prompt Text,Raw Model Output\nQwen,main.py,prompt,output\n",
+            encoding="utf-8-sig",
+        )
+        detection = self.importer.detect(path)
+        self.assertEqual((detection.status, detection.import_type, detection.encoding), (BENCHMARK_RUN_IMPORT, BENCHMARK_RUN_IMPORT, "utf-8-sig"))
+        self.assertEqual(detection.preview.source_rows[0]["Model"], "Qwen")  # type: ignore[union-attr]
+        self.assertEqual(detection.preview.row_numbers, [2])  # type: ignore[union-attr]
+
+    def test_detection_distinguishes_scoreboard_and_ambiguous_shapes(self):
+        scoreboard = Path(self.directory.name) / "scoreboard.csv"
+        scoreboard.write_text("Model,Score,Notes\nQwen,4.5,Useful\n", encoding="utf-8")
+        detection = self.importer.detect(scoreboard)
+        self.assertEqual((detection.status, detection.import_type), (SCOREBOARD_IMPORT, SCOREBOARD_IMPORT))
+
+        partial_run = Path(self.directory.name) / "partial-run.csv"
+        partial_run.write_text("Model,Prompt Text,Raw Model Output\nQwen,prompt,output\n", encoding="utf-8")
+        detection = self.importer.detect(partial_run)
+        self.assertEqual((detection.status, detection.import_type), (AMBIGUOUS_IMPORT, None))
+
+    def test_unrecognized_headings_are_unsupported(self):
+        path = Path(self.directory.name) / "unknown-shape.csv"
+        path.write_text("Alpha,Beta\nvalue,other\n", encoding="utf-8")
+        detection = self.importer.detect(path)
+        self.assertEqual((detection.status, detection.import_type), (UNSUPPORTED_IMPORT, None))
+        self.assertIn("do not match", detection.reason)
+
+    def test_mapping_validation_rejects_collisions_and_missing_required_fields(self):
+        collision = self.importer.validate_mapping(
+            {"Model A": "model_name", "Model B": "model_name"},
+            BENCHMARK_RUN_IMPORT,
+        )
+        self.assertFalse(collision.is_valid)
+        self.assertEqual(collision.errors[0].destination, "model_name")
+        self.assertEqual(collision.errors[0].source_headings, ("Model A", "Model B"))
+
+        missing = self.importer.validate_mapping({"Score": "overall_score"}, BENCHMARK_RUN_IMPORT)
+        self.assertFalse(missing.is_valid)
+        self.assertIn("model_name", missing.errors[0].message)
+
+        path = Path(self.directory.name) / "collision.csv"
+        path.write_text("Model A,Model B,Benchmark,Prompt Text,Raw Model Output\nQwen,Other,main.py,prompt,output\n", encoding="utf-8")
+        with self.assertRaises(ImportMappingError):
+            self.importer.preview(path, {"Model A": "model_name", "Model B": "model_name"})
+
+    def test_preview_preserves_physical_source_line_numbers(self):
+        path = Path(self.directory.name) / "physical-lines.csv"
+        path.write_text(
+            "Model,Benchmark,Prompt Text,Raw Model Output\n"
+            "Qwen,main.py,\"first line\nsecond line\",output\n"
+            "\n"
+            "Llama,main.py,prompt,output\n",
+            encoding="utf-8",
+        )
+        preview = self.importer.preview(path)
+        self.assertEqual(preview.row_numbers, [3, 5])
+        self.assertEqual(preview.source_row_numbers, [3, 5])
+
+    def test_utf32_is_rejected_before_utf16_detection(self):
+        for name, bom, encoding in (
+            ("utf32-le.csv", codecs.BOM_UTF32_LE, "utf-32-le"),
+            ("utf32-be.csv", codecs.BOM_UTF32_BE, "utf-32-be"),
+        ):
+            path = Path(self.directory.name) / name
+            path.write_bytes(bom + "Model,Score\nQwen,4.5\n".encode(encoding))
+            detection = self.importer.detect(path)
+            self.assertEqual((detection.status, detection.encoding), (UNSUPPORTED_IMPORT, encoding))
+            with self.assertRaisesRegex(UnsupportedCsvEncodingError, encoding):
+                self.importer.detect_encoding(path)
+
+    def test_validation_is_non_mutating_and_preserves_original_row_numbers(self):
+        rows = [
+            {"model_name": "Good", "raw_model_output": "valid"},
+            {"model_name": "Bad", "overall_score": "6", "raw_model_output": "invalid"},
+        ]
+        validation = self.importer.validate_rows(
+            rows,
+            import_type=BENCHMARK_RUN_IMPORT,
+            row_numbers=[8, 11],
+        )
+        self.assertFalse(validation.is_valid)
+        self.assertEqual(validation.errors[0].row_number, 11)
+        self.assertEqual(self.service.runs.list(), [])
+
+    def test_commit_rollback_preserves_original_row_number(self):
+        rows = [
+            {"model_name": "Good", "raw_model_output": "valid"},
+            {"model_name": "Bad", "overall_score": "6", "raw_model_output": "invalid"},
+        ]
+        with self.assertRaisesRegex(ValueError, r"Row 11: overall_score must be between 0 and 5"):
+            self.importer.import_rows(rows, row_numbers=[8, 11])
+        self.assertEqual(self.service.runs.list(), [])
+
+    def test_scoreboard_validation_uses_original_rows_without_creating_batch(self):
+        validation = self.importer.validate_rows(
+            [{"model_name": "Bad", "context_length": "not-a-context"}],
+            import_type=SCOREBOARD_IMPORT,
+            row_numbers=[17],
+            source_file="scoreboard.csv",
+        )
+        self.assertFalse(validation.is_valid)
+        self.assertEqual(validation.errors[0].row_number, 17)
+        self.assertEqual(self.service.catalog.scoreboard_entries.list(), [])
+        self.assertEqual(self.service.catalog.scoreboard_import_batches.list(), [])
 
     def test_unknown_columns_are_ignored_by_default(self):
         path = Path(self.directory.name) / "unknown.csv"

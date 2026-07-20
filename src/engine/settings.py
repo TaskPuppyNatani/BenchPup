@@ -16,6 +16,15 @@ class AttachmentPreferences:
     storage_mode: str = "reference"
 
 
+@dataclass(frozen=True)
+class ImportPreferences:
+    """Last GUI CSV import choices, kept outside benchmark data."""
+
+    source_directory: Path | None = None
+    import_type: str = "auto"
+    duplicate_policy: str = "skip"
+
+
 class DefaultWorkingDirectorySettings:
     """Persist one optional default directory without touching benchmark data."""
 
@@ -46,6 +55,20 @@ class DefaultWorkingDirectorySettings:
             storage_mode=mode if isinstance(mode, str) and mode else "reference",
         )
 
+    def get_import_preferences(self) -> ImportPreferences:
+        data = self._settings_data().get("import_preferences")
+        if not isinstance(data, dict):
+            return ImportPreferences()
+
+        source = data.get("source_directory")
+        import_type = data.get("import_type")
+        duplicate_policy = data.get("duplicate_policy")
+        return ImportPreferences(
+            source_directory=Path(source) if isinstance(source, str) and source else None,
+            import_type=import_type if isinstance(import_type, str) and import_type in {"auto", "benchmark_run", "scoreboard"} else "auto",
+            duplicate_policy=duplicate_policy if isinstance(duplicate_policy, str) and duplicate_policy in {"skip", "replace", "keep"} else "skip",
+        )
+
     @staticmethod
     def _read(path: Path) -> dict[str, object] | None:
         try:
@@ -72,6 +95,15 @@ class DefaultWorkingDirectorySettings:
             "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
             "destination_directory": str(preferences.destination_directory) if preferences.destination_directory else "",
             "storage_mode": preferences.storage_mode,
+        }
+        self._write(data)
+
+    def set_import_preferences(self, preferences: ImportPreferences) -> None:
+        data = self._settings_data()
+        data["import_preferences"] = {
+            "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
+            "import_type": preferences.import_type if isinstance(preferences.import_type, str) and preferences.import_type in {"auto", "benchmark_run", "scoreboard"} else "auto",
+            "duplicate_policy": preferences.duplicate_policy if isinstance(preferences.duplicate_policy, str) and preferences.duplicate_policy in {"skip", "replace", "keep"} else "skip",
         }
         self._write(data)
 

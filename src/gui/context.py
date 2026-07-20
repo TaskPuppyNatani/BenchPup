@@ -17,6 +17,7 @@ try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH
         StatisticsService,
         TrendService,
     )
+    from ..engine.importers import CsvImportService
     from ..engine.settings import DefaultWorkingDirectorySettings
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine import (  # type: ignore[no-redef]
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
         StatisticsService,
         TrendService,
     )
+    from engine.importers import CsvImportService  # type: ignore[no-redef]
     from engine.settings import DefaultWorkingDirectorySettings  # type: ignore[no-redef]
 
 
@@ -114,6 +116,7 @@ class GuiApplicationContext:
     statistics: StatisticsService
     comparisons: ComparisonService
     trends: TrendService
+    csv_importer: CsvImportService
     settings: DefaultWorkingDirectorySettings
     default_working_directory: Path | None
     version: str
@@ -142,6 +145,7 @@ class GuiApplicationContext:
         statistics = StatisticsService(benchmarks, catalog)
         comparisons = ComparisonService(benchmarks, catalog)
         trends = TrendService(benchmarks, catalog)
+        csv_importer = CsvImportService(benchmarks)
         settings = DefaultWorkingDirectorySettings(paths.database_path)
         return cls(
             paths=paths,
@@ -152,6 +156,7 @@ class GuiApplicationContext:
             statistics=statistics,
             comparisons=comparisons,
             trends=trends,
+            csv_importer=csv_importer,
             settings=settings,
             default_working_directory=settings.get_default_working_directory(),
             version=version,

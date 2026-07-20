@@ -18,6 +18,7 @@ class NavigationDestination:
 NAVIGATION_DESTINATIONS: tuple[NavigationDestination, ...] = (
     NavigationDestination("dashboard", "Dashboard", "Read-only BenchPup overview"),
     NavigationDestination("runs", "Runs", "Browse and manage benchmark runs"),
+    NavigationDestination("imports", "Imports", "Import Benchmark Runs and Scoreboard CSV files"),
     NavigationDestination("sessions", "Sessions", "Organize related benchmark work"),
     NavigationDestination("models", "Models", "Manage model profiles"),
     NavigationDestination("benchmarks", "Benchmarks", "Manage benchmark definitions"),

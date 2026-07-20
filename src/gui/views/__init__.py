@@ -3,6 +3,7 @@
 from .add_run import AddRunWizard, OptionalScoreField
 from .dashboard import DashboardTableModel, DashboardView
 from .hardware_profiles import HardwareProfilesView
+from .imports import ImportsView
 from .placeholder import PlaceholderPage
 from .prompt_templates import PromptTemplatesView
 from .run_details import RunDetailsDialog
@@ -13,6 +14,7 @@ __all__ = (
     "DashboardTableModel",
     "DashboardView",
     "HardwareProfilesView",
+    "ImportsView",
     "OptionalScoreField",
     "PlaceholderPage",
     "PromptTemplatesView",

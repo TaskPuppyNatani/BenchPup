@@ -23,6 +23,7 @@ from .views.benchmarks import BenchmarksView
 from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
 from .views.hardware_profiles import HardwareProfilesView
+from .views.imports import ImportsView
 from .views.models import ModelsView
 from .views.placeholder import PlaceholderPage
 from .views.prompt_templates import PromptTemplatesView
@@ -88,6 +89,8 @@ class MainWindow(QMainWindow):
                 if destination.key == "dashboard"
                 else RunsView(self.context)
                 if destination.key == "runs"
+                else ImportsView(self.context)
+                if destination.key == "imports"
                 else SessionsView(self.context)
                 if destination.key == "sessions"
                 else ModelsView(self.context)
@@ -102,6 +105,8 @@ class MainWindow(QMainWindow):
             )
             if isinstance(page, RunsView):
                 page.add_run_requested.connect(self.open_add_run)
+            if isinstance(page, ImportsView):
+                page.import_completed.connect(self._handle_import_completed)
             if isinstance(page, CatalogPage):
                 page.catalog_changed.connect(self._handle_catalog_changed)
                 page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
@@ -196,6 +201,14 @@ class MainWindow(QMainWindow):
         runs.select_run(run_id, reveal=True)
         self.status_bar.showMessage(f"Run #{run_id} saved successfully.", 6000)
 
+    def _handle_import_completed(self, import_type: str) -> None:
+        if import_type == "benchmark_run":
+            if self.runs.has_loaded:
+                self.runs.refresh()
+            if self.dashboard.has_loaded:
+                self.dashboard.refresh()
+        self.status_bar.showMessage("CSV import completed successfully.", 6000)
+
     @property
     def dashboard(self) -> DashboardView:
         page = self.pages["dashboard"]
@@ -206,6 +219,12 @@ class MainWindow(QMainWindow):
     def runs(self) -> RunsView:
         page = self.pages["runs"]
         assert isinstance(page, RunsView)
+        return page
+
+    @property
+    def imports(self) -> ImportsView:
+        page = self.pages["imports"]
+        assert isinstance(page, ImportsView)
         return page
 
     @property

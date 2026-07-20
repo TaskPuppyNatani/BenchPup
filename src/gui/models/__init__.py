@@ -5,6 +5,7 @@ from .catalog import NOT_RECORDED, display_bool, display_optional, display_times
 from .catalog_table_model import CATALOG_RECORD_ROLE, CATALOG_ROW_ROLE, CatalogTableModel, CatalogTableRow
 from .run_table_model import ROW_ROLE, RUN_ID_ROLE, TABLE_HEADERS, RunTableModel
 from .runs import UNAVAILABLE, RunBrowserRow, RunsDataProvider
+from .import_table_model import ImportTableModel
 
 __all__ = (
     "DashboardDataProvider",
@@ -20,6 +21,7 @@ __all__ = (
     "RUN_ID_ROLE",
     "RunBrowserRow",
     "RunsDataProvider",
+    "ImportTableModel",
     "RunTableModel",
     "TABLE_HEADERS",
     "display_bool",
