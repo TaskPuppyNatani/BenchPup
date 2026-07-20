@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import sqlite3
 from dataclasses import replace
+from pathlib import Path
 from typing import Any, TypeVar
 
 from .database import EngineDatabase
@@ -17,6 +19,10 @@ def is_database_integrity_error(error: BaseException) -> bool:
     """Expose the engine's persistence-conflict classification without leaking it into UI code."""
 
     return isinstance(error, sqlite3.IntegrityError)
+
+
+class AttachmentStorageError(ValueError):
+    """A user-actionable failure while resolving an attachment source or copy."""
 
 
 class CatalogService:
@@ -290,6 +296,114 @@ class BenchmarkService:
     def add_attachment(self, attachment: RunAttachment) -> RunAttachment:
         if not self.runs.get(attachment.run_id): raise ValueError("run_id does not exist")
         return self.attachments.create(attachment)
+
+    def save_attachment_from_source(
+        self,
+        attachment: RunAttachment,
+        *,
+        source_path: str | Path | None,
+        managed_destination: str | Path | None = None,
+    ) -> RunAttachment:
+        """Save attachment metadata and optionally copy a selected source file.
+
+        ``source_path`` is intentionally optional for updates: metadata-only
+        edits can preserve a missing or inaccessible existing path without
+        touching the filesystem.  A non-``None`` ``managed_destination`` is
+        the explicit signal to copy the source into managed storage.
+        """
+
+        if not self.runs.get(attachment.run_id):
+            raise AttachmentStorageError("The benchmark run does not exist.")
+        if attachment.id is None and source_path is None:
+            raise AttachmentStorageError("A source file is required for a new attachment.")
+        if managed_destination is not None and source_path is None:
+            raise AttachmentStorageError("Select a source file before copying into managed storage.")
+
+        draft = attachment
+        source: Path | None = None
+        if source_path is not None:
+            source = self._attachment_source(source_path)
+            filename = attachment.original_filename if attachment.original_filename.strip() else source.name
+            if not filename.strip():
+                raise AttachmentStorageError("A filename could not be derived from the selected source file.")
+            draft = replace(attachment, file_path=str(source), original_filename=filename)
+        elif attachment.id is not None:
+            draft = replace(attachment, file_path=str(self._normalize_attachment_path(attachment.file_path)))
+
+        draft.validate()
+        if source is not None and managed_destination is not None:
+            stored_path = self.copy_attachment_file(source, managed_destination, filename=draft.original_filename)
+            draft = replace(draft, file_path=str(stored_path))
+
+        if draft.id is None:
+            return self.add_attachment(draft)
+        return self.update_attachment(draft)
+
+    @staticmethod
+    def _normalize_attachment_path(path_value: str | Path) -> Path:
+        try:
+            return Path(path_value).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise AttachmentStorageError("The attachment path could not be normalized.") from error
+
+    @staticmethod
+    def _attachment_source(source_path: str | Path) -> Path:
+        source = BenchmarkService._normalize_attachment_path(source_path)
+        try:
+            is_file = source.is_file()
+        except (OSError, ValueError) as error:
+            raise AttachmentStorageError("The selected source file could not be accessed.") from error
+        if not is_file:
+            raise AttachmentStorageError("The selected source file does not exist or is not a regular file.")
+        return source
+
+    @staticmethod
+    def copy_attachment_file(
+        source_path: str | Path,
+        destination_folder: str | Path,
+        *,
+        filename: str,
+    ) -> Path:
+        """Copy one attachment without overwriting an existing destination."""
+
+        source = BenchmarkService._attachment_source(source_path)
+        try:
+            if not str(destination_folder).strip():
+                raise AttachmentStorageError("The managed destination folder is required.")
+            destination = BenchmarkService._normalize_attachment_path(destination_folder)
+            if not destination.is_dir():
+                raise AttachmentStorageError("The managed destination folder does not exist.")
+            target_name = Path(filename)
+            if not filename.strip() or target_name.name != filename:
+                raise AttachmentStorageError("Filename must be a file name, not a folder path.")
+            target = destination / filename
+        except AttachmentStorageError:
+            raise
+        except (OSError, ValueError) as error:
+            raise AttachmentStorageError("The managed destination folder could not be accessed.") from error
+
+        created = False
+        try:
+            with source.open("rb") as source_handle, target.open("xb") as target_handle:
+                created = True
+                shutil.copyfileobj(source_handle, target_handle)
+            shutil.copystat(source, target)
+        except FileExistsError as error:
+            raise AttachmentStorageError(
+                f"A file named '{filename}' already exists in the managed destination. Nothing was overwritten."
+            ) from error
+        except (OSError, ValueError) as error:
+            cleanup_error: OSError | None = None
+            if created:
+                try:
+                    target.unlink()
+                except OSError as cleanup_exception:
+                    cleanup_error = cleanup_exception
+            message = f"The file could not be copied: {error}"
+            if cleanup_error is not None:
+                message += f" The partial destination could not be removed: {cleanup_error}"
+            raise AttachmentStorageError(message) from error
+        return target
 
     def update_score(self, score: ReviewScore) -> ReviewScore:
         return self.scores.update(score)

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import math
+from functools import partial
+from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -19,6 +22,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPlainTextEdit,
     QPushButton,
+    QMessageBox,
     QScrollArea,
     QTabWidget,
     QVBoxLayout,
@@ -26,12 +30,15 @@ from PySide6.QtWidgets import (
 )
 
 from ..context import GuiApplicationContext
+from ..dialogs.attachment_editor import AttachmentEditorDialog
 from ..dialogs.review_editor import ReviewEditorDialog
 from ..models.runs import NOT_RECORDED, UNAVAILABLE, snapshot_label
 
 try:
+    from ...engine.domain import RunAttachment
     from ...engine.reporting import BenchmarkRunAggregate
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
+    from engine.domain import RunAttachment  # type: ignore[no-redef]
     from engine.reporting import BenchmarkRunAggregate  # type: ignore[no-redef]
 
 
@@ -76,6 +83,24 @@ def _json_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     except (TypeError, ValueError):
         return json.dumps({"unavailable": str(value)}, ensure_ascii=False, indent=2)
+
+
+def _is_file(path_value: str) -> bool:
+    if not path_value.strip():
+        return False
+    try:
+        return Path(path_value).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def _is_directory(path_value: str) -> bool:
+    if not path_value.strip():
+        return False
+    try:
+        return Path(path_value).is_dir()
+    except (OSError, ValueError):
+        return False
 
 
 class RunDetailsDialog(QDialog):
@@ -145,6 +170,7 @@ class RunDetailsDialog(QDialog):
         tabs.addTab(self._summary_tab(), "Summary")
         tabs.addTab(self._prompt_output_tab(), "Prompt and Output")
         tabs.addTab(self._evaluation_tab(), "Evaluation")
+        tabs.addTab(self._attachments_tab(), "Attachments")
         tabs.addTab(self._snapshots_tab(), "Historical Snapshots")
         tabs.addTab(self._metadata_tab(), "Metadata")
         return tabs
@@ -335,6 +361,77 @@ class RunDetailsDialog(QDialog):
         layout.addWidget(snapshot_text, 1)
         return self._scroll(body)
 
+    def _attachments_tab(self) -> QWidget:
+        body = QWidget()
+        layout = QVBoxLayout(body)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        heading = QHBoxLayout()
+        description = QLabel(
+            "Files remain outside the database. Removing an attachment only removes its metadata reference."
+        )
+        description.setObjectName("pageDescription")
+        description.setWordWrap(True)
+        heading.addWidget(description, 1)
+        add_button = QPushButton("Add Attachment")
+        add_button.setObjectName("primaryButton")
+        add_button.setAccessibleName("Add Attachment")
+        add_button.clicked.connect(self.add_attachment)
+        heading.addWidget(add_button)
+        layout.addLayout(heading)
+
+        if not self.aggregate.attachments:
+            empty = QLabel("No attachments have been recorded for this run.")
+            empty.setObjectName("emptyState")
+            empty.setWordWrap(True)
+            layout.addWidget(empty)
+        else:
+            for attachment in self.aggregate.attachments:
+                layout.addWidget(self._attachment_card(attachment))
+        layout.addStretch(1)
+        return self._scroll(body)
+
+    def _attachment_card(self, attachment: RunAttachment) -> QGroupBox:
+        title = attachment.original_filename or "Attachment"
+        card = QGroupBox(title)
+        card.setObjectName(f"attachmentCard{attachment.id or 0}")
+        form = self._form()
+        form.addRow("Attachment type", self._line_value(attachment.attachment_type))
+        form.addRow("Filename", self._line_value(attachment.original_filename))
+        form.addRow("File path", self._line_value(attachment.file_path))
+        form.addRow("Notes", self._text_value(attachment.notes, minimum_height=70))
+
+        status = QLabel("File Available" if _is_file(attachment.file_path) else "File Missing")
+        status.setObjectName("attachmentFileStatus")
+        status.setAccessibleName("Attachment file status")
+        status.setWordWrap(True)
+        if not _is_file(attachment.file_path):
+            status.setProperty("state", "missing")
+        form.addRow("Status", status)
+
+        actions = QHBoxLayout()
+        edit_button = QPushButton("Edit Attachment")
+        edit_button.setAccessibleName("Edit Attachment")
+        edit_button.clicked.connect(partial(self.edit_attachment, attachment))
+        remove_button = QPushButton("Remove Attachment")
+        remove_button.setAccessibleName("Remove Attachment")
+        remove_button.clicked.connect(partial(self.remove_attachment, attachment))
+        open_button = QPushButton("Open File")
+        open_button.setAccessibleName("Open File")
+        open_button.clicked.connect(partial(self.open_attachment_file, attachment))
+        folder_button = QPushButton("Open Containing Folder")
+        folder_button.setAccessibleName("Open Containing Folder")
+        folder_button.clicked.connect(partial(self.open_attachment_folder, attachment))
+        for button in (edit_button, remove_button, open_button, folder_button):
+            actions.addWidget(button)
+        actions.addStretch(1)
+
+        card_layout = QVBoxLayout(card)
+        card_layout.addLayout(form)
+        card_layout.addLayout(actions)
+        return card
+
     def _metadata_tab(self) -> QWidget:
         run = self.aggregate.run
         form = self._form()
@@ -354,19 +451,123 @@ class RunDetailsDialog(QDialog):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addLayout(form)
-        if self.aggregate.attachments:
-            layout.addWidget(QLabel("Attachments (read-only metadata)"))
-            attachment_lines = [
-                f"{item.attachment_type}: {item.original_filename} — {item.file_path}"
-                for item in self.aggregate.attachments
-            ]
-            layout.addWidget(self._text_value("\n".join(attachment_lines), minimum_height=90))
-        else:
-            empty = QLabel("No attachment metadata was recorded for this run.")
-            empty.setObjectName("emptyState")
-            layout.addWidget(empty)
         layout.addStretch(1)
         return self._scroll(body)
+
+    def _reload_tabs(self) -> None:
+        previous_index = self.tabs.currentIndex()
+        previous_label = self.tabs.tabText(previous_index) if previous_index >= 0 else ""
+        self.aggregate = self.load_aggregate(self.context, self.run_id)
+        layout = self.layout()
+        if not isinstance(layout, QVBoxLayout):
+            return
+        layout.removeWidget(self.tabs)
+        self.tabs.deleteLater()
+        self.tabs = self._build_tabs()
+        layout.insertWidget(1, self.tabs, 1)
+
+        restored_index = -1
+        if previous_label:
+            for index in range(self.tabs.count()):
+                if self.tabs.tabText(index) == previous_label:
+                    restored_index = index
+                    break
+        if restored_index < 0 and self.tabs.count() > 0:
+            restored_index = min(max(previous_index, 0), self.tabs.count() - 1)
+        if restored_index >= 0:
+            self.tabs.setCurrentIndex(restored_index)
+
+    def _show_attachment_failure(self, title: str, message: str) -> None:
+        QMessageBox.warning(self, title, message)
+
+    def add_attachment(self) -> None:
+        try:
+            editor = AttachmentEditorDialog(self.context, self.run_id, parent=self)
+            if editor.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._reload_tabs()
+        except Exception:
+            self.context.logger.exception("Add attachment failed for run %s", self.run_id)
+            self._show_attachment_failure(
+                "Attachment could not be added",
+                "The attachment could not be added. Check the selected file and see logs/error.log for details.",
+            )
+
+    def edit_attachment(self, attachment: RunAttachment) -> None:
+        try:
+            editor = AttachmentEditorDialog(self.context, self.run_id, attachment, self)
+            if editor.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._reload_tabs()
+        except Exception:
+            self.context.logger.exception("Edit attachment failed for run %s", self.run_id)
+            self._show_attachment_failure(
+                "Attachment could not be edited",
+                "The attachment metadata could not be edited. See logs/error.log for details.",
+            )
+
+    def remove_attachment(self, attachment: RunAttachment) -> None:
+        if attachment.id is None:
+            self._show_attachment_failure("Attachment could not be removed", "This attachment has no persisted ID.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "Remove attachment?",
+            f"Remove the attachment reference for '{attachment.original_filename}'?\n\n"
+            "The file on disk will NOT be deleted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.context.benchmarks.delete_attachment(attachment.id)
+            self._reload_tabs()
+        except Exception:
+            self.context.logger.exception("Remove attachment failed for run %s", self.run_id)
+            self._show_attachment_failure(
+                "Attachment could not be removed",
+                "The attachment reference could not be removed. See logs/error.log for details.",
+            )
+
+    def open_attachment_file(self, attachment: RunAttachment) -> None:
+        if not _is_file(attachment.file_path):
+            self._show_attachment_failure(
+                "File unavailable",
+                f"The attachment file is missing or inaccessible:\n{attachment.file_path}",
+            )
+            return
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(attachment.file_path))))
+        except (OSError, ValueError):
+            opened = False
+        if not opened:
+            self._show_attachment_failure(
+                "File could not be opened",
+                f"The operating system could not open:\n{attachment.file_path}",
+            )
+
+    def open_attachment_folder(self, attachment: RunAttachment) -> None:
+        try:
+            folder = Path(attachment.file_path).parent
+            folder_text = str(folder)
+        except (OSError, ValueError):
+            folder_text = ""
+        if not _is_directory(folder_text):
+            self._show_attachment_failure(
+                "Folder unavailable",
+                f"The containing folder is missing or inaccessible:\n{folder_text or attachment.file_path}",
+            )
+            return
+        try:
+            opened = QDesktopServices.openUrl(QUrl.fromLocalFile(folder_text))
+        except (OSError, ValueError):
+            opened = False
+        if not opened:
+            self._show_attachment_failure(
+                "Folder could not be opened",
+                f"The operating system could not open:\n{folder_text}",
+            )
 
     def edit_review(self) -> None:
         """Open the dedicated review editor and reload only the mutable review."""
@@ -375,14 +576,7 @@ class RunDetailsDialog(QDialog):
             editor = ReviewEditorDialog(self.context, self.run_id, self)
             if editor.exec() != QDialog.DialogCode.Accepted:
                 return
-            self.aggregate = self.load_aggregate(self.context, self.run_id)
-            layout = self.layout()
-            if not isinstance(layout, QVBoxLayout):
-                return
-            layout.removeWidget(self.tabs)
-            self.tabs.deleteLater()
-            self.tabs = self._build_tabs()
-            layout.insertWidget(1, self.tabs, 1)
+            self._reload_tabs()
             self.review_saved.emit(self.run_id)
         except Exception:
             self.context.logger.exception("Review editor failed for run %s", self.run_id)

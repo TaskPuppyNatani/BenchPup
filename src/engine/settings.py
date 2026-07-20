@@ -3,7 +3,17 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
+
+
+@dataclass(frozen=True)
+class AttachmentPreferences:
+    """Last GUI attachment locations and the UI-only storage mode."""
+
+    source_directory: Path | None = None
+    destination_directory: Path | None = None
+    storage_mode: str = "reference"
 
 
 class DefaultWorkingDirectorySettings:
@@ -16,11 +26,25 @@ class DefaultWorkingDirectorySettings:
         self.legacy_path = database.with_suffix(".settings.json")
 
     def get_default_working_directory(self) -> Path | None:
-        data = self._read(self.path) or self._read(self.legacy_path)
+        data = self._settings_data()
         value = data.get("default_working_directory") if isinstance(data, dict) else None
         if value is None and isinstance(data, dict):
             value = data.get("default_file_directory")
         return Path(value) if isinstance(value, str) and value else None
+
+    def get_attachment_preferences(self) -> AttachmentPreferences:
+        data = self._settings_data().get("attachment_preferences")
+        if not isinstance(data, dict):
+            return AttachmentPreferences()
+
+        source = data.get("source_directory")
+        destination = data.get("destination_directory")
+        mode = data.get("storage_mode")
+        return AttachmentPreferences(
+            source_directory=Path(source) if isinstance(source, str) and source else None,
+            destination_directory=Path(destination) if isinstance(destination, str) and destination else None,
+            storage_mode=mode if isinstance(mode, str) and mode else "reference",
+        )
 
     @staticmethod
     def _read(path: Path) -> dict[str, object] | None:
@@ -31,12 +55,30 @@ class DefaultWorkingDirectorySettings:
         return data if isinstance(data, dict) else None
 
     def set_default_working_directory(self, directory: str | Path) -> None:
-        self._write({"default_working_directory": str(Path(directory))})
+        data = self._settings_data()
+        data.pop("default_file_directory", None)
+        data["default_working_directory"] = str(Path(directory))
+        self._write(data)
 
     def clear_default_working_directory(self) -> None:
-        self._write({})
+        data = self._settings_data()
+        data.pop("default_working_directory", None)
+        data.pop("default_file_directory", None)
+        self._write(data)
 
-    def _write(self, data: dict[str, str]) -> None:
+    def set_attachment_preferences(self, preferences: AttachmentPreferences) -> None:
+        data = self._settings_data()
+        data["attachment_preferences"] = {
+            "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
+            "destination_directory": str(preferences.destination_directory) if preferences.destination_directory else "",
+            "storage_mode": preferences.storage_mode,
+        }
+        self._write(data)
+
+    def _settings_data(self) -> dict[str, object]:
+        return self._read(self.path) or self._read(self.legacy_path) or {}
+
+    def _write(self, data: dict[str, object]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
