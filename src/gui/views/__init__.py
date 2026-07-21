@@ -2,6 +2,7 @@
 
 from .add_run import AddRunWizard, OptionalScoreField
 from .dashboard import DashboardTableModel, DashboardView
+from .dataset_builder import DatasetBuilderState, DatasetBuilderView
 from .exports import ExportsView
 from .hardware_profiles import HardwareProfilesView
 from .imports import ImportsView
@@ -14,6 +15,8 @@ __all__ = (
     "AddRunWizard",
     "DashboardTableModel",
     "DashboardView",
+    "DatasetBuilderState",
+    "DatasetBuilderView",
     "ExportsView",
     "HardwareProfilesView",
     "ImportsView",

@@ -18,6 +18,8 @@ try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH
         StatisticsService,
         TrendService,
     )
+    from ..engine.database import MIGRATIONS
+    from ..engine.datasets import DatasetBuilder
     from ..engine.importers import CsvImportService
     from ..engine.hardware_importers import HardwareImporterRegistry
     from ..engine.settings import DefaultWorkingDirectorySettings
@@ -32,6 +34,8 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
         StatisticsService,
         TrendService,
     )
+    from engine.database import MIGRATIONS  # type: ignore[no-redef]
+    from engine.datasets import DatasetBuilder  # type: ignore[no-redef]
     from engine.importers import CsvImportService  # type: ignore[no-redef]
     from engine.hardware_importers import HardwareImporterRegistry  # type: ignore[no-redef]
     from engine.settings import DefaultWorkingDirectorySettings  # type: ignore[no-redef]
@@ -118,6 +122,7 @@ class GuiApplicationContext:
     benchmarks: BenchmarkService
     reporting: ReportingService
     standard_exports: StandardExportService
+    dataset_builder: DatasetBuilder
     statistics: StatisticsService
     comparisons: ComparisonService
     trends: TrendService
@@ -159,6 +164,11 @@ class GuiApplicationContext:
             statistics=statistics,
             trends=trends,
         )
+        dataset_builder = DatasetBuilder(
+            benchmarks,
+            benchpup_version=version,
+            schema_version=max(migration_version for migration_version, _ in MIGRATIONS),
+        )
         settings = DefaultWorkingDirectorySettings(paths.database_path)
         return cls(
             paths=paths,
@@ -167,6 +177,7 @@ class GuiApplicationContext:
             benchmarks=benchmarks,
             reporting=reporting,
             standard_exports=standard_exports,
+            dataset_builder=dataset_builder,
             statistics=statistics,
             comparisons=comparisons,
             trends=trends,

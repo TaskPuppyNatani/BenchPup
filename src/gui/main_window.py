@@ -22,6 +22,7 @@ from .views.add_run import AddRunWizard
 from .views.benchmarks import BenchmarksView
 from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
+from .views.dataset_builder import DatasetBuilderView
 from .views.exports import ExportsView
 from .views.hardware_profiles import HardwareProfilesView
 from .views.imports import ImportsView
@@ -106,6 +107,8 @@ class MainWindow(QMainWindow):
                 if destination.key == "hardware_profiles"
                 else ExportsView(self.context)
                 if destination.key == "reports"
+                else DatasetBuilderView(self.context)
+                if destination.key == "dataset_builder"
                 else PlaceholderPage(destination.label, destination.description)
             )
             if isinstance(page, RunsView):
@@ -115,6 +118,7 @@ class MainWindow(QMainWindow):
                 page.hardware_import_completed.connect(self._handle_hardware_import_completed)
             if isinstance(page, ExportsView):
                 page.export_requested.connect(self.open_export)
+                page.dataset_builder_requested.connect(self.open_dataset_builder)
             if isinstance(page, CatalogPage):
                 page.catalog_changed.connect(self._handle_catalog_changed)
                 page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
@@ -201,6 +205,7 @@ class MainWindow(QMainWindow):
             return
         dialog = StandardExportDialog(self.context, self)
         dialog.export_succeeded.connect(self._handle_export_succeeded)
+        dialog.dataset_builder_requested.connect(self.open_dataset_builder)
         self._active_export = dialog
         try:
             dialog.exec()
@@ -208,11 +213,19 @@ class MainWindow(QMainWindow):
             self._active_export = None
             dialog.deleteLater()
 
+    def open_dataset_builder(self) -> None:
+        """Close an active export handoff and show the stable Dataset Builder page."""
+
+        if self._active_export is not None:
+            self._active_export.reject()
+        self.navigate_to("dataset_builder")
+
     def _handle_catalog_changed(self, _entity: str) -> None:
         """Keep catalog-dependent pages and an open Add Run wizard current."""
 
         if self._active_add_run is not None:
             self._active_add_run.refresh_catalog_choices()
+        self.dataset_builder.refresh_catalog_choices()
         if self.dashboard.has_loaded:
             self.dashboard.refresh()
         if self.runs.has_loaded:
@@ -298,6 +311,12 @@ class MainWindow(QMainWindow):
     def exports(self) -> ExportsView:
         page = self.pages["reports"]
         assert isinstance(page, ExportsView)
+        return page
+
+    @property
+    def dataset_builder(self) -> DatasetBuilderView:
+        page = self.pages["dataset_builder"]
+        assert isinstance(page, DatasetBuilderView)
         return page
 
     def closeEvent(self, event: object) -> None:

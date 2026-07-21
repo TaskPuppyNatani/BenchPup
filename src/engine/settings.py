@@ -60,6 +60,13 @@ class ExportPreferences:
     last_export_kind: str = DEFAULT_EXPORT_KIND
 
 
+@dataclass(frozen=True)
+class DatasetBuilderPreferences:
+    """Last successful GUI dataset destination, kept outside benchmark data."""
+
+    last_dataset_directory: Path | None = None
+
+
 class DefaultWorkingDirectorySettings:
     """Persist one optional default directory without touching benchmark data."""
 
@@ -136,6 +143,16 @@ class DefaultWorkingDirectorySettings:
             last_export_kind=kind if isinstance(kind, str) and kind in STANDARD_EXPORT_KINDS else DEFAULT_EXPORT_KIND,
         )
 
+    def get_dataset_builder_preferences(self) -> DatasetBuilderPreferences:
+        data = self._settings_data().get("dataset_builder_preferences")
+        if not isinstance(data, dict):
+            return DatasetBuilderPreferences()
+
+        directory = data.get("last_dataset_directory")
+        return DatasetBuilderPreferences(
+            last_dataset_directory=Path(directory) if isinstance(directory, str) and directory else None,
+        )
+
     @staticmethod
     def _read(path: Path) -> dict[str, object] | None:
         try:
@@ -189,6 +206,17 @@ class DefaultWorkingDirectorySettings:
         data["export_preferences"] = {
             "last_export_directory": str(preferences.last_export_directory) if preferences.last_export_directory else "",
             "last_export_kind": kind,
+        }
+        self._write(data)
+
+    def set_dataset_builder_preferences(self, preferences: DatasetBuilderPreferences) -> None:
+        data = self._settings_data()
+        data["dataset_builder_preferences"] = {
+            "last_dataset_directory": (
+                str(preferences.last_dataset_directory)
+                if preferences.last_dataset_directory
+                else ""
+            ),
         }
         self._write(data)
 

@@ -165,8 +165,49 @@ def build_stylesheet(tokens: ThemeTokens = DEFAULT_THEME) -> str:
         spacing: 7px;
     }}
     QCheckBox::indicator {{
-        width: 15px;
-        height: 15px;
+        width: 17px;
+        height: 17px;
+        border: 1px solid {tokens.border};
+        border-radius: 4px;
+        background-color: {tokens.surface_elevated};
+    }}
+    QCheckBox::indicator:unchecked {{
+        background-color: {tokens.surface_elevated};
+        border: 1px solid {tokens.border};
+    }}
+    QCheckBox::indicator:unchecked:hover {{
+        background-color: {tokens.surface_selected};
+        border: 1px solid {tokens.accent};
+    }}
+    QCheckBox::indicator:unchecked:focus {{
+        border: 2px solid {tokens.focus};
+    }}
+    QCheckBox::indicator:unchecked:pressed {{
+        background-color: {tokens.surface_selected};
+        border: 2px solid {tokens.accent_hover};
+    }}
+    QCheckBox::indicator:checked {{
+        background-color: {tokens.accent};
+        border: 1px solid {tokens.accent_hover};
+    }}
+    QCheckBox::indicator:checked:hover {{
+        background-color: {tokens.accent_hover};
+        border: 1px solid {tokens.accent};
+    }}
+    QCheckBox::indicator:checked:focus {{
+        border: 2px solid {tokens.focus};
+    }}
+    QCheckBox::indicator:checked:pressed {{
+        background-color: {tokens.accent_hover};
+        border: 2px solid {tokens.focus};
+    }}
+    QCheckBox::indicator:unchecked:disabled {{
+        background-color: {tokens.disabled_surface};
+        border: 1px solid {tokens.disabled_text};
+    }}
+    QCheckBox::indicator:checked:disabled {{
+        background-color: {tokens.disabled_text};
+        border: 1px solid {tokens.muted_text};
     }}
     QTabWidget::pane {{
         border: 1px solid {tokens.border};

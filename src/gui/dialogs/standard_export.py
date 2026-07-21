@@ -6,7 +6,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from PySide6.QtCore import QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QStandardItemModel
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -54,6 +54,7 @@ class StandardExportDialog(QDialog):
     """Configure, preview, and explicitly authorize one standard export."""
 
     export_succeeded = Signal(str)
+    dataset_builder_requested = Signal()
 
     def __init__(
         self,
@@ -99,11 +100,6 @@ class StandardExportDialog(QDialog):
         self.format_combo.setAccessibleName("Export format")
         for kind in StandardExportKind:
             self.format_combo.addItem(EXPORT_LABELS[kind], kind.value)
-        model = self.format_combo.model()
-        if isinstance(model, QStandardItemModel):
-            unavailable = model.item(self.format_combo.findData(StandardExportKind.JSONL_TRAINING_DATA.value))
-            if unavailable is not None:
-                unavailable.setEnabled(False)
         self.format_combo.currentIndexChanged.connect(self._format_changed)
 
         self.run_combo = QComboBox()
@@ -204,9 +200,23 @@ class StandardExportDialog(QDialog):
         destination_row = QHBoxLayout()
         destination_row.addWidget(self.destination_edit, 1)
         destination_row.addWidget(self.browse_button)
-        destination_group = QGroupBox("Destination")
-        destination_form = QFormLayout(destination_group)
+        self.destination_group = QGroupBox("Destination")
+        destination_form = QFormLayout(self.destination_group)
         destination_form.addRow("File", destination_row)
+
+        self.dataset_builder_group = QGroupBox("Dataset Builder")
+        dataset_builder_layout = QVBoxLayout(self.dataset_builder_group)
+        dataset_builder_description = QLabel(
+            "JSONL training-data exports are configured in Dataset Builder, where you can choose filters, "
+            "redaction rules, preview eligible records, and build a JSONL file with its manifest."
+        )
+        dataset_builder_description.setWordWrap(True)
+        dataset_builder_layout.addWidget(dataset_builder_description)
+        self.open_dataset_builder_button = QPushButton("Open Dataset Builder")
+        self.open_dataset_builder_button.setObjectName("exportOpenDatasetBuilderButton")
+        self.open_dataset_builder_button.setAccessibleName("Open Dataset Builder workflow")
+        self.open_dataset_builder_button.clicked.connect(self.open_dataset_builder)
+        dataset_builder_layout.addWidget(self.open_dataset_builder_button)
 
         self.preview_summary = QLabel("No preview yet.")
         self.preview_summary.setObjectName("exportPreviewSummary")
@@ -260,7 +270,8 @@ class StandardExportDialog(QDialog):
         layout.addWidget(self.selection_group)
         layout.addWidget(self.report_options_group)
         layout.addWidget(self.analytics_group)
-        layout.addWidget(destination_group)
+        layout.addWidget(self.destination_group)
+        layout.addWidget(self.dataset_builder_group)
         preview_group = QGroupBox("Preview")
         preview_layout = QVBoxLayout(preview_group)
         preview_layout.addWidget(self.preview_summary)
@@ -324,6 +335,8 @@ class StandardExportDialog(QDialog):
             return StandardExportKind.BENCHMARK_RUNS_CSV
 
     def _default_filename(self) -> str:
+        if self._kind() is StandardExportKind.JSONL_TRAINING_DATA:
+            return "dataset.jsonl"
         return DEFAULT_EXPORT_FILENAMES.get(self._kind(), "export")
 
     def _set_suggested_destination(self, path: Path) -> None:
@@ -386,6 +399,7 @@ class StandardExportDialog(QDialog):
 
     def _refresh_format_controls(self) -> None:
         kind = self._kind()
+        dataset_builder = kind is StandardExportKind.JSONL_TRAINING_DATA
         run_scope = kind is StandardExportKind.BENCHMARK_RUN_MARKDOWN
         session_scope = kind is StandardExportKind.SESSION_MARKDOWN
         hardware_scope = kind is StandardExportKind.HARDWARE_MARKDOWN
@@ -414,7 +428,9 @@ class StandardExportDialog(QDialog):
         self._set_form_row_visible(self.hardware_combo, hardware_scope)
         self._set_form_row_visible(self.model_filter_combo, model_scope)
         self._set_form_row_visible(self.batch_filter_combo, batch_scope)
-        self.report_options_group.setVisible(markdown_options or kind is StandardExportKind.MODEL_LEADERBOARD_MARKDOWN)
+        self.report_options_group.setVisible(
+            not dataset_builder and (markdown_options or kind is StandardExportKind.MODEL_LEADERBOARD_MARKDOWN)
+        )
         for checkbox in (
             self.include_prompt_check,
             self.include_raw_check,
@@ -423,8 +439,12 @@ class StandardExportDialog(QDialog):
             checkbox.setVisible(markdown_options)
         self.include_model_details_check.setVisible(kind is StandardExportKind.MODEL_LEADERBOARD_MARKDOWN)
         self.include_hardware_details_check.setVisible(kind is StandardExportKind.HARDWARE_MARKDOWN)
-        self.analytics_group.setVisible(kind is StandardExportKind.HTML_ANALYTICS)
-        self.selection_group.setVisible(kind is not StandardExportKind.HTML_ANALYTICS)
+        self.analytics_group.setVisible(not dataset_builder and kind is StandardExportKind.HTML_ANALYTICS)
+        self.selection_group.setVisible(not dataset_builder and kind is not StandardExportKind.HTML_ANALYTICS)
+        self.destination_group.setVisible(not dataset_builder)
+        self.dataset_builder_group.setVisible(dataset_builder)
+        self.preview_button.setEnabled(not dataset_builder and not self._saving)
+        self.export_button.setEnabled(False)
 
     def _set_form_row_visible(self, widget: QWidget, visible: bool) -> None:
         label = self._selection_form.labelForField(widget)
@@ -451,7 +471,12 @@ class StandardExportDialog(QDialog):
         self.open_file_button.setVisible(False)
         self.open_folder_button.setVisible(False)
         self.export_button.setEnabled(False)
-        if not self._initializing:
+        if self._kind() is StandardExportKind.JSONL_TRAINING_DATA:
+            self.status_label.setText(
+                "JSONL training data uses Dataset Builder. Open Dataset Builder to configure and build it."
+            )
+            self.preview_button.setEnabled(False)
+        elif not self._initializing:
             self.status_label.setText("Configuration changed. Preview again before exporting.")
 
     def _populate_choices(self) -> None:
@@ -520,6 +545,8 @@ class StandardExportDialog(QDialog):
 
     def _request(self) -> StandardExportRequest:
         kind = self._kind()
+        if kind is StandardExportKind.JSONL_TRAINING_DATA:
+            raise ValueError("JSONL training data is configured through Dataset Builder.")
         selected_model = str(self.model_filter_combo.currentData() or "")
         batch_id = self.batch_filter_combo.currentData()
         benchmark_kinds = {
@@ -563,7 +590,7 @@ class StandardExportDialog(QDialog):
         )
 
     def preview(self) -> None:
-        if self._saving:
+        if self._saving or self._kind() is StandardExportKind.JSONL_TRAINING_DATA:
             return
         try:
             request = self._request()
@@ -596,7 +623,12 @@ class StandardExportDialog(QDialog):
             self.destination_edit.setText(selected)
 
     def export(self) -> None:
-        if self._saving or self._preview is None or self._preview.status is not StandardExportStatus.SUCCESS:
+        if (
+            self._saving
+            or self._kind() is StandardExportKind.JSONL_TRAINING_DATA
+            or self._preview is None
+            or self._preview.status is not StandardExportStatus.SUCCESS
+        ):
             return
         self._saving = True
         try:
@@ -662,6 +694,10 @@ class StandardExportDialog(QDialog):
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_success_path.parent))):
             QMessageBox.warning(self, "Open containing folder", "The export succeeded, but the containing folder could not be opened.")
+
+    def open_dataset_builder(self, _checked: bool = False) -> None:
+        self.dataset_builder_requested.emit()
+        self.reject()
 
 
 __all__ = ("StandardExportDialog",)

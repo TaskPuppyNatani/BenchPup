@@ -232,18 +232,44 @@ class StandardExportGuiTests(unittest.TestCase):
         finally:
             dialog.reject()
 
-    def test_jsonl_is_visible_but_disabled_and_page_explains_dataset_builder_boundary(self) -> None:
+    def test_jsonl_is_visible_as_a_dataset_builder_handoff(self) -> None:
         dialog = StandardExportDialog(self.context)
         try:
             index = dialog.format_combo.findData(StandardExportKind.JSONL_TRAINING_DATA.value)
             self.assertGreaterEqual(index, 0)
-            model = dialog.format_combo.model()
-            self.assertFalse(model.item(index).isEnabled())  # type: ignore[attr-defined]
+            self.assertTrue(dialog.format_combo.model().item(index).isEnabled())  # type: ignore[attr-defined]
+            dialog.format_combo.setCurrentIndex(index)
+            self.assertFalse(dialog.dataset_builder_group.isHidden())
+            self.assertFalse(dialog.preview_button.isEnabled())
+            self.assertFalse(dialog.export_button.isEnabled())
+            self.assertIn("Dataset Builder", dialog.status_label.text())
+            with patch.object(self.context.standard_exports, "preview") as preview, patch.object(
+                self.context.standard_exports, "write"
+            ) as write:
+                dialog.preview()
+                dialog.export()
+            preview.assert_not_called()
+            write.assert_not_called()
         finally:
             dialog.reject()
         window = MainWindow(self.context)
         try:
             self.assertIn("Dataset Builder", " ".join(label.text() for label in window.exports.findChildren(QLabel)))
+            self.assertIs(window.pages["dataset_builder"], window.dataset_builder)
+        finally:
+            window.close()
+
+    def test_jsonl_handoff_closes_dialog_and_navigates_to_stable_dataset_builder_page(self) -> None:
+        window = MainWindow(self.context)
+        try:
+            dialog = StandardExportDialog(self.context, window)
+            dialog.dataset_builder_requested.connect(window.open_dataset_builder)
+            dialog.format_combo.setCurrentIndex(
+                dialog.format_combo.findData(StandardExportKind.JSONL_TRAINING_DATA.value)
+            )
+            dialog.open_dataset_builder_button.click()
+            self.assertEqual(window.current_page_key(), "dataset_builder")
+            self.assertNotEqual(dialog.result(), QDialog.DialogCode.Accepted)
         finally:
             window.close()
 
@@ -258,6 +284,7 @@ class StandardExportGuiTests(unittest.TestCase):
                 window.export_button.click()
             self.assertEqual(dialog_type.call_count, 2)
             self.assertEqual(fake_dialog.export_succeeded.connect.call_count, 2)
+            self.assertEqual(fake_dialog.dataset_builder_requested.connect.call_count, 2)
             self.assertIs(window.pages["reports"], window.exports)
         finally:
             window.close()

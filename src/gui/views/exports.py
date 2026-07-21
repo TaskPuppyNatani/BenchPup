@@ -12,6 +12,7 @@ class ExportsView(QWidget):
     """Lightweight launcher for the modal standard-export workflow."""
 
     export_requested = Signal()
+    dataset_builder_requested = Signal()
 
     def __init__(self, context: GuiApplicationContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -29,26 +30,36 @@ class ExportsView(QWidget):
 
         standard_group = QGroupBox("Standard exports")
         standard_layout = QVBoxLayout(standard_group)
-        standard_layout.addWidget(
-            QLabel(
-                "Preview the selected scope first. Existing files require an explicit overwrite confirmation, "
-                "and missing folders are never created automatically."
-            )
+        standard_description = QLabel(
+            "Preview the selected scope first. Existing files require an explicit overwrite confirmation, "
+            "and missing folders are never created automatically."
         )
+        standard_description.setWordWrap(True)
+        standard_layout.addWidget(standard_description)
         self.export_button = QPushButton("Open Standard Export")
         self.export_button.setObjectName("primaryButton")
         self.export_button.setAccessibleName("Open standard export workflow")
         self.export_button.clicked.connect(self.open_export)
         standard_layout.addWidget(self.export_button)
 
-        unavailable_group = QGroupBox("Unavailable in this phase")
-        unavailable_layout = QVBoxLayout(unavailable_group)
-        unavailable_layout.addWidget(
-            QLabel(
-                "JSONL training-data export is not available here. Use the future Dataset Builder GUI for "
-                "Dataset Builder JSONL workflows. Comparison and Trend exports are also out of scope."
-            )
+        dataset_group = QGroupBox("Dataset Builder")
+        dataset_layout = QVBoxLayout(dataset_group)
+        dataset_description = QLabel(
+            "Configure filters and redaction rules, preview eligible runs, and build JSONL training data "
+            "with its manifest in the dedicated Dataset Builder workflow."
         )
+        dataset_description.setWordWrap(True)
+        dataset_layout.addWidget(dataset_description)
+        self.dataset_builder_button = QPushButton("Open Dataset Builder")
+        self.dataset_builder_button.setObjectName("openDatasetBuilderButton")
+        self.dataset_builder_button.setAccessibleName("Open Dataset Builder workflow")
+        self.dataset_builder_button.clicked.connect(self.open_dataset_builder)
+        dataset_layout.addWidget(self.dataset_builder_button)
+
+        out_of_scope_label = QLabel(
+            "Comparison and Trend exports are out of scope for this phase."
+        )
+        out_of_scope_label.setWordWrap(True)
 
         self.status_label = QLabel("Ready")
         self.status_label.setObjectName("exportPageStatus")
@@ -60,12 +71,16 @@ class ExportsView(QWidget):
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addWidget(standard_group)
-        layout.addWidget(unavailable_group)
+        layout.addWidget(dataset_group)
+        layout.addWidget(out_of_scope_label)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
 
     def open_export(self) -> None:
         self.export_requested.emit()
+
+    def open_dataset_builder(self, _checked: bool = False) -> None:
+        self.dataset_builder_requested.emit()
 
     def show_success(self, path: str) -> None:
         self.status_label.setText(f"Export completed successfully: {path}")

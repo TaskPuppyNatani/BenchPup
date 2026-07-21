@@ -6,6 +6,7 @@ from .catalog_table_model import CATALOG_RECORD_ROLE, CATALOG_ROW_ROLE, CatalogT
 from .run_table_model import ROW_ROLE, RUN_ID_ROLE, TABLE_HEADERS, RunTableModel
 from .runs import UNAVAILABLE, RunBrowserRow, RunsDataProvider
 from .import_table_model import ImportTableModel
+from .dataset_preview_model import DATASET_PREVIEW_HEADERS, DatasetPreviewTableModel
 
 __all__ = (
     "DashboardDataProvider",
@@ -22,6 +23,8 @@ __all__ = (
     "RunBrowserRow",
     "RunsDataProvider",
     "ImportTableModel",
+    "DATASET_PREVIEW_HEADERS",
+    "DatasetPreviewTableModel",
     "RunTableModel",
     "TABLE_HEADERS",
     "display_bool",
