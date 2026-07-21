@@ -2,6 +2,7 @@
 
 from .add_run import AddRunWizard, OptionalScoreField
 from .dashboard import DashboardTableModel, DashboardView
+from .exports import ExportsView
 from .hardware_profiles import HardwareProfilesView
 from .imports import ImportsView
 from .placeholder import PlaceholderPage
@@ -13,6 +14,7 @@ __all__ = (
     "AddRunWizard",
     "DashboardTableModel",
     "DashboardView",
+    "ExportsView",
     "HardwareProfilesView",
     "ImportsView",
     "OptionalScoreField",

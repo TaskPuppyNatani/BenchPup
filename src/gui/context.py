@@ -14,6 +14,7 @@ try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH
         ComparisonService,
         EngineDatabase,
         ReportingService,
+        StandardExportService,
         StatisticsService,
         TrendService,
     )
@@ -27,6 +28,7 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
         ComparisonService,
         EngineDatabase,
         ReportingService,
+        StandardExportService,
         StatisticsService,
         TrendService,
     )
@@ -115,6 +117,7 @@ class GuiApplicationContext:
     catalog: CatalogService
     benchmarks: BenchmarkService
     reporting: ReportingService
+    standard_exports: StandardExportService
     statistics: StatisticsService
     comparisons: ComparisonService
     trends: TrendService
@@ -150,6 +153,12 @@ class GuiApplicationContext:
         trends = TrendService(benchmarks, catalog)
         csv_importer = CsvImportService(benchmarks)
         hardware_importers = HardwareImporterRegistry()
+        standard_exports = StandardExportService(
+            benchmarks,
+            catalog,
+            statistics=statistics,
+            trends=trends,
+        )
         settings = DefaultWorkingDirectorySettings(paths.database_path)
         return cls(
             paths=paths,
@@ -157,6 +166,7 @@ class GuiApplicationContext:
             catalog=catalog,
             benchmarks=benchmarks,
             reporting=reporting,
+            standard_exports=standard_exports,
             statistics=statistics,
             comparisons=comparisons,
             trends=trends,

@@ -9,6 +9,7 @@ from .hardware_import import HardwareImportDialog
 from .prompt_template_editor import PromptTemplateEditorDialog
 from .review_editor import ReviewEditorDialog
 from .session_editor import SessionEditorDialog
+from .standard_export import StandardExportDialog
 
 __all__ = (
     "BackendVersionsEditor",
@@ -22,4 +23,5 @@ __all__ = (
     "PromptTemplateEditorDialog",
     "ReviewEditorDialog",
     "SessionEditorDialog",
+    "StandardExportDialog",
 )

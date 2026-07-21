@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import csv
 from html import escape
+import io
 import json
 from pathlib import Path
+from collections.abc import Sequence
+from typing import Any, TextIO
 
-from .domain import now
+from .domain import BenchmarkRun, ReviewScore, ScoreboardEntry, ScoreboardImportBatch, now
 from .reporting import (
     BenchmarkReportFilters,
+    BenchmarkRunAggregate,
     ScoreboardReportFilters,
+    ScoreboardEntryAggregate,
     build_benchmark_run_report,
     build_model_leaderboard,
     build_scoreboard_report,
@@ -24,35 +29,120 @@ from .html_reporting import (
 )
 
 
+def _benchmark_run_csv_row(run: BenchmarkRun, score: ReviewScore | None) -> dict[str, Any]:
+    return {
+        **run.model_snapshot,
+        **run.benchmark_snapshot,
+        "prompt_name": run.prompt_name,
+        "prompt_text": run.prompt_text,
+        "raw_model_output": run.raw_model_output,
+        **(
+            {key: value for key, value in vars(score).items() if key not in {"id", "run_id"}}
+            if score
+            else {}
+        ),
+    }
+
+
+def benchmark_runs_csv_rows(
+    service: BenchmarkService,
+    *,
+    runs: Sequence[BenchmarkRun] | None = None,
+    aggregates: Sequence[BenchmarkRunAggregate] | None = None,
+) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...]]:
+    """Return the legacy BenchmarkRun CSV shape without touching the filesystem."""
+
+    rows: list[dict[str, Any]] = []
+    if aggregates is not None:
+        rows.extend(_benchmark_run_csv_row(aggregate.run, aggregate.score) for aggregate in aggregates)
+    else:
+        for run in runs if runs is not None else service.runs.list():
+            run_id = run.id
+            assert run_id is not None, "Persisted benchmark run is missing its ID"
+            _, score, _ = service.get_run(run_id)
+            rows.append(_benchmark_run_csv_row(run, score))
+    fields = tuple(sorted({key for row in rows for key in row}))
+    return fields, tuple(rows)
+
+
+def scoreboard_csv_rows(
+    catalog: CatalogService,
+    *,
+    entries: Sequence[ScoreboardEntry] | None = None,
+    aggregates: Sequence[ScoreboardEntryAggregate] | None = None,
+) -> tuple[tuple[str, ...], tuple[dict[str, Any], ...]]:
+    """Return the legacy ScoreboardEntry CSV shape without filesystem writes."""
+
+    rows: list[dict[str, Any]] = []
+    if aggregates is not None:
+        rows.extend(
+            _scoreboard_csv_row(aggregate.entry, aggregate.batch)
+            for aggregate in aggregates
+        )
+    else:
+        batches = {batch.id: batch for batch in catalog.scoreboard_import_batches.list()}
+        rows.extend(
+            _scoreboard_csv_row(entry, batches.get(entry.import_batch_id))
+            for entry in (entries if entries is not None else catalog.scoreboard_entries.list())
+        )
+    fields = tuple(sorted({key for row in rows for key in row}))
+    return fields, tuple(rows)
+
+
+def _scoreboard_csv_row(entry: ScoreboardEntry, batch: ScoreboardImportBatch | None) -> dict[str, Any]:
+    row = {
+        key: value
+        for key, value in vars(entry).items()
+        if key not in {"id", "is_deleted"}
+    }
+    row["batch_name"] = batch.name if batch else ""
+    row["batch_imported_at"] = batch.imported_at if batch else entry.imported_at
+    return row
+
+
+def _write_csv_rows(output: TextIO, fields: Sequence[str], rows: Sequence[dict[str, Any]]) -> None:
+    writer = csv.DictWriter(output, fieldnames=list(fields))
+    writer.writeheader()
+    writer.writerows(rows)
+
+
+def render_benchmark_runs_csv(
+    service: BenchmarkService,
+    *,
+    runs: Sequence[BenchmarkRun] | None = None,
+    aggregates: Sequence[BenchmarkRunAggregate] | None = None,
+) -> str:
+    fields, rows = benchmark_runs_csv_rows(service, runs=runs, aggregates=aggregates)
+    output = io.StringIO(newline="")
+    _write_csv_rows(output, fields, rows)
+    return output.getvalue()
+
+
+def render_scoreboard_csv(
+    catalog: CatalogService,
+    *,
+    entries: Sequence[ScoreboardEntry] | None = None,
+    aggregates: Sequence[ScoreboardEntryAggregate] | None = None,
+) -> str:
+    fields, rows = scoreboard_csv_rows(catalog, entries=entries, aggregates=aggregates)
+    output = io.StringIO(newline="")
+    _write_csv_rows(output, fields, rows)
+    return output.getvalue()
+
+
 def export_benchmark_runs_csv(service: BenchmarkService, path: str | Path) -> Path:
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for run in service.runs.list():
-        run_id = run.id
-        assert run_id is not None, "Persisted benchmark run is missing its ID"
-        _, score, _ = service.get_run(run_id)
-        rows.append({**run.model_snapshot, **run.benchmark_snapshot, "prompt_name": run.prompt_name,
-                     "prompt_text": run.prompt_text, "raw_model_output": run.raw_model_output,
-                     **({key: value for key, value in score.__dict__.items() if key not in {"id", "run_id"}} if score else {})})
-    fields = sorted({key for row in rows for key in row})
+    fields, rows = benchmark_runs_csv_rows(service)
     with path.open("w", encoding="utf-8", newline="") as output:
-        writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        _write_csv_rows(output, fields, rows)
     return path
 
 
 def export_scoreboard_csv(catalog: CatalogService, path: str | Path) -> Path:
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    batches = {batch.id: batch for batch in catalog.scoreboard_import_batches.list()}
-    rows = []
-    for entry in catalog.scoreboard_entries.list():
-        batch = batches.get(entry.import_batch_id)
-        row = {key: value for key, value in entry.__dict__.items() if key not in {"id", "is_deleted"}}
-        row["batch_name"] = batch.name if batch else ""
-        row["batch_imported_at"] = batch.imported_at if batch else entry.imported_at
-        rows.append(row)
-    fields = sorted({key for row in rows for key in row})
+    fields, rows = scoreboard_csv_rows(catalog)
     with path.open("w", encoding="utf-8", newline="") as output:
-        writer = csv.DictWriter(output, fieldnames=fields); writer.writeheader(); writer.writerows(rows)
+        _write_csv_rows(output, fields, rows)
     return path
 
 

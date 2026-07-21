@@ -9,6 +9,21 @@ from collections.abc import Iterable
 
 
 DEFAULT_HARDWARE_PARSER_NAMES = ("MSInfo32", "DXDiag", "lshw --short")
+DEFAULT_EXPORT_KIND = "benchmark_runs_csv"
+STANDARD_EXPORT_KINDS = frozenset(
+    {
+        "benchmark_runs_csv",
+        "scoreboard_csv",
+        "combined_markdown",
+        "benchmark_run_markdown",
+        "scoreboard_markdown",
+        "model_leaderboard_markdown",
+        "session_markdown",
+        "hardware_markdown",
+        "scoreboard_html",
+        "html_analytics",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -35,6 +50,14 @@ class HardwareImportPreferences:
 
     source_directory: Path | None = None
     parser_override: str = "auto"
+
+
+@dataclass(frozen=True)
+class ExportPreferences:
+    """Last GUI standard-export location and format choice."""
+
+    last_export_directory: Path | None = None
+    last_export_kind: str = DEFAULT_EXPORT_KIND
 
 
 class DefaultWorkingDirectorySettings:
@@ -101,6 +124,18 @@ class DefaultWorkingDirectorySettings:
             parser_override=parser_override,
         )
 
+    def get_export_preferences(self) -> ExportPreferences:
+        data = self._settings_data().get("export_preferences")
+        if not isinstance(data, dict):
+            return ExportPreferences()
+
+        directory = data.get("last_export_directory")
+        kind = data.get("last_export_kind")
+        return ExportPreferences(
+            last_export_directory=Path(directory) if isinstance(directory, str) and directory else None,
+            last_export_kind=kind if isinstance(kind, str) and kind in STANDARD_EXPORT_KINDS else DEFAULT_EXPORT_KIND,
+        )
+
     @staticmethod
     def _read(path: Path) -> dict[str, object] | None:
         try:
@@ -145,6 +180,15 @@ class DefaultWorkingDirectorySettings:
         data["hardware_import_preferences"] = {
             "source_directory": str(preferences.source_directory) if preferences.source_directory else "",
             "parser_override": parser_override,
+        }
+        self._write(data)
+
+    def set_export_preferences(self, preferences: ExportPreferences) -> None:
+        data = self._settings_data()
+        kind = preferences.last_export_kind if preferences.last_export_kind in STANDARD_EXPORT_KINDS else DEFAULT_EXPORT_KIND
+        data["export_preferences"] = {
+            "last_export_directory": str(preferences.last_export_directory) if preferences.last_export_directory else "",
+            "last_export_kind": kind,
         }
         self._write(data)
 

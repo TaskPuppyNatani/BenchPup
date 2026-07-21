@@ -22,6 +22,7 @@ from .views.add_run import AddRunWizard
 from .views.benchmarks import BenchmarksView
 from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
+from .views.exports import ExportsView
 from .views.hardware_profiles import HardwareProfilesView
 from .views.imports import ImportsView
 from .views.models import ModelsView
@@ -29,6 +30,7 @@ from .views.placeholder import PlaceholderPage
 from .views.prompt_templates import PromptTemplatesView
 from .views.runs import RunsView
 from .views.sessions import SessionsView
+from .dialogs.standard_export import StandardExportDialog
 
 
 class MainWindow(QMainWindow):
@@ -49,6 +51,7 @@ class MainWindow(QMainWindow):
         self.pages: dict[str, QWidget] = {}
         self.page_indices: dict[str, int] = {}
         self._active_add_run: AddRunWizard | None = None
+        self._active_export: StandardExportDialog | None = None
         self._build_shell()
         self.navigation.page_changed.connect(self._show_page)
         self.navigation.set_current_page("dashboard")
@@ -101,6 +104,8 @@ class MainWindow(QMainWindow):
                 if destination.key == "prompt_templates"
                 else HardwareProfilesView(self.context)
                 if destination.key == "hardware_profiles"
+                else ExportsView(self.context)
+                if destination.key == "reports"
                 else PlaceholderPage(destination.label, destination.description)
             )
             if isinstance(page, RunsView):
@@ -108,6 +113,8 @@ class MainWindow(QMainWindow):
             if isinstance(page, ImportsView):
                 page.import_completed.connect(self._handle_import_completed)
                 page.hardware_import_completed.connect(self._handle_hardware_import_completed)
+            if isinstance(page, ExportsView):
+                page.export_requested.connect(self.open_export)
             if isinstance(page, CatalogPage):
                 page.catalog_changed.connect(self._handle_catalog_changed)
                 page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
@@ -143,9 +150,10 @@ class MainWindow(QMainWindow):
         self.add_run_button.setToolTip("Open the review-before-save Add Run workflow")
         self.add_run_button.clicked.connect(self.open_add_run)
         self.export_button = QPushButton("Export")
-        self.export_button.setEnabled(False)
-        self.export_button.setAccessibleName("Export, planned")
-        self.export_button.setToolTip("Export dialogs are coming in a later Phase 5 slice")
+        self.export_button.setEnabled(True)
+        self.export_button.setAccessibleName("Open standard export workflow")
+        self.export_button.setToolTip("Open the Reports & Exports workflow")
+        self.export_button.clicked.connect(self.open_export)
         layout.addWidget(self.add_run_button)
         layout.addWidget(self.export_button)
         return header
@@ -184,6 +192,22 @@ class MainWindow(QMainWindow):
         finally:
             self._active_add_run = None
 
+    def open_export(self) -> None:
+        """Open the one shared standard-export workflow from the shell."""
+
+        if self._active_export is not None:
+            self._active_export.raise_()
+            self._active_export.activateWindow()
+            return
+        dialog = StandardExportDialog(self.context, self)
+        dialog.export_succeeded.connect(self._handle_export_succeeded)
+        self._active_export = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._active_export = None
+            dialog.deleteLater()
+
     def _handle_catalog_changed(self, _entity: str) -> None:
         """Keep catalog-dependent pages and an open Add Run wizard current."""
 
@@ -217,6 +241,10 @@ class MainWindow(QMainWindow):
             self.hardware_profiles.refresh()
             self.hardware_profiles.select_record(profile_id)
         self.status_bar.showMessage("Hardware profile imported successfully.", 6000)
+
+    def _handle_export_succeeded(self, path: str) -> None:
+        self.exports.show_success(path)
+        self.status_bar.showMessage(f"Export completed successfully: {path}", 6000)
 
     @property
     def dashboard(self) -> DashboardView:
@@ -264,6 +292,12 @@ class MainWindow(QMainWindow):
     def hardware_profiles(self) -> HardwareProfilesView:
         page = self.pages["hardware_profiles"]
         assert isinstance(page, HardwareProfilesView)
+        return page
+
+    @property
+    def exports(self) -> ExportsView:
+        page = self.pages["reports"]
+        assert isinstance(page, ExportsView)
         return page
 
     def closeEvent(self, event: object) -> None:

@@ -25,7 +25,7 @@ NAVIGATION_DESTINATIONS: tuple[NavigationDestination, ...] = (
     NavigationDestination("prompt_templates", "Prompt Templates", "Manage reusable prompt versions"),
     NavigationDestination("hardware_profiles", "Hardware Profiles", "Manage reusable hardware metadata"),
     NavigationDestination("scoreboards", "Scoreboards", "Review historical scoreboard data"),
-    NavigationDestination("reports", "Reports", "Build structured reports"),
+    NavigationDestination("reports", "Reports & Exports", "Build standard reports and exports"),
     NavigationDestination("dataset_builder", "Dataset Builder", "Curate training datasets"),
     NavigationDestination("comparisons", "Comparisons", "Compare models and sessions"),
     NavigationDestination("trends", "Trends", "Explore historical trends"),
