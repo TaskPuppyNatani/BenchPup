@@ -6,16 +6,31 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from .domain import LEVELS, BenchmarkRun, now
 from .services import BenchmarkService
 
 DATASET_FORMAT_VERSION = 1
+DATASET_VALIDATION_MAX_ISSUES = 100
+MANIFEST_REQUIRED_FIELDS = (
+    "dataset_filename",
+    "record_count",
+    "excluded_count",
+    "duplicate_count",
+    "redaction_count",
+    "benchpup_version",
+    "schema_version",
+    "created_at",
+    "format_version",
+    "sha256",
+)
 
 
 @dataclass(frozen=True)
@@ -86,12 +101,225 @@ class DatasetWriteResult:
     remaining_temp_paths: tuple[Path, ...] = ()
 
 
+class DatasetValidationState(str, Enum):
+    """Typed dataset outcomes retaining the legacy success value."""
+
+    VALID = "success"
+    INVALID = "validation_failed"
+    UNREADABLE = "unreadable"
+
+
+class ManifestValidationState(str, Enum):
+    """Typed manifest outcomes retaining legacy CLI state values."""
+
+    VALID = "success"
+    INVALID = "manifest_invalid"
+    MISSING = "manifest_missing"
+    UNREADABLE = "manifest_unreadable"
+
+
+class PairValidationState(str, Enum):
+    """Typed outcomes for independent validation plus pair comparison."""
+
+    VALID = "success"
+    INVALID = "pair_invalid"
+    UNREADABLE = "pair_unreadable"
+
+
+class ValidationIssueSource(str, Enum):
+    DATASET = "dataset"
+    MANIFEST = "manifest"
+    PAIR = "pair"
+
+
+class ValidationIssueCode(str, Enum):
+    """Stable machine-readable validation issue identifiers."""
+
+    FILE_MISSING = "file_missing"
+    PATH_IS_DIRECTORY = "path_is_directory"
+    READ_FAILED = "read_failed"
+    MALFORMED_JSON = "malformed_json"
+    INVALID_RECORD_SHAPE = "invalid_record_shape"
+    BLANK_LINE = "blank_line"
+    EMPTY_DATASET = "empty_dataset"
+    ROOT_NOT_OBJECT = "root_not_object"
+    MISSING_REQUIRED_FIELD = "missing_required_field"
+    INVALID_FIELD_TYPE = "invalid_field_type"
+    UNSUPPORTED_SCHEMA_VERSION = "unsupported_schema_version"
+    UNSUPPORTED_FORMAT_VERSION = "unsupported_format_version"
+    INVALID_SHA256 = "invalid_sha256"
+    INVALID_RECORD_COUNT = "invalid_record_count"
+    INVALID_TIMESTAMP = "invalid_timestamp"
+    DATASET_INVALID = "dataset_invalid"
+    MANIFEST_INVALID = "manifest_invalid"
+    SHA256_MISMATCH = "sha256_mismatch"
+    RECORD_COUNT_MISMATCH = "record_count_mismatch"
+    SCHEMA_VERSION_MISMATCH = "schema_version_mismatch"
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    """One deterministic, GUI-neutral validation issue."""
+
+    source: ValidationIssueSource
+    code: ValidationIssueCode
+    message: str
+    line_number: int | None = None
+    field: str | None = None
+    expected: str | int | float | bool | None = None
+    actual: str | int | float | bool | None = None
+
+
+def _freeze_json_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_json_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json_value(item) for item in value)
+    return value
+
+
+def _freeze_manifest(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    frozen = _freeze_json_value(value)
+    assert isinstance(frozen, Mapping)
+    return frozen
+
+
+def _first_issue_message(issues: tuple[ValidationIssue, ...]) -> str:
+    if not issues:
+        return ""
+    if len(issues) > 1 and all(issue.code is ValidationIssueCode.MISSING_REQUIRED_FIELD for issue in issues):
+        return "Manifest is missing required fields"
+    assert issues
+    return issues[0].message
+
+
+@dataclass(frozen=True)
+class DatasetFileValidation:
+    """Structured validation for one UTF-8 JSONL dataset.
+
+    Blank physical lines are accepted, counted, and do not invalidate the
+    dataset. ``record_count`` counts successfully validated JSON records;
+    ``nonblank_line_count`` counts every nonblank physical line.
+    """
+
+    state: DatasetValidationState
+    path: Path
+    record_count: int = 0
+    nonblank_line_count: int = 0
+    blank_line_count: int = 0
+    issues: tuple[ValidationIssue, ...] = ()
+    issues_truncated: bool = False
+    shape_summary: str = "JSONL v1 records require instruction, input, response, and metadata"
+
+    @property
+    def message(self) -> str:
+        return _first_issue_message(self.issues)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.state is DatasetValidationState.VALID
+
+
+@dataclass(frozen=True)
+class ManifestValidation:
+    """Structured validation and metadata for a dataset manifest."""
+
+    state: ManifestValidationState
+    path: Path
+    metadata: Mapping[str, Any] | None = None
+    declared_record_count: int | None = None
+    declared_sha256: str | None = None
+    schema_version: int | None = None
+    format_version: int | None = None
+    created_at: str | None = None
+    issues: tuple[ValidationIssue, ...] = ()
+    issues_truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if self.metadata is not None and not isinstance(self.metadata, MappingProxyType):
+            object.__setattr__(self, "metadata", _freeze_manifest(self.metadata))
+
+    @property
+    def manifest(self) -> Mapping[str, Any] | None:
+        """Compatibility alias for the previous DatasetValidation field."""
+
+        return self.metadata
+
+    @property
+    def record_count(self) -> int:
+        """Compatibility alias for the manifest-declared count."""
+
+        return self.declared_record_count or 0
+
+    @property
+    def message(self) -> str:
+        return _first_issue_message(self.issues)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.state is ManifestValidationState.VALID
+
+
+@dataclass(frozen=True)
+class DatasetManifestPairValidation:
+    """Independent dataset/manifest results plus typed pair comparisons."""
+
+    state: PairValidationState
+    jsonl_path: Path
+    manifest_path: Path
+    dataset_result: DatasetFileValidation
+    manifest_result: ManifestValidation
+    actual_record_count: int | None = None
+    declared_record_count: int | None = None
+    record_count_matches: bool | None = None
+    actual_sha256: str | None = None
+    declared_sha256: str | None = None
+    sha256_matches: bool | None = None
+    schema_version_compatible: bool | None = None
+    issues: tuple[ValidationIssue, ...] = ()
+    issues_truncated: bool = False
+
+    @property
+    def pair_issues(self) -> tuple[ValidationIssue, ...]:
+        return self.issues
+
+    @property
+    def record_count(self) -> int:
+        """Compatibility alias for the actual count when available."""
+
+        return self.actual_record_count or 0
+
+    @property
+    def manifest(self) -> Mapping[str, Any] | None:
+        """Compatibility alias for the validated manifest metadata."""
+
+        return self.manifest_result.metadata
+
+    @property
+    def message(self) -> str:
+        if self.issues:
+            return self.issues[0].message
+        return self.dataset_result.message or self.manifest_result.message
+
+    @property
+    def is_valid(self) -> bool:
+        return self.state is PairValidationState.VALID
+
+
 @dataclass(frozen=True)
 class DatasetValidation:
+    """Compatibility wrapper retained for existing callers and test doubles.
+
+    New validation callers should use DatasetFileValidation,
+    ManifestValidation, or DatasetManifestPairValidation. The legacy
+    ``state``, ``record_count``, ``message``, and ``manifest`` fields remain
+    accepted by DatasetBuilder write-path callers.
+    """
+
     state: str
     record_count: int = 0
     message: str = ""
-    manifest: dict[str, Any] | None = None
+    manifest: Mapping[str, Any] | None = None
 
 
 class DatasetBuilder:
@@ -406,41 +634,634 @@ class DatasetBuilder:
         )
 
     @staticmethod
-    def validate_jsonl(path: str | Path) -> int:
-        count = 0
-        with Path(path).open("r", encoding="utf-8") as source:
-            for number, line in enumerate(source, start=1):
-                if not line.strip(): continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as error:
-                    raise ValueError(f"Line {number} contains invalid JSON: {error.msg}") from error
-                if not isinstance(record, dict) or set(record) != {"instruction", "input", "response", "metadata"}:
-                    raise ValueError(f"Line {number} does not match the JSONL v1 contract")
-                count += 1
-        return count
+    def _validate_jsonl_structured(path: str | Path) -> DatasetFileValidation:
+        dataset_path = Path(path)
+        issues: list[ValidationIssue] = []
+        issues_truncated = False
 
-    def validate_dataset(self, path: str | Path) -> DatasetValidation:
-        try: return DatasetValidation("success", self.validate_jsonl(path))
-        except (OSError, ValueError, json.JSONDecodeError) as error: return DatasetValidation("validation_failed", message=str(error))
+        def add_issue(issue: ValidationIssue) -> None:
+            nonlocal issues_truncated
+            if len(issues) < DATASET_VALIDATION_MAX_ISSUES:
+                issues.append(issue)
+            else:
+                issues_truncated = True
+
+        record_count = 0
+        nonblank_line_count = 0
+        blank_line_count = 0
+        try:
+            is_directory = dataset_path.is_dir()
+        except OSError:
+            is_directory = False
+        if is_directory:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.DATASET,
+                    ValidationIssueCode.PATH_IS_DIRECTORY,
+                    "Dataset path is a directory, not a file",
+                    expected="file",
+                    actual=str(dataset_path),
+                )
+            )
+            return DatasetFileValidation(
+                DatasetValidationState.UNREADABLE,
+                dataset_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+        try:
+            with dataset_path.open("r", encoding="utf-8", newline="") as source:
+                for number, line in enumerate(source, start=1):
+                    if not line.strip():
+                        blank_line_count += 1
+                        continue
+                    nonblank_line_count += 1
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError as error:
+                        add_issue(
+                            ValidationIssue(
+                                ValidationIssueSource.DATASET,
+                                ValidationIssueCode.MALFORMED_JSON,
+                                f"Line {number} contains invalid JSON: {error.msg}",
+                                line_number=number,
+                                expected="JSON object",
+                                actual="malformed JSON",
+                            )
+                        )
+                        continue
+                    if not isinstance(record, dict) or set(record) != {"instruction", "input", "response", "metadata"}:
+                        add_issue(
+                            ValidationIssue(
+                                ValidationIssueSource.DATASET,
+                                ValidationIssueCode.INVALID_RECORD_SHAPE,
+                                f"Line {number} does not match the JSONL v1 contract",
+                                line_number=number,
+                                expected="instruction, input, response, metadata",
+                                actual=type(record).__name__,
+                            )
+                        )
+                        continue
+                    record_count += 1
+        except FileNotFoundError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.DATASET,
+                    ValidationIssueCode.FILE_MISSING,
+                    "Dataset file was not found",
+                    expected="existing file",
+                    actual=str(dataset_path),
+                )
+            )
+            return DatasetFileValidation(
+                DatasetValidationState.UNREADABLE,
+                dataset_path,
+                record_count,
+                nonblank_line_count,
+                blank_line_count,
+                tuple(issues),
+                issues_truncated,
+            )
+        except IsADirectoryError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.DATASET,
+                    ValidationIssueCode.PATH_IS_DIRECTORY,
+                    "Dataset path is a directory, not a file",
+                    expected="file",
+                    actual=str(dataset_path),
+                )
+            )
+            return DatasetFileValidation(
+                DatasetValidationState.UNREADABLE,
+                dataset_path,
+                record_count,
+                nonblank_line_count,
+                blank_line_count,
+                tuple(issues),
+                issues_truncated,
+            )
+        except UnicodeDecodeError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.DATASET,
+                    ValidationIssueCode.READ_FAILED,
+                    "Dataset file could not be decoded as UTF-8",
+                    expected="UTF-8 text",
+                    actual="decode failure",
+                )
+            )
+            return DatasetFileValidation(
+                DatasetValidationState.UNREADABLE,
+                dataset_path,
+                record_count,
+                nonblank_line_count,
+                blank_line_count,
+                tuple(issues),
+                issues_truncated,
+            )
+        except OSError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.DATASET,
+                    ValidationIssueCode.READ_FAILED,
+                    "Dataset file could not be read",
+                    expected="readable file",
+                    actual=str(dataset_path),
+                )
+            )
+            return DatasetFileValidation(
+                DatasetValidationState.UNREADABLE,
+                dataset_path,
+                record_count,
+                nonblank_line_count,
+                blank_line_count,
+                tuple(issues),
+                issues_truncated,
+            )
+
+        state = DatasetValidationState.INVALID if issues else DatasetValidationState.VALID
+        return DatasetFileValidation(
+            state,
+            dataset_path,
+            record_count,
+            nonblank_line_count,
+            blank_line_count,
+            tuple(issues),
+            issues_truncated,
+        )
 
     @staticmethod
-    def validate_manifest(path: str | Path) -> DatasetValidation:
-        required = {"dataset_filename", "record_count", "excluded_count", "duplicate_count", "redaction_count", "benchpup_version", "schema_version", "created_at", "format_version", "sha256"}
-        try:
-            data = json.loads(Path(path).read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not required <= set(data): raise ValueError("Manifest is missing required fields")
-            return DatasetValidation("success", manifest=data)
-        except FileNotFoundError: return DatasetValidation("manifest_missing", message="Companion manifest was not found")
-        except (OSError, ValueError, json.JSONDecodeError) as error: return DatasetValidation("manifest_invalid", message=str(error))
+    def _compatibility_validation_error(result: DatasetFileValidation) -> Exception:
+        issue = result.issues[0] if result.issues else None
+        if issue is not None and issue.code is ValidationIssueCode.FILE_MISSING:
+            return FileNotFoundError(str(result.path))
+        if issue is not None and issue.code is ValidationIssueCode.PATH_IS_DIRECTORY:
+            return IsADirectoryError(str(result.path))
+        if issue is not None and issue.code is ValidationIssueCode.READ_FAILED:
+            return OSError(issue.message)
+        return ValueError(result.message or "Dataset validation failed")
 
-    def verify_dataset_manifest_pair(self, jsonl_path: str | Path, manifest_path: str | Path) -> DatasetValidation:
-        dataset = self.validate_dataset(jsonl_path)
-        if dataset.state != "success": return dataset
-        manifest = self.validate_manifest(manifest_path)
-        if manifest.state != "success": return manifest
-        assert manifest.manifest is not None
-        digest = hashlib.sha256(Path(jsonl_path).read_bytes()).hexdigest()
-        if manifest.manifest["sha256"] != digest: return DatasetValidation("manifest_invalid", dataset.record_count, "Manifest SHA-256 does not match dataset", manifest.manifest)
-        if manifest.manifest["record_count"] != dataset.record_count: return DatasetValidation("manifest_invalid", dataset.record_count, "Manifest record count does not match dataset", manifest.manifest)
-        return DatasetValidation("success", dataset.record_count, manifest=manifest.manifest)
+    @staticmethod
+    def validate_jsonl(path: str | Path) -> int:
+        """Return the legacy count or raise the first compatible validation error."""
+
+        result = DatasetBuilder._validate_jsonl_structured(path)
+        if result.state is DatasetValidationState.VALID:
+            return result.record_count
+        raise DatasetBuilder._compatibility_validation_error(result)
+
+    def validate_dataset(self, path: str | Path) -> DatasetFileValidation:
+        """Return complete structured JSONL validation without changing the file."""
+
+        return self._validate_jsonl_structured(path)
+
+    @staticmethod
+    def validate_manifest(path: str | Path) -> ManifestValidation:
+        """Validate the writer-produced manifest contract without rewriting it."""
+
+        manifest_path = Path(path)
+        issues: list[ValidationIssue] = []
+        issues_truncated = False
+
+        def add_issue(issue: ValidationIssue) -> None:
+            nonlocal issues_truncated
+            if len(issues) < DATASET_VALIDATION_MAX_ISSUES:
+                issues.append(issue)
+            else:
+                issues_truncated = True
+
+        try:
+            is_directory = manifest_path.is_dir()
+        except OSError:
+            is_directory = False
+        if is_directory:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.PATH_IS_DIRECTORY,
+                    "Manifest path is a directory, not a file",
+                    expected="file",
+                    actual=str(manifest_path),
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.UNREADABLE,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+
+        try:
+            raw = manifest_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.FILE_MISSING,
+                    "Companion manifest was not found",
+                    expected="existing file",
+                    actual=str(manifest_path),
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.MISSING,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+        except IsADirectoryError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.PATH_IS_DIRECTORY,
+                    "Manifest path is a directory, not a file",
+                    expected="file",
+                    actual=str(manifest_path),
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.UNREADABLE,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+        except UnicodeDecodeError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.READ_FAILED,
+                    "Manifest file could not be decoded as UTF-8",
+                    expected="UTF-8 text",
+                    actual="decode failure",
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.UNREADABLE,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+        except OSError:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.READ_FAILED,
+                    "Manifest file could not be read",
+                    expected="readable file",
+                    actual=str(manifest_path),
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.UNREADABLE,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as error:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.MALFORMED_JSON,
+                    f"Manifest contains invalid JSON: {error.msg}",
+                    line_number=error.lineno,
+                    expected="JSON object",
+                    actual="malformed JSON",
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.INVALID,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+
+        if not isinstance(data, dict):
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.ROOT_NOT_OBJECT,
+                    "Manifest root must be a JSON object",
+                    expected="object",
+                    actual=type(data).__name__,
+                )
+            )
+            return ManifestValidation(
+                ManifestValidationState.INVALID,
+                manifest_path,
+                issues=tuple(issues),
+                issues_truncated=issues_truncated,
+            )
+
+        for field_name in MANIFEST_REQUIRED_FIELDS:
+            if field_name not in data:
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.MISSING_REQUIRED_FIELD,
+                        f"Manifest is missing required field '{field_name}'",
+                        field=field_name,
+                    )
+                )
+
+        def is_nonnegative_integer(value: Any) -> bool:
+            return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+        for field_name in ("record_count", "excluded_count", "duplicate_count", "redaction_count"):
+            if field_name not in data:
+                continue
+            value = data[field_name]
+            if not is_nonnegative_integer(value):
+                code = ValidationIssueCode.INVALID_RECORD_COUNT if field_name == "record_count" else ValidationIssueCode.INVALID_FIELD_TYPE
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        code,
+                        f"Manifest field '{field_name}' must be a non-negative integer",
+                        field=field_name,
+                        expected="non-negative integer",
+                        actual=type(value).__name__ if not isinstance(value, int) else value,
+                    )
+                )
+
+        if "post_redaction_collisions" in data and not is_nonnegative_integer(data["post_redaction_collisions"]):
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.INVALID_FIELD_TYPE,
+                    "Manifest field 'post_redaction_collisions' must be a non-negative integer",
+                    field="post_redaction_collisions",
+                    expected="non-negative integer",
+                    actual=type(data["post_redaction_collisions"]).__name__ if not isinstance(data["post_redaction_collisions"], int) else data["post_redaction_collisions"],
+                )
+            )
+
+        for field_name in ("dataset_filename", "benchpup_version"):
+            if field_name not in data:
+                continue
+            value = data[field_name]
+            if not isinstance(value, str) or not value.strip():
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_FIELD_TYPE,
+                        f"Manifest field '{field_name}' must be a non-empty string",
+                        field=field_name,
+                        expected="non-empty string",
+                        actual=type(value).__name__ if not isinstance(value, str) else value,
+                    )
+                )
+
+        if "schema_version" in data:
+            schema_version = data["schema_version"]
+            if not is_nonnegative_integer(schema_version):
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_FIELD_TYPE,
+                        "Manifest field 'schema_version' must be a non-negative integer",
+                        field="schema_version",
+                        expected="non-negative integer",
+                        actual=type(schema_version).__name__ if not isinstance(schema_version, int) else schema_version,
+                    )
+                )
+            elif schema_version < 1:
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.UNSUPPORTED_SCHEMA_VERSION,
+                        "Manifest schema version is not supported",
+                        field="schema_version",
+                        expected="positive schema version",
+                        actual=schema_version,
+                    )
+                )
+
+        if "format_version" in data:
+            format_version = data["format_version"]
+            if not isinstance(format_version, int) or isinstance(format_version, bool):
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_FIELD_TYPE,
+                        "Manifest field 'format_version' must be an integer",
+                        field="format_version",
+                        expected="integer",
+                        actual=type(format_version).__name__ if not isinstance(format_version, int) else format_version,
+                    )
+                )
+            elif format_version != DATASET_FORMAT_VERSION:
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.UNSUPPORTED_FORMAT_VERSION,
+                        "Manifest format version is not supported",
+                        field="format_version",
+                        expected=DATASET_FORMAT_VERSION,
+                        actual=format_version,
+                    )
+                )
+
+        if "created_at" in data:
+            created_at = data["created_at"]
+            if not isinstance(created_at, str):
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_FIELD_TYPE,
+                        "Manifest field 'created_at' must be an ISO-8601 timestamp",
+                        field="created_at",
+                        expected="ISO-8601 timestamp",
+                        actual=type(created_at).__name__,
+                    )
+                )
+            else:
+                try:
+                    parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None or parsed.utcoffset() is None:
+                        raise ValueError
+                except ValueError:
+                    add_issue(
+                        ValidationIssue(
+                            ValidationIssueSource.MANIFEST,
+                            ValidationIssueCode.INVALID_TIMESTAMP,
+                            "Manifest field 'created_at' must be a timezone-aware ISO-8601 timestamp",
+                            field="created_at",
+                            expected="timezone-aware ISO-8601 timestamp",
+                            actual=created_at,
+                        )
+                    )
+
+        if "sha256" in data:
+            sha256 = data["sha256"]
+            if not isinstance(sha256, str):
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_FIELD_TYPE,
+                        "Manifest field 'sha256' must be a 64-character hexadecimal string",
+                        field="sha256",
+                        expected="64-character hexadecimal string",
+                        actual=type(sha256).__name__,
+                    )
+                )
+            elif not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+                add_issue(
+                    ValidationIssue(
+                        ValidationIssueSource.MANIFEST,
+                        ValidationIssueCode.INVALID_SHA256,
+                        "Manifest field 'sha256' is not a valid SHA-256 digest",
+                        field="sha256",
+                        expected="64 hexadecimal characters",
+                        actual=sha256,
+                    )
+                )
+
+        if "selected_filters" in data and not isinstance(data["selected_filters"], dict):
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.MANIFEST,
+                    ValidationIssueCode.INVALID_FIELD_TYPE,
+                    "Manifest field 'selected_filters' must be a JSON object",
+                    field="selected_filters",
+                    expected="object",
+                    actual=type(data["selected_filters"]).__name__,
+                )
+            )
+
+        manifest_field_order = {
+            field_name: index
+            for index, field_name in enumerate(
+                MANIFEST_REQUIRED_FIELDS + ("post_redaction_collisions", "selected_filters")
+            )
+        }
+        issues.sort(key=lambda issue: (manifest_field_order.get(issue.field or "", len(manifest_field_order)), issue.code.value))
+        metadata = _freeze_manifest(data)
+        declared_record_count = data.get("record_count") if is_nonnegative_integer(data.get("record_count")) else None
+        declared_sha256 = data.get("sha256") if isinstance(data.get("sha256"), str) else None
+        schema_version = data.get("schema_version") if is_nonnegative_integer(data.get("schema_version")) else None
+        format_version = data.get("format_version") if isinstance(data.get("format_version"), int) and not isinstance(data.get("format_version"), bool) else None
+        created_at = data.get("created_at") if isinstance(data.get("created_at"), str) else None
+        state = ManifestValidationState.INVALID if issues else ManifestValidationState.VALID
+        return ManifestValidation(
+            state,
+            manifest_path,
+            metadata,
+            declared_record_count,
+            declared_sha256,
+            schema_version,
+            format_version,
+            created_at,
+            tuple(issues),
+            issues_truncated,
+        )
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str | None:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError:
+            return None
+        return digest.hexdigest()
+
+    def verify_dataset_manifest_pair(self, jsonl_path: str | Path, manifest_path: str | Path) -> DatasetManifestPairValidation:
+        dataset_path = Path(jsonl_path)
+        manifest_path_value = Path(manifest_path)
+        dataset = self.validate_dataset(dataset_path)
+        manifest = self.validate_manifest(manifest_path_value)
+        issues: list[ValidationIssue] = []
+        issues_truncated = False
+
+        def add_issue(issue: ValidationIssue) -> None:
+            nonlocal issues_truncated
+            if len(issues) < DATASET_VALIDATION_MAX_ISSUES:
+                issues.append(issue)
+            else:
+                issues_truncated = True
+
+        if dataset.state is not DatasetValidationState.VALID:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.PAIR,
+                    ValidationIssueCode.DATASET_INVALID,
+                    "Dataset validation did not succeed",
+                    expected=DatasetValidationState.VALID.value,
+                    actual=dataset.state.value,
+                )
+            )
+        if manifest.state is not ManifestValidationState.VALID:
+            add_issue(
+                ValidationIssue(
+                    ValidationIssueSource.PAIR,
+                    ValidationIssueCode.MANIFEST_INVALID,
+                    "Manifest validation did not succeed",
+                    expected=ManifestValidationState.VALID.value,
+                    actual=manifest.state.value,
+                )
+            )
+
+        actual_record_count = None if dataset.state is DatasetValidationState.UNREADABLE else dataset.nonblank_line_count
+        declared_record_count = manifest.declared_record_count
+        actual_sha256 = self._sha256_file(dataset_path)
+        declared_sha256 = manifest.declared_sha256
+        record_count_matches: bool | None = None
+        sha256_matches: bool | None = None
+        if dataset.state is DatasetValidationState.VALID and manifest.state is ManifestValidationState.VALID:
+            if actual_record_count is not None and declared_record_count is not None:
+                record_count_matches = actual_record_count == declared_record_count
+                if not record_count_matches:
+                    add_issue(
+                        ValidationIssue(
+                            ValidationIssueSource.PAIR,
+                            ValidationIssueCode.RECORD_COUNT_MISMATCH,
+                            "Dataset record count does not match manifest record count",
+                            field="record_count",
+                            expected=declared_record_count,
+                            actual=actual_record_count,
+                        )
+                    )
+            if actual_sha256 is not None and declared_sha256 is not None:
+                sha256_matches = actual_sha256.casefold() == declared_sha256.casefold()
+                if not sha256_matches:
+                    add_issue(
+                        ValidationIssue(
+                            ValidationIssueSource.PAIR,
+                            ValidationIssueCode.SHA256_MISMATCH,
+                            "Dataset SHA-256 does not match manifest SHA-256",
+                            field="sha256",
+                            expected=declared_sha256,
+                            actual=actual_sha256,
+                        )
+                    )
+
+        if dataset.state is DatasetValidationState.VALID and manifest.state is ManifestValidationState.VALID and not issues:
+            state = PairValidationState.VALID
+        elif dataset.state is DatasetValidationState.UNREADABLE or manifest.state in {
+            ManifestValidationState.MISSING,
+            ManifestValidationState.UNREADABLE,
+        }:
+            state = PairValidationState.UNREADABLE
+        else:
+            state = PairValidationState.INVALID
+        return DatasetManifestPairValidation(
+            state,
+            dataset_path,
+            manifest_path_value,
+            dataset,
+            manifest,
+            actual_record_count,
+            declared_record_count,
+            record_count_matches,
+            actual_sha256,
+            declared_sha256,
+            sha256_matches,
+            None,
+            tuple(issues),
+            issues_truncated,
+        )

@@ -13,7 +13,17 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from engine.database import EngineDatabase
-from engine.datasets import DATASET_FORMAT_VERSION, DatasetBuilder, DatasetFilters, RedactionConfig
+from engine.datasets import (
+    DATASET_FORMAT_VERSION,
+    DATASET_VALIDATION_MAX_ISSUES,
+    DatasetBuilder,
+    DatasetFilters,
+    DatasetValidationState,
+    ManifestValidationState,
+    PairValidationState,
+    RedactionConfig,
+    ValidationIssueCode,
+)
 from engine.domain import (
     BenchmarkDefinition,
     BenchmarkRun,
@@ -372,6 +382,244 @@ class DatasetBuilderTests(unittest.TestCase):
         self.assertEqual(validation.state, "validation_failed")
         self.assertIn("Line 1", validation.message)
 
+    def test_structured_dataset_validation_counts_blank_lines_and_issues(self) -> None:
+        path = self.root / "structured.jsonl"
+        valid = {"instruction": "x", "input": {}, "response": {}, "metadata": {}}
+        path.write_text(
+            "\n" + json.dumps(valid) + "\n{bad}\n" + json.dumps({"instruction": "x"}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.builder.validate_dataset(path)
+
+        self.assertIs(result.state, DatasetValidationState.INVALID)
+        self.assertEqual(result.record_count, 1)
+        self.assertEqual(result.nonblank_line_count, 3)
+        self.assertEqual(result.blank_line_count, 1)
+        self.assertEqual([issue.line_number for issue in result.issues], [3, 4])
+        self.assertEqual(
+            [issue.code for issue in result.issues],
+            [ValidationIssueCode.MALFORMED_JSON, ValidationIssueCode.INVALID_RECORD_SHAPE],
+        )
+        self.assertFalse(result.issues_truncated)
+
+    def test_structured_dataset_validation_limits_errors_deterministically(self) -> None:
+        path = self.root / "many-errors.jsonl"
+        path.write_text("{bad}\n" * (DATASET_VALIDATION_MAX_ISSUES + 5), encoding="utf-8")
+
+        result = self.builder.validate_dataset(path)
+
+        self.assertEqual(len(result.issues), DATASET_VALIDATION_MAX_ISSUES)
+        self.assertTrue(result.issues_truncated)
+        self.assertEqual(result.issues[0].line_number, 1)
+        self.assertEqual(result.issues[-1].line_number, DATASET_VALIDATION_MAX_ISSUES)
+        self.assertEqual(result.nonblank_line_count, DATASET_VALIDATION_MAX_ISSUES + 5)
+
+    def test_structured_dataset_validation_preserves_empty_dataset_success(self) -> None:
+        empty = self.root / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        result = self.builder.validate_dataset(empty)
+
+        self.assertIs(result.state, DatasetValidationState.VALID)
+        self.assertEqual(result.record_count, 0)
+        self.assertEqual(result.nonblank_line_count, 0)
+        self.assertEqual(result.blank_line_count, 0)
+        self.assertEqual(result.issues, ())
+
+    def test_structured_dataset_validation_distinguishes_missing_and_directory(self) -> None:
+        missing = self.builder.validate_dataset(self.root / "not-found.jsonl")
+        directory_path = self.root / "dataset-directory"
+        directory_path.mkdir()
+        directory = self.builder.validate_dataset(directory_path)
+
+        self.assertIs(missing.state, DatasetValidationState.UNREADABLE)
+        self.assertEqual(missing.issues[0].code, ValidationIssueCode.FILE_MISSING)
+        self.assertIs(directory.state, DatasetValidationState.UNREADABLE)
+        self.assertEqual(directory.issues[0].code, ValidationIssueCode.PATH_IS_DIRECTORY)
+
+    def test_validate_jsonl_compatibility_preserves_count_and_first_error(self) -> None:
+        valid_path = self.root / "compat-valid.jsonl"
+        valid_path.write_text(
+            json.dumps({"instruction": "x", "input": {}, "response": {}, "metadata": {}}) + "\n",
+            encoding="utf-8",
+        )
+        invalid_path = self.root / "compat-invalid.jsonl"
+        invalid_path.write_text("{bad}\n{still bad}\n", encoding="utf-8")
+
+        self.assertEqual(self.builder.validate_jsonl(valid_path), 1)
+        with self.assertRaisesRegex(ValueError, "Line 1"):
+            self.builder.validate_jsonl(invalid_path)
+
+    def test_structured_manifest_validation_exposes_metadata_and_types(self) -> None:
+        dataset = self.root / "manifest-data.jsonl"
+        dataset.write_text(
+            json.dumps({"instruction": "x", "input": {}, "response": {}, "metadata": {}}) + "\n",
+            encoding="utf-8",
+        )
+        manifest = self.root / "manifest-data.jsonl.manifest.json"
+        manifest_data = {
+            "dataset_filename": dataset.name,
+            "record_count": 1,
+            "excluded_count": 0,
+            "duplicate_count": 0,
+            "post_redaction_collisions": 0,
+            "redaction_count": 0,
+            "selected_filters": {"include_provenance": True},
+            "benchpup_version": "test",
+            "schema_version": 5,
+            "created_at": "2026-07-10T00:00:00+00:00",
+            "format_version": DATASET_FORMAT_VERSION,
+            "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+            "future_field": "accepted",
+        }
+        manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        result = self.builder.validate_manifest(manifest)
+
+        self.assertIs(result.state, ManifestValidationState.VALID)
+        self.assertEqual(result.declared_record_count, 1)
+        self.assertEqual(result.declared_sha256, manifest_data["sha256"])
+        self.assertEqual(result.schema_version, 5)
+        self.assertEqual(result.format_version, DATASET_FORMAT_VERSION)
+        self.assertIsNotNone(result.metadata)
+        self.assertEqual(result.metadata["future_field"], "accepted")
+        with self.assertRaises(TypeError):
+            result.metadata["future_field"] = "changed"  # type: ignore[index]
+
+    def test_structured_manifest_validation_reports_ordered_field_errors(self) -> None:
+        manifest = self.root / "bad.manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "record_count": -1,
+                    "excluded_count": "zero",
+                    "duplicate_count": 0,
+                    "redaction_count": 0,
+                    "benchpup_version": "test",
+                    "schema_version": 0,
+                    "created_at": "not-a-timestamp",
+                    "format_version": 99,
+                    "sha256": "bad",
+                    "selected_filters": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = self.builder.validate_manifest(manifest)
+
+        self.assertIs(result.state, ManifestValidationState.INVALID)
+        self.assertEqual(result.issues[0].code, ValidationIssueCode.MISSING_REQUIRED_FIELD)
+        self.assertEqual(result.issues[0].field, "dataset_filename")
+        codes = {issue.code for issue in result.issues}
+        self.assertIn(ValidationIssueCode.INVALID_RECORD_COUNT, codes)
+        self.assertIn(ValidationIssueCode.INVALID_TIMESTAMP, codes)
+        self.assertIn(ValidationIssueCode.UNSUPPORTED_FORMAT_VERSION, codes)
+        self.assertIn(ValidationIssueCode.UNSUPPORTED_SCHEMA_VERSION, codes)
+        self.assertIn(ValidationIssueCode.INVALID_SHA256, codes)
+        self.assertIn(ValidationIssueCode.INVALID_FIELD_TYPE, codes)
+
+    def test_structured_manifest_validation_rejects_malformed_and_non_object_roots(self) -> None:
+        malformed = self.root / "malformed.manifest.json"
+        malformed.write_text("{bad}", encoding="utf-8")
+        non_object = self.root / "array.manifest.json"
+        non_object.write_text("[]", encoding="utf-8")
+
+        malformed_result = self.builder.validate_manifest(malformed)
+        non_object_result = self.builder.validate_manifest(non_object)
+
+        self.assertIs(malformed_result.state, ManifestValidationState.INVALID)
+        self.assertEqual(malformed_result.issues[0].code, ValidationIssueCode.MALFORMED_JSON)
+        self.assertIs(non_object_result.state, ManifestValidationState.INVALID)
+        self.assertEqual(non_object_result.issues[0].code, ValidationIssueCode.ROOT_NOT_OBJECT)
+
+    def test_manifest_validation_distinguishes_missing_and_directory(self) -> None:
+        missing = self.builder.validate_manifest(self.root / "not-found.manifest.json")
+        directory_path = self.root / "manifest-directory"
+        directory_path.mkdir()
+        directory = self.builder.validate_manifest(directory_path)
+
+        self.assertIs(missing.state, ManifestValidationState.MISSING)
+        self.assertEqual(missing.issues[0].code, ValidationIssueCode.FILE_MISSING)
+        self.assertIs(directory.state, ManifestValidationState.UNREADABLE)
+        self.assertEqual(directory.issues[0].code, ValidationIssueCode.PATH_IS_DIRECTORY)
+
+    def test_pair_validation_exposes_nested_results_and_both_mismatches(self) -> None:
+        dataset = self.root / "pair-structured.jsonl"
+        dataset.write_text(
+            json.dumps({"instruction": "x", "input": {}, "response": {}, "metadata": {}}) + "\n\n",
+            encoding="utf-8",
+        )
+        original_dataset = dataset.read_bytes()
+        manifest = self.root / "pair-structured.jsonl.manifest.json"
+        manifest_data = {
+            "dataset_filename": dataset.name,
+            "record_count": 2,
+            "excluded_count": 0,
+            "duplicate_count": 0,
+            "redaction_count": 0,
+            "benchpup_version": "test",
+            "schema_version": 5,
+            "created_at": "2026-07-10T00:00:00+00:00",
+            "format_version": DATASET_FORMAT_VERSION,
+            "sha256": "0" * 64,
+        }
+        original_manifest = json.dumps(manifest_data).encode("utf-8")
+        manifest.write_bytes(original_manifest)
+
+        result = self.builder.verify_dataset_manifest_pair(dataset, manifest)
+
+        self.assertIs(result.state, PairValidationState.INVALID)
+        self.assertIs(result.dataset_result.state, DatasetValidationState.VALID)
+        self.assertIs(result.manifest_result.state, ManifestValidationState.VALID)
+        self.assertEqual(result.actual_record_count, 1)
+        self.assertEqual(result.declared_record_count, 2)
+        self.assertFalse(result.record_count_matches)
+        self.assertEqual(result.actual_sha256, hashlib.sha256(original_dataset).hexdigest())
+        self.assertEqual(result.declared_sha256, "0" * 64)
+        self.assertFalse(result.sha256_matches)
+        self.assertEqual(
+            [issue.code for issue in result.issues],
+            [ValidationIssueCode.RECORD_COUNT_MISMATCH, ValidationIssueCode.SHA256_MISMATCH],
+        )
+        self.assertEqual(dataset.read_bytes(), original_dataset)
+        self.assertEqual(manifest.read_bytes(), original_manifest)
+
+    def test_pair_validation_preserves_independent_invalid_results(self) -> None:
+        dataset = self.root / "invalid-pair.jsonl"
+        dataset.write_text("{bad}\n", encoding="utf-8")
+        manifest = self.root / "invalid-pair.manifest.json"
+        manifest.write_text(json.dumps({"record_count": 1}), encoding="utf-8")
+
+        result = self.builder.verify_dataset_manifest_pair(dataset, manifest)
+
+        self.assertIs(result.state, PairValidationState.INVALID)
+        self.assertIs(result.dataset_result.state, DatasetValidationState.INVALID)
+        self.assertIs(result.manifest_result.state, ManifestValidationState.INVALID)
+        self.assertEqual(
+            [issue.code for issue in result.issues],
+            [ValidationIssueCode.DATASET_INVALID, ValidationIssueCode.MANIFEST_INVALID],
+        )
+        self.assertEqual(result.dataset_result.issues[0].line_number, 1)
+        self.assertIsNone(result.record_count_matches)
+        self.assertIsNone(result.sha256_matches)
+
+    def test_validation_does_not_mutate_source_run_snapshots(self) -> None:
+        run = self.make_run(
+            model_snapshot={"model_name": "Alpha"},
+            benchmark_snapshot={"name": "Review"},
+            prompt_snapshot={"prompt_text": "Review"},
+        )
+        original = deepcopy(run.__dict__)
+        dataset = self.root / "snapshot-check.jsonl"
+        dataset.write_text("{bad}\n", encoding="utf-8")
+        manifest = self.root / "snapshot-check.manifest.json"
+        manifest.write_text("{bad}", encoding="utf-8")
+
+        self.builder.verify_dataset_manifest_pair(dataset, manifest)
+
+        self.assertEqual(run.__dict__, original)
+
     def test_manifest_and_pair_verification_detect_sha_and_count_errors(self) -> None:
         dataset = self.root / "pair.jsonl"
         record = {"instruction": "x", "input": {}, "response": {}, "metadata": {}}
@@ -393,7 +641,14 @@ class DatasetBuilderTests(unittest.TestCase):
         manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
 
         self.assertEqual(self.builder.validate_manifest(manifest).state, "success")
-        self.assertEqual(self.builder.verify_dataset_manifest_pair(dataset, manifest).state, "success")
+        matching_pair = self.builder.verify_dataset_manifest_pair(dataset, manifest)
+        self.assertIs(matching_pair.state, PairValidationState.VALID)
+        self.assertEqual(matching_pair.actual_record_count, 1)
+        self.assertEqual(matching_pair.declared_record_count, 1)
+        self.assertTrue(matching_pair.record_count_matches)
+        self.assertEqual(matching_pair.actual_sha256, digest)
+        self.assertEqual(matching_pair.declared_sha256, digest)
+        self.assertTrue(matching_pair.sha256_matches)
 
         manifest_data["sha256"] = "0" * 64
         manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
