@@ -198,6 +198,62 @@ class CsvImportTests(unittest.TestCase):
         self.assertIn('class="data-row"', html)
         self.assertIn("Total entries", html)
 
+    def test_manual_scoreboard_headers_use_type_specific_mapping_and_import_values(self):
+        path = Path(self.directory.name) / "manual-scoreboard.csv"
+        path.write_text(
+            "Model Name,Temp,Experts,Context,tok/s,Review Quality,Score,Hallucinations,Consistency,Reliability Score,Verdict,Notes\n"
+            "Qwen,0.3,8,32768,120,5,600,Low,High,9,Useful,Primary\n"
+            "Llama,0.4,8,32768,118,4.5,580,Low,High,8,Useful,Secondary\n",
+            encoding="utf-8",
+        )
+
+        detection = self.importer.detect(path)
+
+        self.assertEqual((detection.status, detection.import_type), (SCOREBOARD_IMPORT, SCOREBOARD_IMPORT))
+        self.assertIsNotNone(detection.preview)
+        preview = detection.preview
+        assert preview is not None
+        self.assertEqual(preview.mapping["Review Quality"], "review_quality")
+        self.assertEqual(preview.mapping["Score"], "score")
+        self.assertEqual(preview.mapping["Reliability Score"], "reliability_score")
+        self.assertEqual(preview.mapping["Notes"], "notes")
+        self.assertFalse(any(warning.source_heading == "Review Quality" for warning in preview.mapping_warnings))
+
+        result = self.importer.import_scoreboard_entries(preview.rows, path, row_numbers=preview.row_numbers)
+
+        self.assertEqual(result.imported, 2)
+        self.assertEqual(self.service.runs.list(), [])
+        entries = self.service.catalog.scoreboard_entries.list()
+        self.assertEqual([(entry.review_quality, entry.score) for entry in entries], [("5", 600.0), ("4.5", 580.0)])
+
+    def test_numeric_source_mapped_to_notes_is_warned_without_blocking(self):
+        path = Path(self.directory.name) / "numeric-notes.csv"
+        path.write_text("Model,Review Quality\nQwen,5\n", encoding="utf-8")
+
+        preview = self.importer.preview(
+            path,
+            {"Model": "model_name", "Review Quality": "notes"},
+            summary=True,
+        )
+
+        self.assertEqual(
+            [(warning.code, warning.destination) for warning in preview.mapping_warnings],
+            [("numeric_to_text", "notes")],
+        )
+        self.assertTrue(self.importer.validate_rows(preview.rows, import_type=SCOREBOARD_IMPORT).is_valid)
+
+    def test_ambiguous_fuzzy_heading_is_left_for_manual_review(self):
+        path = Path(self.directory.name) / "ambiguous-heading.csv"
+        path.write_text("Model,Prompt\nQwen,prompt text\n", encoding="utf-8")
+
+        preview = self.importer.preview(path)
+
+        self.assertIsNone(preview.mapping["Prompt"])
+        self.assertEqual(len(preview.mapping_warnings), 1)
+        warning = preview.mapping_warnings[0]
+        self.assertEqual(warning.code, "ambiguous")
+        self.assertEqual(warning.candidates, ("prompt_name", "prompt_text"))
+
     def test_html_report_includes_escaped_prompt_template_viewer(self):
         text = "# Prompt\n\n<script>alert('no')</script>\n\n    code fence indentation\n"
         self.service.catalog.prompt_templates.create(PromptTemplate(

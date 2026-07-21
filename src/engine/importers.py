@@ -8,7 +8,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Sequence
 
 from .domain import BENCHMARK_TYPES, BenchmarkRun, ReviewScore, ScoreboardEntry, ScoreboardImportBatch, now
 from .services import BenchmarkService
@@ -92,6 +92,141 @@ BOOL_FIELDS = {"thinking_enabled", "flash_attention"}
 SCORE_FIELDS = {"accuracy_score", "hallucination_level", "reliability_level", "depth_score",
                 "signal_noise_score", "actionability_score", "seniority_score", "overall_score",
                 "strengths", "weaknesses", "verdict", "notes", "review_quality_notes", "reliability_score"}
+# These fields intentionally preserve numeric-looking spreadsheet values as
+# strings under the current domain/database contracts.
+NUMERIC_TEXT_COMPATIBLE_FIELDS = {"moe_experts", "review_quality", "reliability_score"}
+MappingValueKind = Literal["numeric", "integer", "boolean", "text"]
+MappingWarningCode = Literal["ambiguous", "numeric_to_text", "text_to_numeric"]
+
+
+def _clean_heading(heading: str) -> str:
+    cleaned = re.sub(r"[\s\-/]+", "_", heading.strip().lower())
+    cleaned = re.sub(r"[^a-z0-9_]", "", cleaned)
+    return re.sub(r"_+", "_", cleaned).strip("_")
+
+
+def _field_value_kind(field: str) -> MappingValueKind:
+    if field in FLOAT_FIELDS:
+        return "numeric"
+    if field in INT_FIELDS:
+        return "integer"
+    if field in BOOL_FIELDS:
+        return "boolean"
+    return "text"
+
+
+def _source_value_kind(values: Sequence[str | None]) -> str:
+    populated = [str(value).strip() for value in values if value is not None and str(value).strip()]
+    if not populated:
+        return "empty"
+    numeric = []
+    for value in populated:
+        try:
+            float(value)
+        except ValueError:
+            numeric.append(False)
+        else:
+            numeric.append(True)
+    if all(numeric):
+        return "numeric"
+    if any(numeric):
+        return "mixed"
+    return "text"
+
+
+def _type_bonus(source_kind: str, destination: str) -> float:
+    destination_kind = _field_value_kind(destination)
+    if source_kind == "numeric":
+        if destination_kind in {"numeric", "integer"}:
+            return 0.06
+        if destination in NUMERIC_TEXT_COMPATIBLE_FIELDS:
+            return 0.03
+    if source_kind == "text" and destination_kind == "text":
+        return 0.01
+    return 0.0
+
+
+@dataclass(frozen=True)
+class _MappingResolution:
+    target: str | None
+    warnings: tuple["ImportMappingWarning", ...] = ()
+
+
+def _resolve_heading(
+    heading: str,
+    fields: set[str],
+    aliases: dict[str, str],
+    sample_values: Sequence[str | None] = (),
+) -> _MappingResolution:
+    """Resolve one heading without allowing type heuristics to beat exact matches."""
+
+    cleaned = _clean_heading(heading)
+    raw = heading.strip()
+    if raw in fields:
+        return _MappingResolution(raw)
+    if cleaned in fields:
+        return _MappingResolution(cleaned)
+    alias_target = aliases.get(cleaned)
+    if alias_target in fields:
+        return _MappingResolution(alias_target)
+
+    source_kind = _source_value_kind(sample_values)
+    candidates: dict[str, tuple[int, float]] = {}
+
+    def add_candidate(target: str, priority: int, score: float) -> None:
+        if score < 0.68:
+            return
+        compatibility_bonus = _type_bonus(source_kind, target)
+        if priority == 4 and compatibility_bonus <= 0:
+            priority = 5
+        score += compatibility_bonus
+        existing = candidates.get(target)
+        if existing is None or (priority, -score) < (existing[0], -existing[1]):
+            candidates[target] = (priority, score)
+
+    for alias, target in sorted(aliases.items()):
+        if target in fields:
+            add_candidate(
+                target,
+                4,
+                difflib.SequenceMatcher(None, cleaned, alias).ratio(),
+            )
+    for field in sorted(fields):
+        add_candidate(
+            field,
+            5,
+            difflib.SequenceMatcher(None, cleaned, field).ratio(),
+        )
+    if not candidates:
+        return _MappingResolution(None)
+
+    best_priority = min(priority for priority, _score in candidates.values())
+    ranked = [
+        (target, score)
+        for target, (priority, score) in candidates.items()
+        if priority == best_priority
+    ]
+    best_score = max(score for _target, score in ranked)
+    tied = tuple(sorted(target for target, score in ranked if best_score - score <= 0.01))
+    if len(tied) > 1 and best_score < 0.90:
+        message = (
+            f"Source heading {heading!r} has an ambiguous mapping; review candidates: "
+            + ", ".join(tied)
+            + "."
+        )
+        return _MappingResolution(
+            None,
+            (
+                ImportMappingWarning(
+                    "ambiguous",
+                    heading,
+                    None,
+                    message,
+                    tied,
+                ),
+            ),
+        )
+    return _MappingResolution(max(ranked, key=lambda item: (item[1], item[0]))[0])
 
 
 def normalize_context_length(value: str) -> int | None:
@@ -109,28 +244,17 @@ def normalize_context_length(value: str) -> int | None:
 
 
 def normalize_heading(heading: str) -> str:
-    """Turn human-oriented Sheet headings into stable import field names."""
-    cleaned = re.sub(r"[\s\-/]+", "_", heading.strip().lower())
-    cleaned = re.sub(r"[^a-z0-9_]", "", cleaned)
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    if cleaned in ALIASES:
-        return ALIASES[cleaned]
-    if cleaned in IMPORT_FIELDS:
-        return cleaned
-    candidates = {**{field: field for field in IMPORT_FIELDS}, **ALIASES}
-    match = difflib.get_close_matches(cleaned, candidates.keys(), n=1, cutoff=0.68)
-    return candidates[match[0]] if match else cleaned
+    """Turn human-oriented Benchmark Run headings into stable field names."""
+
+    cleaned = _clean_heading(heading)
+    resolution = _resolve_heading(heading, IMPORT_FIELDS, ALIASES)
+    return resolution.target or cleaned
 
 
 def normalize_summary_heading(heading: str) -> str:
-    cleaned = re.sub(r"[\s\-/]+", "_", heading.strip().lower())
-    cleaned = re.sub(r"[^a-z0-9_]", "", cleaned)
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    if cleaned in SUMMARY_ALIASES: return SUMMARY_ALIASES[cleaned]
-    if cleaned in SUMMARY_IMPORT_FIELDS: return cleaned
-    candidates = {**{field: field for field in SUMMARY_IMPORT_FIELDS}, **SUMMARY_ALIASES}
-    match = difflib.get_close_matches(cleaned, candidates.keys(), n=1, cutoff=0.68)
-    return candidates[match[0]] if match else cleaned
+    cleaned = _clean_heading(heading)
+    resolution = _resolve_heading(heading, SUMMARY_IMPORT_FIELDS, SUMMARY_ALIASES)
+    return resolution.target or cleaned
 
 
 @dataclass
@@ -143,6 +267,18 @@ class ImportPreview:
     skipped_rows: list[tuple[int, str]]
     source_rows: list[dict[str, str]] = field(default_factory=list)
     source_row_numbers: list[int] = field(default_factory=list)
+    mapping_warnings: tuple[ImportMappingWarning, ...] = ()
+
+
+@dataclass(frozen=True)
+class ImportMappingWarning:
+    """One non-blocking, engine-owned warning about an inferred mapping."""
+
+    code: MappingWarningCode
+    source_heading: str
+    destination: str | None
+    message: str
+    candidates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +287,42 @@ class ImportFieldMetadata:
 
     name: str
     required: bool
+    value_kind: MappingValueKind = "text"
+
+
+def _mapping_type_warnings(
+    mapping: dict[str, str | None],
+    samples: Mapping[str, Sequence[str | None]],
+) -> tuple[ImportMappingWarning, ...]:
+    warnings: list[ImportMappingWarning] = []
+    for heading, destination in mapping.items():
+        if destination is None:
+            continue
+        source_kind = _source_value_kind(samples.get(heading, ()))
+        destination_kind = _field_value_kind(destination)
+        if source_kind == "empty":
+            continue
+        if source_kind in {"numeric", "mixed"} and destination_kind == "text":
+            if destination in NUMERIC_TEXT_COMPATIBLE_FIELDS:
+                continue
+            warnings.append(
+                ImportMappingWarning(
+                    "numeric_to_text",
+                    heading,
+                    destination,
+                    "Numeric source data mapped to text field.",
+                )
+            )
+        elif source_kind in {"text", "mixed"} and destination_kind in {"numeric", "integer"}:
+            warnings.append(
+                ImportMappingWarning(
+                    "text_to_numeric",
+                    heading,
+                    destination,
+                    "Text source data mapped to numeric field.",
+                )
+            )
+    return tuple(warnings)
 
 
 @dataclass(frozen=True)
@@ -299,6 +471,15 @@ class CsvImportService:
             )
         preview = self.preview(path, encoding=encoding)
         status, import_type, reason = self._import_type_from_preview(preview)
+        if import_type is not None:
+            # Detection uses the established Benchmark Run preview to classify
+            # the shape.  Once the type is known, expose a fresh preview using
+            # that type's authoritative field catalog to GUI callers.
+            preview = self.preview(
+                path,
+                summary=import_type == SCOREBOARD_IMPORT,
+                encoding=encoding,
+            )
         return CsvImportDetection(status, import_type, encoding, preview, reason)
 
     @staticmethod
@@ -317,7 +498,7 @@ class CsvImportService:
 
         required = set(CsvImportService.required_mapping_fields(import_type))
         return tuple(
-            ImportFieldMetadata(name, name in required)
+            ImportFieldMetadata(name, name in required, _field_value_kind(name))
             for name in CsvImportService.mapping_fields(import_type)
         )
 
@@ -412,13 +593,32 @@ class CsvImportService:
         with Path(path).open("r", encoding=selected_encoding, newline="") as source:
             reader = csv.DictReader(source)
             headings = reader.fieldnames or []
-            supplied_mapping = mapping or {}
             fields = SUMMARY_IMPORT_FIELDS if summary else IMPORT_FIELDS
-            normalizer = normalize_summary_heading if summary else normalize_heading
-            resolved = {}
+            aliases = SUMMARY_ALIASES if summary else ALIASES
+            raw_rows = [(reader.line_num, source_row) for source_row in reader]
+            source_values: dict[str, list[str | None]] = {}
             for heading in headings:
-                target = supplied_mapping.get(heading, normalizer(heading))
-                resolved[heading] = target if target in fields else None
+                source_values[heading] = [
+                    None if source_row.get(heading) is None else str(source_row.get(heading))
+                    for _row_number, source_row in raw_rows
+                ]
+            resolved: dict[str, str | None] = {}
+            mapping_warnings: list[ImportMappingWarning] = []
+            if mapping:
+                for heading in headings:
+                    target = mapping.get(heading)
+                    resolved[heading] = target if target in fields else None
+            else:
+                for heading in headings:
+                    resolution = _resolve_heading(
+                        heading,
+                        fields,
+                        aliases,
+                        source_values[heading],
+                    )
+                    resolved[heading] = resolution.target
+                    mapping_warnings.extend(resolution.warnings)
+            mapping_warnings.extend(_mapping_type_warnings(resolved, source_values))
             unknown = [heading for heading, target in resolved.items() if target is None]
             rows = []
             source_rows = []
@@ -426,8 +626,7 @@ class CsvImportService:
             skipped_rows = []
             source_row_numbers = []
             import_type = SCOREBOARD_IMPORT if summary else BENCHMARK_RUN_IMPORT
-            for source_row in reader:
-                row_number = reader.line_num
+            for row_number, source_row in raw_rows:
                 source_rows.append(
                     {
                         str(heading): "" if value is None else str(value)
@@ -467,6 +666,7 @@ class CsvImportService:
             skipped_rows,
             source_rows,
             source_row_numbers,
+            tuple(mapping_warnings),
         )
 
     def mapping_profiles(self) -> list[tuple[int, str, dict[str, str | None]]]:

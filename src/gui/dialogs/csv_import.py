@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -253,8 +254,12 @@ class CsvImportWizard(QWizard):
         self.mapping_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.mapping_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.mapping_table.verticalHeader().setVisible(False)
-        self.mapping_table.horizontalHeader().setStretchLastSection(True)
-        self.mapping_table.horizontalHeader().setMinimumSectionSize(140)
+        header = self.mapping_table.horizontalHeader()
+        header.setMinimumSectionSize(140)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.mapping_table.setColumnWidth(1, 280)
         layout.addWidget(self.mapping_table, 1)
         self._set_page_body(self.mapping_page, body)
 
@@ -498,21 +503,28 @@ class CsvImportWizard(QWizard):
         import_type = self._effective_import_type()
         if import_type is None:
             return
-        self._mapping_by_type.setdefault(import_type, dict(self._preview_for_type(import_type).mapping))
+        automatic_preview = self._preview_for_type(import_type)
+        self._mapping_by_type.setdefault(import_type, dict(automatic_preview.mapping))
         mapping = self._mapping_by_type[import_type]
         metadata = self.context.csv_importer.mapping_field_metadata(import_type)
         fields = tuple(item.name for item in metadata)
         required = {item.name for item in metadata if item.required}
+        warning_by_heading: dict[str, list[str]] = {}
+        for warning in automatic_preview.mapping_warnings:
+            warning_by_heading.setdefault(warning.source_heading, []).append(warning.message)
         self._mapping_controls = {}
         self.mapping_table.setRowCount(0)
         headings = list(mapping)
         self.mapping_table.setRowCount(len(headings))
         for row_index, heading in enumerate(headings):
             heading_item = QTableWidgetItem(heading)
-            heading_item.setToolTip(heading)
+            warning_text = "\n".join(warning_by_heading.get(heading, ()))
+            heading_item.setToolTip("\n".join(value for value in (heading, warning_text) if value))
             self.mapping_table.setItem(row_index, 0, heading_item)
             combo = QComboBox(self.mapping_table)
             combo.setAccessibleName(f"Mapping for {heading}")
+            combo.setMinimumWidth(240)
+            combo.view().setMinimumWidth(280)
             combo.addItem("Ignore", None)
             for field_name in fields:
                 label = f"{field_name} (required)" if field_name in required else field_name
@@ -523,20 +535,28 @@ class CsvImportWizard(QWizard):
             combo.currentIndexChanged.connect(
                 lambda _index, key=heading, kind=import_type: self._mapping_changed(cast(CsvImportType, kind), key)
             )
+            if warning_text:
+                combo.setToolTip(warning_text)
             self.mapping_table.setCellWidget(row_index, 1, combo)
             self._mapping_controls[heading] = combo
             requirement = "Required target" if target in required else "Optional / ignored"
             self.mapping_table.setItem(row_index, 2, QTableWidgetItem(requirement))
-        self.mapping_table.resizeColumnsToContents()
-        self.mapping_status.setText(
+        status_lines = [
             f"{len(headings)} source headings found. Model Name is the only required engine target; all other validation remains in the engine."
-        )
+        ]
+        if automatic_preview.mapping_warnings:
+            status_lines.append(
+                "Mapping warnings:\n"
+                + "\n".join(warning.message for warning in automatic_preview.mapping_warnings)
+            )
+        self.mapping_status.setText("\n".join(status_lines))
 
     def _mapping_changed(self, import_type: CsvImportType, heading: str) -> None:
         combo = self._mapping_controls.get(heading)
         if combo is not None:
             self._mapping_by_type[import_type][heading] = combo.currentData()
             self._clear_workflow_state(clear_mapping=False, clear_controls=False)
+            self.mapping_status.setText("Mapping changed. Continue to revalidate the selected destinations.")
 
     def _validate_mapping_page(self) -> bool:
         import_type = self._effective_import_type()
@@ -648,6 +668,9 @@ class CsvImportWizard(QWizard):
     @staticmethod
     def _validation_text(preview: ImportPreview, validation: ImportValidationResult) -> str:
         lines: list[str] = []
+        if preview.mapping_warnings:
+            lines.append("Mapping warnings:")
+            lines.extend(warning.message for warning in preview.mapping_warnings)
         if preview.unknown_headings:
             lines.append("Ignored headings: " + ", ".join(preview.unknown_headings))
         if preview.skipped_rows:

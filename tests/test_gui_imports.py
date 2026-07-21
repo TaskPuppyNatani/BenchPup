@@ -369,6 +369,48 @@ class Phase5D1ACsvImportGuiTests(unittest.TestCase):
         finally:
             wizard.close()
 
+    def test_real_detected_scoreboard_workflow_maps_manual_spreadsheet_headers(self) -> None:
+        path = self._csv(
+            "manual-scoreboard.csv",
+            "Model Name,Temp,Experts,Context,tok/s,Review Quality,Score,Hallucinations,Consistency,Reliability Score,Verdict,Notes\n"
+            "Qwen,0.3,8,32768,120,5,600,Low,High,9,Useful,Primary\n"
+            "Llama,0.4,8,32768,118,4.5,580,Low,High,8,Useful,Secondary\n",
+        )
+        wizard = CsvImportWizard(self.context, confirm_close=lambda: True)
+        try:
+            self._select_source(wizard, path)
+            self._show(wizard)
+            wizard.next()
+            self.application.processEvents()
+            self.assertEqual(wizard.currentId(), 1)
+            self.assertEqual(wizard.detection.import_type, SCOREBOARD_IMPORT)  # type: ignore[union-attr]
+
+            row_by_heading = {
+                wizard.mapping_table.item(row, 0).text(): row
+                for row in range(wizard.mapping_table.rowCount())
+            }
+            review_quality_combo = wizard.mapping_table.cellWidget(row_by_heading["Review Quality"], 1)
+            score_combo = wizard.mapping_table.cellWidget(row_by_heading["Score"], 1)
+            self.assertEqual(review_quality_combo.currentData(), "review_quality")  # type: ignore[union-attr]
+            self.assertEqual(score_combo.currentData(), "score")  # type: ignore[union-attr]
+            self.assertNotIn("Numeric source data mapped to text field", wizard.mapping_status.text())
+
+            wizard.next()
+            self.application.processEvents()
+            self.assertEqual(wizard.currentId(), 2)
+            self.assertEqual(wizard.active_preview.mapping["Review Quality"], "review_quality")  # type: ignore[union-attr]
+            self.assertEqual(wizard.active_preview.mapping["Score"], "score")  # type: ignore[union-attr]
+            wizard.next()
+            self.application.processEvents()
+            wizard.button(QWizard.WizardButton.FinishButton).click()
+            self.application.processEvents()
+
+            entries = self.context.catalog.scoreboard_entries.list()
+            self.assertEqual([(entry.review_quality, entry.score) for entry in entries], [("5", 600.0), ("4.5", 580.0)])
+            self.assertEqual(self.context.benchmarks.runs.list(), [])
+        finally:
+            wizard.close()
+
     def test_manual_type_override_routes_scoreboard_shaped_csv_to_runs(self) -> None:
         path = self._csv("override.csv", "Model,Score,Notes\nQwen,4.0,Use as run\n")
         wizard = self._wizard(path, BENCHMARK_RUN_IMPORT)
