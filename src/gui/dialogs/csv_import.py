@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
     QTableView,
@@ -79,6 +80,51 @@ DUPLICATE_POLICY_LABELS = {
     "replace": "Replace duplicates",
     "keep": "Keep duplicates",
 }
+_MAPPING_COMBO_HEIGHT_FLOOR = 32
+_MAPPING_CELL_VERTICAL_MARGIN = 2
+# The shared theme gives QTableView items 5 px of vertical padding. Cell widgets
+# are placed inside that padded content rect, so the row must account for it.
+_MAPPING_TABLE_ITEM_VERTICAL_PADDING = 5
+_MAPPING_GRID_LINE_ALLOWANCE = 1
+_MAPPING_ROW_HEIGHT_FLOOR = (
+    _MAPPING_COMBO_HEIGHT_FLOOR
+    + (2 * (_MAPPING_CELL_VERTICAL_MARGIN + _MAPPING_TABLE_ITEM_VERTICAL_PADDING))
+    + _MAPPING_GRID_LINE_ALLOWANCE
+)
+_MAPPING_COMBO_MIN_WIDTH = 240
+_MAPPING_POPUP_MIN_WIDTH = 280
+_MAPPING_COMBO_CHROME_FALLBACK = 24
+
+
+def _configure_mapping_combo(combo: QComboBox) -> tuple[int, int]:
+    """Size one mapping combo for its styled cell and complete item labels."""
+
+    combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    font_metrics = combo.fontMetrics()
+    longest_label_width = max(
+        (font_metrics.horizontalAdvance(combo.itemText(index)) for index in range(combo.count())),
+        default=0,
+    )
+    current_label_width = font_metrics.horizontalAdvance(combo.currentText())
+    styled_chrome_width = max(
+        _MAPPING_COMBO_CHROME_FALLBACK,
+        combo.sizeHint().width() - current_label_width,
+    )
+    minimum_width = max(
+        _MAPPING_COMBO_MIN_WIDTH,
+        longest_label_width + styled_chrome_width,
+    )
+    combo.setMinimumWidth(minimum_width)
+    combo.view().setMinimumWidth(max(_MAPPING_POPUP_MIN_WIDTH, minimum_width))
+
+    minimum_height = max(
+        _MAPPING_COMBO_HEIGHT_FLOOR,
+        combo.minimumSizeHint().height(),
+        combo.sizeHint().height(),
+        combo.fontMetrics().height() + 2,
+    )
+    combo.setFixedHeight(minimum_height)
+    return minimum_height, minimum_width
 
 
 class _SourcePage(QWizardPage):
@@ -253,13 +299,16 @@ class CsvImportWizard(QWizard):
         self.mapping_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.mapping_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.mapping_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.mapping_table.verticalHeader().setVisible(False)
+        vertical_header = self.mapping_table.verticalHeader()
+        vertical_header.setVisible(False)
+        vertical_header.setMinimumSectionSize(_MAPPING_ROW_HEIGHT_FLOOR)
+        vertical_header.setDefaultSectionSize(_MAPPING_ROW_HEIGHT_FLOOR)
         header = self.mapping_table.horizontalHeader()
         header.setMinimumSectionSize(140)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        self.mapping_table.setColumnWidth(1, 280)
+        self.mapping_table.setColumnWidth(1, _MAPPING_POPUP_MIN_WIDTH)
         layout.addWidget(self.mapping_table, 1)
         self._set_page_body(self.mapping_page, body)
 
@@ -516,6 +565,7 @@ class CsvImportWizard(QWizard):
         self.mapping_table.setRowCount(0)
         headings = list(mapping)
         self.mapping_table.setRowCount(len(headings))
+        mapped_column_width = _MAPPING_POPUP_MIN_WIDTH
         for row_index, heading in enumerate(headings):
             heading_item = QTableWidgetItem(heading)
             warning_text = "\n".join(warning_by_heading.get(heading, ()))
@@ -523,8 +573,6 @@ class CsvImportWizard(QWizard):
             self.mapping_table.setItem(row_index, 0, heading_item)
             combo = QComboBox(self.mapping_table)
             combo.setAccessibleName(f"Mapping for {heading}")
-            combo.setMinimumWidth(240)
-            combo.view().setMinimumWidth(280)
             combo.addItem("Ignore", None)
             for field_name in fields:
                 label = f"{field_name} (required)" if field_name in required else field_name
@@ -532,15 +580,38 @@ class CsvImportWizard(QWizard):
             target = mapping.get(heading)
             target_index = combo.findData(target)
             combo.setCurrentIndex(target_index if target_index >= 0 else 0)
+            minimum_height, minimum_width = _configure_mapping_combo(combo)
+            mapped_column_width = max(mapped_column_width, minimum_width)
             combo.currentIndexChanged.connect(
                 lambda _index, key=heading, kind=import_type: self._mapping_changed(cast(CsvImportType, kind), key)
             )
             if warning_text:
                 combo.setToolTip(warning_text)
-            self.mapping_table.setCellWidget(row_index, 1, combo)
+            cell = QWidget(self.mapping_table)
+            cell.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            cell_layout = QHBoxLayout(cell)
+            cell_layout.setContentsMargins(
+                0,
+                _MAPPING_CELL_VERTICAL_MARGIN,
+                0,
+                _MAPPING_CELL_VERTICAL_MARGIN,
+            )
+            cell_layout.setSpacing(0)
+            cell_layout.addWidget(combo)
+            self.mapping_table.setCellWidget(row_index, 1, cell)
+            self.mapping_table.setRowHeight(
+                row_index,
+                max(
+                    _MAPPING_ROW_HEIGHT_FLOOR,
+                    minimum_height
+                    + (2 * (_MAPPING_CELL_VERTICAL_MARGIN + _MAPPING_TABLE_ITEM_VERTICAL_PADDING))
+                    + _MAPPING_GRID_LINE_ALLOWANCE,
+                ),
+            )
             self._mapping_controls[heading] = combo
             requirement = "Required target" if target in required else "Optional / ignored"
             self.mapping_table.setItem(row_index, 2, QTableWidgetItem(requirement))
+        self.mapping_table.setColumnWidth(1, mapped_column_width)
         status_lines = [
             f"{len(headings)} source headings found. Model Name is the only required engine target; all other validation remains in the engine."
         ]
@@ -550,6 +621,17 @@ class CsvImportWizard(QWizard):
                 + "\n".join(warning.message for warning in automatic_preview.mapping_warnings)
             )
         self.mapping_status.setText("\n".join(status_lines))
+
+    def _mapping_combo_for_row(self, row: int) -> QComboBox:
+        """Return the real mapping combo regardless of its cell presentation wrapper."""
+
+        cell = self.mapping_table.cellWidget(row, 1)
+        if isinstance(cell, QComboBox):
+            return cell
+        combo = cell.findChild(QComboBox) if cell is not None else None
+        if combo is None:
+            raise RuntimeError(f"Mapping row {row} does not contain a combo box")
+        return combo
 
     def _mapping_changed(self, import_type: CsvImportType, heading: str) -> None:
         combo = self._mapping_controls.get(heading)

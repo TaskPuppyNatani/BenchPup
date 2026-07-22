@@ -12,7 +12,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from PySide6.QtWidgets import QApplication, QDialog, QWizard
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QWizard
 
 from engine.domain import BenchmarkRun
 from engine.importers import AMBIGUOUS_IMPORT, BENCHMARK_RUN_IMPORT, SCOREBOARD_IMPORT, UNSUPPORTED_IMPORT
@@ -389,10 +389,10 @@ class Phase5D1ACsvImportGuiTests(unittest.TestCase):
                 wizard.mapping_table.item(row, 0).text(): row
                 for row in range(wizard.mapping_table.rowCount())
             }
-            review_quality_combo = wizard.mapping_table.cellWidget(row_by_heading["Review Quality"], 1)
-            score_combo = wizard.mapping_table.cellWidget(row_by_heading["Score"], 1)
-            self.assertEqual(review_quality_combo.currentData(), "review_quality")  # type: ignore[union-attr]
-            self.assertEqual(score_combo.currentData(), "score")  # type: ignore[union-attr]
+            review_quality_combo = wizard._mapping_combo_for_row(row_by_heading["Review Quality"])
+            score_combo = wizard._mapping_combo_for_row(row_by_heading["Score"])
+            self.assertEqual(review_quality_combo.currentData(), "review_quality")
+            self.assertEqual(score_combo.currentData(), "score")
             self.assertNotIn("Numeric source data mapped to text field", wizard.mapping_status.text())
 
             wizard.next()
@@ -410,6 +410,123 @@ class Phase5D1ACsvImportGuiTests(unittest.TestCase):
             self.assertEqual(self.context.benchmarks.runs.list(), [])
         finally:
             wizard.close()
+
+    def test_mapping_controls_have_stable_first_render_dimensions(self) -> None:
+        path = self._csv(
+            "mapping-rendering.csv",
+            "Model Name,Review Quality,Reliability Score,Notes,Notes Extra\n"
+            "Qwen,5,9,Primary,Secondary\n",
+        )
+        wizard = CsvImportWizard(self.context, confirm_close=lambda: True)
+        try:
+            self._select_source(wizard, path)
+            self._show(wizard)
+            wizard.next()
+            self.application.processEvents()
+            self.assertEqual(wizard.currentId(), 1)
+
+            rows = {
+                wizard.mapping_table.item(row, 0).text(): row
+                for row in range(wizard.mapping_table.rowCount())
+            }
+            self.assertIn("Review Quality", rows)
+
+            controls = [wizard._mapping_combo_for_row(row) for row in rows.values()]
+            for row, control in zip(rows.values(), controls, strict=True):
+                self.assertGreaterEqual(control.minimumHeight(), control.minimumSizeHint().height())
+                self.assertGreaterEqual(control.minimumHeight(), control.sizeHint().height())
+                self.assertGreaterEqual(wizard.mapping_table.rowHeight(row), control.minimumHeight())
+                cell = wizard.mapping_table.cellWidget(row, 1)
+                self.assertIsNot(cell, control)
+                self.assertIs(control.parentWidget(), cell)
+                self.assertGreater(control.height(), 0)
+                self.assertGreater(cell.height(), control.height())  # type: ignore[union-attr]
+                self.assertGreater(control.geometry().top(), 0)
+                self.assertGreater(cell.height() - control.geometry().bottom() - 1, 0)  # type: ignore[union-attr]
+
+            review_quality = wizard._mapping_combo_for_row(rows["Review Quality"])
+            model_name = wizard._mapping_combo_for_row(rows["Model Name"])
+            self.assertEqual(review_quality.currentData(), "review_quality")
+            self.assertEqual(model_name.currentData(), "model_name")
+
+            longest_label_width = max(
+                control.fontMetrics().horizontalAdvance(control.itemText(index))
+                for control in controls
+                if isinstance(control, QComboBox)
+                for index in range(control.count())
+            )
+            minimum_combo_width = max(
+                control.minimumWidth()
+                for control in controls
+                if isinstance(control, QComboBox)
+            )
+            self.assertGreaterEqual(wizard.mapping_table.columnWidth(1), minimum_combo_width)
+            self.assertGreaterEqual(
+                review_quality.view().minimumWidth(),
+                review_quality.minimumWidth(),
+            )
+            self.assertGreaterEqual(review_quality.minimumWidth(), longest_label_width)
+
+            initial_dimensions = {
+                heading: self._mapping_geometry(wizard, row)
+                for heading, row in rows.items()
+            }
+            self.assertEqual(len(set(initial_dimensions.values())), 1)
+            wizard.next()
+            self.application.processEvents()
+            wizard.back()
+            self.application.processEvents()
+            self.assertEqual(wizard.currentId(), 1)
+            rows_after_navigation = {
+                wizard.mapping_table.item(row, 0).text(): row
+                for row in range(wizard.mapping_table.rowCount())
+            }
+            self.assertEqual(
+                wizard._mapping_combo_for_row(rows_after_navigation["Review Quality"]).currentData(),
+                "review_quality",
+            )
+            self.assertEqual(
+                wizard._mapping_combo_for_row(rows_after_navigation["Model Name"]).currentData(),
+                "model_name",
+            )
+            for heading, geometry in initial_dimensions.items():
+                row = rows_after_navigation[heading]
+                self.assertEqual(self._mapping_geometry(wizard, row), geometry)
+
+            notes_extra = wizard._mapping_combo_for_row(rows_after_navigation["Notes Extra"])
+            notes_extra.setCurrentIndex(notes_extra.findData(None))
+            self.application.processEvents()
+            self.assertIsNone(notes_extra.currentData())
+            for _ in range(2):
+                wizard.next()
+                self.application.processEvents()
+                self.assertEqual(wizard.currentId(), 2)
+                wizard.back()
+                self.application.processEvents()
+                self.assertEqual(wizard.currentId(), 1)
+            rows_after_rebuild = {
+                wizard.mapping_table.item(row, 0).text(): row
+                for row in range(wizard.mapping_table.rowCount())
+            }
+            self.assertIsNone(wizard._mapping_combo_for_row(rows_after_rebuild["Notes Extra"]).currentData())
+            for heading, geometry in initial_dimensions.items():
+                self.assertEqual(self._mapping_geometry(wizard, rows_after_rebuild[heading]), geometry)
+        finally:
+            wizard.close()
+
+    @staticmethod
+    def _mapping_geometry(wizard: CsvImportWizard, row: int) -> tuple[int, int, int, int, int]:
+        cell = wizard.mapping_table.cellWidget(row, 1)
+        combo = wizard._mapping_combo_for_row(row)
+        assert cell is not None
+        bottom_inset = cell.height() - combo.geometry().bottom() - 1
+        return (
+            wizard.mapping_table.rowHeight(row),
+            cell.height(),
+            combo.height(),
+            combo.geometry().top(),
+            bottom_inset,
+        )
 
     def test_manual_type_override_routes_scoreboard_shaped_csv_to_runs(self) -> None:
         path = self._csv("override.csv", "Model,Score,Notes\nQwen,4.0,Use as run\n")
