@@ -51,7 +51,13 @@ from .comparisons import (
     SessionComparisonResult,
     SessionComparisonReport,
 )
-from .services import BenchmarkService, CatalogService
+from .services import (
+    BenchmarkService,
+    CatalogService,
+    HardwareProfileDeleteError,
+    HardwareProfileDeletePreview,
+    HardwareProfileDeleteResult,
+)
 from .standard_exports import (
     DEFAULT_EXPORT_FILENAMES,
     EXPORT_LABELS,
@@ -124,6 +130,9 @@ __all__ = (
     "ComparisonCategory",
     "categorical_distribution",
     "CatalogService",
+    "HardwareProfileDeleteError",
+    "HardwareProfileDeletePreview",
+    "HardwareProfileDeleteResult",
     "DEFAULT_EXPORT_FILENAMES",
     "EXPORT_LABELS",
     "ChartData",

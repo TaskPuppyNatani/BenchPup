@@ -34,6 +34,10 @@ class HardwareProfileNameConflictError(ValueError):
     """An imported hardware profile name collides after normalization."""
 
 
+class HardwareProfileDeleteError(ValueError):
+    """A hardware profile could not be deleted safely."""
+
+
 HardwareProfileConflictReason = Literal["name", "computer_name", "cpu_gpu"]
 
 
@@ -43,6 +47,24 @@ class HardwareProfileConflict:
 
     profile: HardwareProfile
     reasons: tuple[HardwareProfileConflictReason, ...]
+
+
+@dataclass(frozen=True)
+class HardwareProfileDeletePreview:
+    """Read-only information used to explain a hardware-profile deletion."""
+
+    profile_id: int
+    profile_name: str
+    active_run_count: int
+
+
+@dataclass(frozen=True)
+class HardwareProfileDeleteResult:
+    """The authoritative result of deleting one hardware profile."""
+
+    profile_id: int
+    profile_name: str
+    detached_active_run_count: int
 
 
 class CatalogService:
@@ -231,6 +253,72 @@ class CatalogService:
 
     def update_hardware_profile(self, profile: HardwareProfile) -> HardwareProfile:
         return self.hardware_profiles.update(profile)
+
+    @staticmethod
+    def _validated_hardware_profile_id(profile_id: int) -> int:
+        if isinstance(profile_id, bool) or not isinstance(profile_id, int) or profile_id <= 0:
+            raise ValueError("hardware profile ID must be a positive integer")
+        return profile_id
+
+    @staticmethod
+    def _hardware_profile_active_run_count(connection: sqlite3.Connection, profile_id: int) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) AS active_run_count "
+            "FROM benchmark_runs "
+            "WHERE hardware_profile_id = ? AND is_deleted = 0",
+            (profile_id,),
+        ).fetchone()
+        return int(row["active_run_count"]) if row is not None else 0
+
+    def preview_hardware_profile_delete(self, profile_id: int) -> HardwareProfileDeletePreview:
+        """Return deletion confirmation data without changing persisted state."""
+
+        validated_id = self._validated_hardware_profile_id(profile_id)
+        try:
+            with self.database.connection() as connection:
+                profile = self.hardware_profiles.get(validated_id, connection=connection)
+                if profile is None:
+                    raise KeyError(f"hardware_profiles {validated_id} does not exist")
+                return HardwareProfileDeletePreview(
+                    profile_id=validated_id,
+                    profile_name=profile.name,
+                    active_run_count=self._hardware_profile_active_run_count(connection, validated_id),
+                )
+        except KeyError:
+            raise
+        except sqlite3.Error as error:
+            raise HardwareProfileDeleteError(
+                "The hardware profile deletion preview could not be loaded."
+            ) from error
+
+    def delete_hardware_profile(self, profile_id: int) -> HardwareProfileDeleteResult:
+        """Delete one reusable profile while preserving all benchmark history."""
+
+        validated_id = self._validated_hardware_profile_id(profile_id)
+        try:
+            with self.database.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                profile = self.hardware_profiles.get(validated_id, connection=connection)
+                if profile is None:
+                    raise KeyError(f"hardware_profiles {validated_id} does not exist")
+                active_run_count = self._hardware_profile_active_run_count(connection, validated_id)
+                cursor = connection.execute(
+                    "DELETE FROM hardware_profiles WHERE id = ?",
+                    (validated_id,),
+                )
+                if cursor.rowcount != 1:
+                    raise KeyError(f"hardware_profiles {validated_id} does not exist")
+                return HardwareProfileDeleteResult(
+                    profile_id=validated_id,
+                    profile_name=profile.name,
+                    detached_active_run_count=active_run_count,
+                )
+        except KeyError:
+            raise
+        except sqlite3.Error as error:
+            raise HardwareProfileDeleteError(
+                "The hardware profile could not be deleted. No changes were kept."
+            ) from error
 
     @staticmethod
     def _normalized_import_value(value: Any) -> str:
