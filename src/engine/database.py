@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Callable, Iterator
 
 
 MIGRATIONS: list[tuple[int, str]] = [(1, """
@@ -87,16 +90,127 @@ ALTER TABLE hardware_profiles ADD COLUMN imported_at TEXT;
 """)]
 
 
+class DatabaseMaintenanceError(RuntimeError):
+    """The database could not be quiesced for a bounded maintenance window."""
+
+
+class _MaintenanceState:
+    """Process-local coordination for all EngineDatabase instances at one path."""
+
+    def __init__(self) -> None:
+        self.condition = threading.Condition()
+        self.active_connections = 0
+        self.maintenance_owner: int | None = None
+
+    def enter_connection(self, *, allow_during_maintenance: bool) -> None:
+        owner = threading.get_ident()
+        with self.condition:
+            if self.maintenance_owner is not None and not (
+                allow_during_maintenance and self.maintenance_owner == owner
+            ):
+                raise DatabaseMaintenanceError("Database is temporarily in maintenance mode")
+            self.active_connections += 1
+
+    def leave_connection(self) -> None:
+        with self.condition:
+            self.active_connections = max(0, self.active_connections - 1)
+            self.condition.notify_all()
+
+    def acquire_maintenance(self, timeout: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        owner = threading.get_ident()
+        with self.condition:
+            while self.maintenance_owner is not None or self.active_connections:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DatabaseMaintenanceError(
+                        "Database connections could not be quiesced within the maintenance timeout"
+                    )
+                self.condition.wait(remaining)
+            self.maintenance_owner = owner
+
+    def release_maintenance(self) -> None:
+        owner = threading.get_ident()
+        with self.condition:
+            if self.maintenance_owner != owner:
+                raise DatabaseMaintenanceError("Database maintenance is owned by another thread")
+            self.maintenance_owner = None
+            self.condition.notify_all()
+
+
+class _TrackedConnection(sqlite3.Connection):
+    """SQLite connection that releases the process-local maintenance slot on close."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._release_callback: Callable[[], None] | None = None
+        self._released = False
+
+    def set_release_callback(self, callback: Callable[[], None]) -> None:
+        self._release_callback = callback
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            callback = self._release_callback
+            if callback is not None and not self._released:
+                self._released = True
+                self._release_callback = None
+                callback()
+
+    def __del__(self) -> None:  # pragma: no cover - interpreter cleanup fallback.
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+_MAINTENANCE_STATES: dict[str, _MaintenanceState] = {}
+_MAINTENANCE_STATES_LOCK = threading.Lock()
+
+
+def _maintenance_state_for(path: Path) -> _MaintenanceState:
+    try:
+        key = str(path.resolve(strict=False))
+    except (OSError, RuntimeError):
+        key = str(path.absolute())
+    with _MAINTENANCE_STATES_LOCK:
+        state = _MAINTENANCE_STATES.get(key)
+        if state is None:
+            state = _MaintenanceState()
+            _MAINTENANCE_STATES[key] = state
+        return state
+
+
 class EngineDatabase:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._maintenance_state = _maintenance_state_for(self.path)
 
-    def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        return connection
+    def connect(self, *, allow_during_maintenance: bool = False) -> sqlite3.Connection:
+        self._maintenance_state.enter_connection(
+            allow_during_maintenance=allow_during_maintenance
+        )
+        connection: _TrackedConnection | None = None
+        try:
+            connection = sqlite3.connect(
+                self.path,
+                timeout=5.0,
+                factory=_TrackedConnection,
+            )
+            assert isinstance(connection, _TrackedConnection)
+            connection.set_release_callback(self._maintenance_state.leave_connection)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            return connection
+        except Exception:
+            if connection is None:
+                self._maintenance_state.leave_connection()
+            else:
+                connection.close()
+            raise
 
     def close(self) -> None:
         """Close database resources owned by the engine boundary.
@@ -110,8 +224,8 @@ class EngineDatabase:
         return None
 
     @contextmanager
-    def connection(self):
-        connection = self.connect()
+    def connection(self, *, allow_during_maintenance: bool = False) -> Iterator[sqlite3.Connection]:
+        connection = self.connect(allow_during_maintenance=allow_during_maintenance)
         try:
             yield connection
             connection.commit()
@@ -121,8 +235,25 @@ class EngineDatabase:
         finally:
             connection.close()
 
-    def migrate(self) -> None:
-        with self.connection() as connection:
+    @contextmanager
+    def maintenance(self, *, timeout: float = 5.0) -> Iterator[None]:
+        """Quiesce this database path for a bounded file-maintenance window.
+
+        All current engine operations use short-lived connections, so this
+        process-local guard is sufficient to prevent another BenchPup thread
+        or EngineDatabase instance from opening the active path during a
+        replace-and-reopen sequence.  The maintenance owner may explicitly
+        open verification connections with ``allow_during_maintenance=True``.
+        """
+
+        self._maintenance_state.acquire_maintenance(timeout)
+        try:
+            yield
+        finally:
+            self._maintenance_state.release_maintenance()
+
+    def migrate(self, *, allow_during_maintenance: bool = False) -> None:
+        with self.connection(allow_during_maintenance=allow_during_maintenance) as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY CHECK(id = 1), version INTEGER NOT NULL, applied_at TEXT NOT NULL)")
             row = connection.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
             current = row["version"] if row else 0
