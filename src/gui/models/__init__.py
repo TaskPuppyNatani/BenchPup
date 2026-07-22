@@ -7,6 +7,7 @@ from .run_table_model import ROW_ROLE, RUN_ID_ROLE, TABLE_HEADERS, RunTableModel
 from .runs import UNAVAILABLE, RunBrowserRow, RunsDataProvider
 from .import_table_model import ImportTableModel
 from .dataset_preview_model import DATASET_PREVIEW_HEADERS, DatasetPreviewTableModel
+from .validation_issue_model import VALIDATION_ISSUE_HEADERS, ValidationIssueTableModel
 
 __all__ = (
     "DashboardDataProvider",
@@ -25,6 +26,8 @@ __all__ = (
     "ImportTableModel",
     "DATASET_PREVIEW_HEADERS",
     "DatasetPreviewTableModel",
+    "VALIDATION_ISSUE_HEADERS",
+    "ValidationIssueTableModel",
     "RunTableModel",
     "TABLE_HEADERS",
     "display_bool",

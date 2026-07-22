@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sys
 import tempfile
@@ -15,11 +16,21 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 from PySide6.QtCore import QDate
 from PySide6.QtWidgets import QApplication, QLabel, QLineEdit, QPushButton
 
-from engine.datasets import DatasetWriteResult, DatasetWriteStatus
+from engine.datasets import (
+    DATASET_FORMAT_VERSION,
+    DATASET_VALIDATION_MAX_ISSUES,
+    DatasetWriteResult,
+    DatasetWriteStatus,
+)
 from engine.domain import BenchmarkRun, ReviewScore
 from gui.context import GuiApplicationContext
 from gui.main_window import MainWindow
-from gui.views.dataset_builder import DatasetBuilderState, DatasetBuilderView
+from gui.views.dataset_builder import (
+    DatasetBuilderState,
+    DatasetBuilderView,
+    DatasetValidationGuiState,
+    DatasetValidationMode,
+)
 
 
 class DatasetBuilderGuiTests(unittest.TestCase):
@@ -88,7 +99,61 @@ class DatasetBuilderGuiTests(unittest.TestCase):
         self.application.processEvents()
         self.assertEqual(view._state, DatasetBuilderState.PREVIEW_READY)
 
-    def test_context_and_navigation_use_one_dataset_builder_page_with_validation_placeholder(self) -> None:
+    def _standalone_dataset(
+        self,
+        name: str = "standalone.jsonl",
+        *,
+        records: tuple[dict[str, object], ...] | None = None,
+        blank_line: bool = False,
+    ) -> tuple[Path, Path]:
+        dataset = self.root / name
+        selected_records = records or (
+            {
+                "instruction": "Review the result",
+                "input": {"model": "Alpha"},
+                "response": {"overall": 4.5},
+                "metadata": {"source": "test"},
+            },
+        )
+        lines = [json.dumps(record) for record in selected_records]
+        text = "\n".join(lines) + "\n"
+        if blank_line:
+            text += "\n"
+        dataset.write_text(text, encoding="utf-8")
+        manifest = dataset.with_suffix(dataset.suffix + ".manifest.json")
+        manifest.write_text(
+            json.dumps(
+                {
+                    "dataset_filename": dataset.name,
+                    "record_count": len(selected_records),
+                    "excluded_count": 0,
+                    "duplicate_count": 0,
+                    "redaction_count": 0,
+                    "benchpup_version": "test",
+                    "schema_version": 1,
+                    "created_at": "2026-07-10T12:00:00+00:00",
+                    "format_version": DATASET_FORMAT_VERSION,
+                    "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+                    "selected_filters": {"model": "Alpha"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return dataset, manifest
+
+    def _validation_view(self) -> DatasetBuilderView:
+        view = self._view()
+        view.tabs.setCurrentWidget(view._validation_tab)
+        self.application.processEvents()
+        return view
+
+    @staticmethod
+    def _select_validation_mode(view: DatasetBuilderView, mode: DatasetValidationMode) -> None:
+        index = view.validation_mode_combo.findData(mode.value)
+        assert index >= 0
+        view.validation_mode_combo.setCurrentIndex(index)
+
+    def test_context_and_navigation_use_one_dataset_builder_page_with_validation_tab(self) -> None:
         self.assertIs(self.context.dataset_builder.service, self.context.benchmarks)
         window = MainWindow(self.context)
         try:
@@ -98,11 +163,333 @@ class DatasetBuilderGuiTests(unittest.TestCase):
             window.navigate_to("dashboard")
             window.navigate_to("dataset_builder")
             self.assertIs(window.pages["dataset_builder"], original)
-            placeholder = window.dataset_builder.findChild(QLabel, "datasetValidationComingSoon")
-            self.assertIsNotNone(placeholder)
-            self.assertIn("5D2A-2B", placeholder.text())  # type: ignore[union-attr]
+            self.assertIsNone(window.dataset_builder.findChild(QLabel, "datasetValidationComingSoon"))
+            self.assertIsNotNone(window.dataset_builder.validation_mode_combo)
+            self.assertEqual(
+                window.dataset_builder._validation_state,
+                DatasetValidationGuiState.EMPTY,
+            )
         finally:
             window.close()
+
+    def test_validation_modes_and_ready_state_are_reachable(self) -> None:
+        view = self._validation_view()
+        try:
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.EMPTY)
+            self.assertTrue(view.validation_dataset_edit.isVisible())
+            self.assertFalse(view.validation_manifest_edit.isVisible())
+            self.assertFalse(view.validation_action_button.isEnabled())
+
+            dataset, manifest = self._standalone_dataset()
+            view.validation_dataset_edit.setText(str(dataset))
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.READY)
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+
+            self._select_validation_mode(view, DatasetValidationMode.MANIFEST)
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.EMPTY)
+            self.assertFalse(view.validation_dataset_edit.isVisible())
+            self.assertTrue(view.validation_manifest_edit.isVisible())
+            self.assertEqual(view.validation_summary_label.text(), "No validation result.")
+            view.validation_manifest_edit.setText(str(manifest))
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.READY)
+
+            self._select_validation_mode(view, DatasetValidationMode.PAIR)
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.READY)
+            self.assertTrue(view.validation_dataset_edit.isVisible())
+            self.assertTrue(view.validation_manifest_edit.isVisible())
+            self.assertTrue(view.use_adjacent_manifest_button.isVisible())
+        finally:
+            view.close()
+
+    def test_valid_dataset_displays_counts_and_performs_no_writes(self) -> None:
+        dataset, _manifest = self._standalone_dataset(blank_line=True)
+        original_settings = (
+            self.context.settings.path.read_bytes()
+            if self.context.settings.path.exists()
+            else None
+        )
+        original_file = dataset.read_bytes()
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(dataset))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertEqual(view.validation_status_label.text(), "Valid dataset")
+            summary = view.validation_summary_label.text()
+            self.assertIn("Valid records: 1", summary)
+            self.assertIn("Nonblank physical lines: 1", summary)
+            self.assertIn("Blank lines accepted: 1", summary)
+            self.assertEqual(view._validation_issue_model.rowCount(), 0)
+            self.assertEqual(dataset.read_bytes(), original_file)
+            self.assertEqual(
+                self.context.settings.path.read_bytes()
+                if self.context.settings.path.exists()
+                else None,
+                original_settings,
+            )
+            self.assertEqual(self.run.__dict__, self.source_snapshot)
+        finally:
+            view.close()
+
+    def test_empty_dataset_is_valid_and_malformed_line_keeps_physical_number(self) -> None:
+        empty = self.root / "empty.jsonl"
+        empty.write_text("", encoding="utf-8")
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(empty))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertEqual(view.validation_status_label.text(), "Valid empty dataset")
+            self.assertIn("Valid records: 0", view.validation_summary_label.text())
+
+            malformed = self.root / "malformed.jsonl"
+            malformed.write_text(
+                "\n"
+                + json.dumps(
+                    {
+                        "instruction": "instruction",
+                        "input": {},
+                        "response": {},
+                        "metadata": {},
+                    }
+                )
+                + "\n{not valid json}\n",
+                encoding="utf-8",
+            )
+            view.validation_dataset_edit.setText(str(malformed))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.INVALID)
+            self.assertEqual(view._validation_issue_model.rowCount(), 1)
+            self.assertEqual(view._validation_issue_model.data(view._validation_issue_model.index(0, 0)), "dataset")
+            self.assertEqual(view._validation_issue_model.data(view._validation_issue_model.index(0, 1)), "malformed_json")
+            self.assertEqual(view._validation_issue_model.data(view._validation_issue_model.index(0, 2)), "3")
+        finally:
+            view.close()
+
+    def test_manifest_validation_displays_typed_fields_and_readable_metadata(self) -> None:
+        _dataset, manifest = self._standalone_dataset()
+        view = self._validation_view()
+        try:
+            self._select_validation_mode(view, DatasetValidationMode.MANIFEST)
+            view.validation_manifest_edit.setText(str(manifest))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertEqual(view.validation_status_label.text(), "Valid manifest")
+            summary = view.validation_summary_label.text()
+            self.assertIn("Dataset filename: standalone.jsonl", summary)
+            self.assertIn("Declared record count: 1", summary)
+            self.assertIn("Format version: 1", summary)
+            self.assertIn("Created at: 2026-07-10T12:00:00+00:00", summary)
+            self.assertIn("selected_filters: model: Alpha", view.validation_metadata_label.text())
+            self.assertNotIn("None", view.validation_summary_label.text())
+            self.assertNotIn("None", view.validation_metadata_label.text())
+        finally:
+            view.close()
+
+    def test_invalid_manifest_and_directory_results_are_recoverable_without_tracebacks(self) -> None:
+        invalid_manifest = self.root / "invalid.manifest.json"
+        invalid_manifest.write_text(json.dumps({"record_count": -1}), encoding="utf-8")
+        view = self._validation_view()
+        try:
+            self._select_validation_mode(view, DatasetValidationMode.MANIFEST)
+            view.validation_manifest_edit.setText(str(invalid_manifest))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.INVALID)
+            self.assertGreater(view._validation_issue_model.rowCount(), 0)
+            issue_values = [
+                view._validation_issue_model.data(view._validation_issue_model.index(0, column))
+                for column in range(view._validation_issue_model.columnCount())
+            ]
+            self.assertNotIn(None, issue_values)
+            self.assertNotIn("Traceback", " ".join(str(value) for value in issue_values))
+
+            self._select_validation_mode(view, DatasetValidationMode.DATASET)
+            view.validation_dataset_edit.setText(str(self.root))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.RECOVERABLE_FAILURE)
+            self.assertIn("could not be read", view.validation_status_label.text().lower())
+            self.assertEqual(view.validation_dataset_edit.text(), str(self.root))
+        finally:
+            view.close()
+
+    def test_dataset_issue_truncation_is_reported_without_fabricated_rows(self) -> None:
+        dataset = self.root / "many-errors.jsonl"
+        dataset.write_text("\n".join("{bad json}" for _ in range(DATASET_VALIDATION_MAX_ISSUES + 3)), encoding="utf-8")
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(dataset))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.INVALID)
+            self.assertEqual(view._validation_issue_model.rowCount(), DATASET_VALIDATION_MAX_ISSUES)
+            self.assertIn("truncated", view.validation_issue_summary_label.text().lower())
+            self.assertEqual(
+                view._validation_issue_model.data(
+                    view._validation_issue_model.index(DATASET_VALIDATION_MAX_ISSUES - 1, 2)
+                ),
+                str(DATASET_VALIDATION_MAX_ISSUES),
+            )
+        finally:
+            view.close()
+
+    def test_pair_validation_displays_matches_and_actual_declared_values(self) -> None:
+        dataset, manifest = self._standalone_dataset()
+        view = self._validation_view()
+        try:
+            self._select_validation_mode(view, DatasetValidationMode.PAIR)
+            view.validation_dataset_edit.setText(str(dataset))
+            view.validation_manifest_edit.setText(str(manifest))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertEqual(view.validation_status_label.text(), "Valid dataset/manifest pair")
+            summary = view.validation_summary_label.text()
+            self.assertIn("Valid records: 1", summary)
+            self.assertIn("Nonblank physical lines: 1", summary)
+            self.assertIn("Pair comparison actual count: 1", summary)
+            self.assertIn("Manifest declared count: 1", summary)
+            self.assertIn("Record-count comparison: Match", summary)
+            self.assertIn("SHA-256 comparison: Match", summary)
+            self.assertIn("Schema/version compatibility: Not reported", summary)
+
+            manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_data["record_count"] = 2
+            manifest_data["sha256"] = "0" * 64
+            manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.INVALID)
+            self.assertIn("record count and SHA-256 differ", view.validation_status_label.text())
+            mismatch_summary = view.validation_summary_label.text()
+            self.assertIn("Pair comparison actual count: 1", mismatch_summary)
+            self.assertIn("Manifest declared count: 2", mismatch_summary)
+            self.assertIn("Record-count comparison: Mismatch", mismatch_summary)
+            self.assertIn("SHA-256 comparison: Mismatch", mismatch_summary)
+            self.assertEqual(view._validation_issue_model.rowCount(), 2)
+        finally:
+            view.close()
+
+    def test_pair_issue_rows_preserve_nested_then_pair_order(self) -> None:
+        dataset = self.root / "bad.jsonl"
+        dataset.write_text("{not valid json}\n", encoding="utf-8")
+        manifest = self.root / "bad.manifest.json"
+        manifest.write_text("{not valid json}", encoding="utf-8")
+        view = self._validation_view()
+        try:
+            self._select_validation_mode(view, DatasetValidationMode.PAIR)
+            view.validation_dataset_edit.setText(str(dataset))
+            view.validation_manifest_edit.setText(str(manifest))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.INVALID)
+            model = view._validation_issue_model
+            sources = [model.data(model.index(row, 0)) for row in range(model.rowCount())]
+            self.assertEqual(sources[:2], ["dataset", "manifest"])
+            self.assertEqual(sources[2:], ["pair", "pair"])
+            codes = [model.data(model.index(row, 1)) for row in range(model.rowCount())]
+            self.assertEqual(codes[:2], ["malformed_json", "malformed_json"])
+            self.assertEqual(codes[2:], ["dataset_invalid", "manifest_invalid"])
+        finally:
+            view.close()
+
+    def test_adjacent_manifest_and_clear_preserve_mode_without_writes(self) -> None:
+        dataset, manifest = self._standalone_dataset()
+        original_settings = (
+            self.context.settings.path.read_bytes()
+            if self.context.settings.path.exists()
+            else None
+        )
+        view = self._validation_view()
+        try:
+            self._select_validation_mode(view, DatasetValidationMode.PAIR)
+            view.validation_dataset_edit.setText(str(dataset))
+            view.use_adjacent_manifest_button.click()
+            self.assertEqual(Path(view.validation_manifest_edit.text()), manifest)
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.READY)
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            view.validation_clear_button.click()
+            self.assertEqual(view._validation_mode, DatasetValidationMode.PAIR)
+            self.assertEqual(view.validation_dataset_edit.text(), "")
+            self.assertEqual(view.validation_manifest_edit.text(), "")
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.EMPTY)
+            self.assertEqual(view._validation_issue_model.rowCount(), 0)
+            self.assertEqual(
+                self.context.settings.path.read_bytes()
+                if self.context.settings.path.exists()
+                else None,
+                original_settings,
+            )
+        finally:
+            view.close()
+
+    def test_missing_file_preserves_path_and_validation_exception_is_recoverable(self) -> None:
+        missing = self.root / "missing.jsonl"
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(missing))
+            view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.RECOVERABLE_FAILURE)
+            self.assertEqual(view.validation_dataset_edit.text(), str(missing))
+            self.assertIn("could not be read", view.validation_status_label.text().lower())
+            self.assertTrue(view.validation_action_button.isEnabled())
+
+            with patch.object(
+                self.context.dataset_builder,
+                "validate_dataset",
+                side_effect=RuntimeError("test failure"),
+            ):
+                view.validation_action_button.click()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.RECOVERABLE_FAILURE)
+            self.assertIn("could not be completed", view.validation_status_label.text().lower())
+            self.assertNotIn("Traceback", view.validation_summary_label.text())
+            self.assertTrue(view.validation_action_button.isEnabled())
+        finally:
+            view.close()
+
+    def test_validation_reentry_is_guarded_and_build_state_is_independent(self) -> None:
+        dataset, _manifest = self._standalone_dataset()
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(dataset))
+            original_validate = self.context.dataset_builder.validate_dataset
+
+            def reenter(path: Path):
+                view.validate_current()
+                return original_validate(path)
+
+            with patch.object(
+                self.context.dataset_builder,
+                "validate_dataset",
+                side_effect=reenter,
+            ) as validate:
+                view.validation_action_button.click()
+            self.assertEqual(validate.call_count, 1)
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            summary = view.validation_summary_label.text()
+            view.refresh_catalog_choices()
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertEqual(view.validation_summary_label.text(), summary)
+            self.assertEqual(view._state, DatasetBuilderState.CONFIGURE)
+        finally:
+            view.close()
+
+    def test_validation_open_failures_do_not_clear_result(self) -> None:
+        dataset, _manifest = self._standalone_dataset()
+        view = self._validation_view()
+        try:
+            view.validation_dataset_edit.setText(str(dataset))
+            view.validation_action_button.click()
+            self.assertTrue(view.validation_open_dataset_button.isEnabled())
+            self.assertTrue(view.validation_open_folder_button.isEnabled())
+            with patch(
+                "gui.views.dataset_builder.QDesktopServices.openUrl",
+                return_value=False,
+            ), patch("gui.views.dataset_builder.QMessageBox.warning") as warning:
+                view.validation_open_dataset_button.click()
+                view.validation_open_folder_button.click()
+            self.assertEqual(warning.call_count, 2)
+            self.assertEqual(view._validation_state, DatasetValidationGuiState.VALID)
+            self.assertIn("Valid records: 1", view.validation_summary_label.text())
+        finally:
+            view.close()
 
     def test_invalid_remembered_directory_falls_back_without_writing_settings(self) -> None:
         self.context.settings.path.parent.mkdir(parents=True, exist_ok=True)
