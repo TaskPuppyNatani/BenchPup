@@ -1,6 +1,12 @@
 """Typed presentation read models used by GUI views."""
 
-from .dashboard import DashboardDataProvider, DashboardRecentRun, DashboardSnapshot, DashboardSummary
+from .dashboard import (
+    DashboardDataProvider,
+    DashboardRecentRun,
+    DashboardSnapshot,
+    DashboardSummary,
+    DashboardVisualizationData,
+)
 from .catalog import NOT_RECORDED, display_bool, display_optional, display_timestamp, timestamp_sort_value
 from .catalog_table_model import CATALOG_RECORD_ROLE, CATALOG_ROW_ROLE, CatalogTableModel, CatalogTableRow
 from .run_table_model import ROW_ROLE, RUN_ID_ROLE, TABLE_HEADERS, RunTableModel
@@ -14,6 +20,7 @@ __all__ = (
     "DashboardRecentRun",
     "DashboardSnapshot",
     "DashboardSummary",
+    "DashboardVisualizationData",
     "NOT_RECORDED",
     "CATALOG_RECORD_ROLE",
     "CATALOG_ROW_ROLE",
