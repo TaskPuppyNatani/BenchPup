@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from engine.domain import BenchmarkRun, BenchmarkSession, ModelProfile, ReviewScore, ScoreboardEntry
+from engine.statistics import StatisticsOverview
 from gui.context import GuiApplicationContext
 from gui.views.dashboard import DashboardView
 
@@ -41,11 +42,14 @@ class GuiDashboardTests(unittest.TestCase):
         created_at: str,
         speed: float | None,
         score: float | None,
+        with_review: bool = True,
+        hardware: dict[str, object] | None = None,
     ) -> int:
         run = BenchmarkRun(
             raw_model_output="output",
             model_snapshot={"model_name": model, "tokens_per_second": speed},
             benchmark_snapshot={"name": benchmark, "benchmark_type": "code_review"},
+            hardware_snapshot=hardware if hardware is not None else {},
             created_at=created_at,
         )
         review = (
@@ -55,7 +59,7 @@ class GuiDashboardTests(unittest.TestCase):
                 hallucination_level="Low",
                 reliability_level="High",
             )
-            if score is not None
+            if with_review
             else None
         )
         saved, _ = self.context.benchmarks.save_run(run, review)
@@ -101,10 +105,15 @@ class GuiDashboardTests(unittest.TestCase):
         view = DashboardView(self.context)
         self.assertEqual(view.summary_cards["benchmark_run_count"].value_label.text(), "3")
         self.assertEqual(view.summary_cards["scored_run_count"].value_label.text(), "2")
-        self.assertEqual(view.summary_cards["model_count"].value_label.text(), "1")
-        self.assertEqual(view.summary_cards["session_count"].value_label.text(), "1")
+        self.assertEqual(view.summary_cards["unscored_run_count"].value_label.text(), "1")
+        self.assertEqual(view.summary_cards["model_count"].value_label.text(), "3")
+        self.assertEqual(view.summary_cards["benchmark_count"].value_label.text(), "3")
+        self.assertEqual(view.summary_cards["session_count"].value_label.text(), "0")
+        self.assertEqual(view.summary_cards["hardware_count"].value_label.text(), "Unavailable")
         self.assertEqual(view.summary_cards["scoreboard_entry_count"].value_label.text(), "1")
         self.assertEqual(view.summary_cards["average_overall_score"].value_label.text(), "3.25 / 5")
+        self.assertEqual(view.summary_cards["median_overall_score"].value_label.text(), "3.25 / 5")
+        self.assertEqual(view.summary_cards["review_availability"].value_label.text(), "3 / 3 reviewed")
         self.assertEqual(view.table_model.data(view.table_model.index(0, 1), Qt.ItemDataRole.DisplayRole), "Newest")
         self.assertEqual(view.table_model.data(view.table_model.index(1, 1), Qt.ItemDataRole.DisplayRole), "Unscored")
         self.assertTrue(view.empty_state.isHidden())
@@ -132,6 +141,46 @@ class GuiDashboardTests(unittest.TestCase):
         self.assertEqual(no_score, "Unavailable")
         self.assertNotIn("0", str(no_speed))
         self.assertNotIn("0.00", str(no_score))
+        view.deleteLater()
+
+    def test_scoreboard_only_state_is_distinct_from_missing_scoreboard_data(self) -> None:
+        self.context.catalog.scoreboard_entries.create(ScoreboardEntry(model_name="Scoreboard model", score=4.0))
+        view = DashboardView(self.context)
+        self.assertEqual(view.summary_cards["benchmark_run_count"].value_label.text(), "0")
+        self.assertEqual(view.summary_cards["scoreboard_entry_count"].value_label.text(), "1")
+        self.assertIn("Scoreboard entries are available separately", view.empty_state.text())
+        self.assertEqual(view.summary_cards["average_overall_score"].value_label.text(), "Unavailable")
+        view.deleteLater()
+
+    def test_missing_review_and_hardware_values_are_not_presented_as_real_metrics(self) -> None:
+        self.make_run(
+            model="No review",
+            benchmark="Benchmark A",
+            created_at="2026-07-12T12:00:00+00:00",
+            speed=None,
+            score=None,
+            with_review=False,
+        )
+        view = DashboardView(self.context)
+        self.assertEqual(view.summary_cards["review_availability"].value_label.text(), "Unavailable")
+        self.assertEqual(view.summary_cards["hardware_count"].value_label.text(), "Unavailable")
+        view.deleteLater()
+
+    def test_provider_exposes_immutable_statistics_overview(self) -> None:
+        self.make_run(
+            model="Typed",
+            benchmark="Typed benchmark",
+            created_at="2026-07-12T12:00:00+00:00",
+            speed=100.0,
+            score=4.0,
+            hardware={"name": "Typed rig"},
+        )
+        view = DashboardView(self.context)
+        snapshot = view.provider.load()
+        self.assertIsInstance(snapshot.statistics, StatisticsOverview)
+        assert snapshot.statistics is not None
+        self.assertEqual(snapshot.statistics.benchmark_runs.total_eligible_runs, 1)
+        self.assertEqual(snapshot.statistics.benchmark_runs.known_hardware_environment_count, 1)
         view.deleteLater()
 
     def test_refresh_rereads_and_does_not_write_or_mutate_source_records(self) -> None:

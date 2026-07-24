@@ -344,6 +344,10 @@ class BenchmarkRunStatisticsSummary:
     benchmark_type: CategoricalDistribution = field(default_factory=CategoricalDistribution)
     created_at_min: str | None = None
     created_at_max: str | None = None
+    reviewed_runs: int = 0
+    unreviewed_runs: int = 0
+    known_hardware_environment_count: int = 0
+    missing_hardware_count: int = 0
 
     @property
     def total_runs(self) -> int:
@@ -380,6 +384,14 @@ class BenchmarkRunStatisticsSummary:
     @property
     def latest_created_at(self) -> str | None:
         return self.created_at_max
+
+    @property
+    def review_count(self) -> int:
+        return self.reviewed_runs
+
+    @property
+    def known_hardware_count(self) -> int:
+        return self.known_hardware_environment_count
 
 
 @dataclass(frozen=True)
@@ -432,6 +444,121 @@ class ScoreboardStatisticsSummary:
     @property
     def latest_imported_at(self) -> str | None:
         return self.imported_at_max
+
+
+@dataclass(frozen=True)
+class ReviewStatisticsSummary:
+    """Typed summaries for the fields stored on ``ReviewScore`` records."""
+
+    total_reviews: int = 0
+    accuracy_score: NumericSummary = field(default_factory=NumericSummary)
+    depth_score: NumericSummary = field(default_factory=NumericSummary)
+    signal_noise_score: NumericSummary = field(default_factory=NumericSummary)
+    actionability_score: NumericSummary = field(default_factory=NumericSummary)
+    seniority_score: NumericSummary = field(default_factory=NumericSummary)
+    overall_score: NumericSummary = field(default_factory=NumericSummary)
+    hallucination: CategoricalDistribution = field(default_factory=CategoricalDistribution)
+    reliability: CategoricalDistribution = field(default_factory=CategoricalDistribution)
+
+    @property
+    def review_count(self) -> int:
+        return self.total_reviews
+
+    @property
+    def accuracy(self) -> NumericSummary:
+        return self.accuracy_score
+
+    @property
+    def depth(self) -> NumericSummary:
+        return self.depth_score
+
+    @property
+    def signal_to_noise_score(self) -> NumericSummary:
+        return self.signal_noise_score
+
+    @property
+    def signal_to_noise(self) -> NumericSummary:
+        return self.signal_noise_score
+
+    @property
+    def actionability(self) -> NumericSummary:
+        return self.actionability_score
+
+    @property
+    def seniority(self) -> NumericSummary:
+        return self.seniority_score
+
+    @property
+    def score_summary(self) -> NumericSummary:
+        return self.overall_score
+
+    @property
+    def hallucination_distribution(self) -> CategoricalDistribution:
+        return self.hallucination
+
+    @property
+    def reliability_distribution(self) -> CategoricalDistribution:
+        return self.reliability
+
+
+@dataclass(frozen=True)
+class StatisticsAvailability:
+    """Engine-owned availability flags for optional analytical values."""
+
+    benchmark_runs: bool = False
+    scoreboard_entries: bool = False
+    benchmark_reviews: bool = False
+    benchmark_scores: bool = False
+    benchmark_speed: bool = False
+    benchmark_hardware: bool = False
+    scoreboard_scores: bool = False
+    scoreboard_speed: bool = False
+
+    @property
+    def has_benchmark_runs(self) -> bool:
+        return self.benchmark_runs
+
+    @property
+    def has_scoreboard_entries(self) -> bool:
+        return self.scoreboard_entries
+
+    @property
+    def has_reviews(self) -> bool:
+        return self.benchmark_reviews
+
+    @property
+    def has_benchmark_score(self) -> bool:
+        return self.benchmark_scores
+
+    @property
+    def has_benchmark_speed(self) -> bool:
+        return self.benchmark_speed
+
+    @property
+    def has_hardware(self) -> bool:
+        return self.benchmark_hardware
+
+
+@dataclass(frozen=True)
+class StatisticsOverview:
+    """One immutable, source-separated statistics result for consumers."""
+
+    benchmark_runs: BenchmarkRunStatisticsSummary = field(default_factory=BenchmarkRunStatisticsSummary)
+    scoreboard_entries: ScoreboardStatisticsSummary = field(default_factory=ScoreboardStatisticsSummary)
+    reviews: ReviewStatisticsSummary = field(default_factory=ReviewStatisticsSummary)
+    availability: StatisticsAvailability = field(default_factory=StatisticsAvailability)
+
+    @property
+    def benchmark_summary(self) -> BenchmarkRunStatisticsSummary:
+        return self.benchmark_runs
+
+    @property
+    def scoreboard_summary(self) -> ScoreboardStatisticsSummary:
+        return self.scoreboard_entries
+
+    @property
+    def review_summary(self) -> ReviewStatisticsSummary:
+        return self.reviews
 
 
 @dataclass(frozen=True)
@@ -746,6 +873,20 @@ def _unique_count(values: Iterable[Any]) -> int:
     return len({identity for identity in (_canonical_identity(value) for value in values) if identity is not None})
 
 
+def _snapshot_value_is_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, Mapping):
+        return any(_snapshot_value_is_present(item) for item in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_snapshot_value_is_present(item) for item in value)
+    return bool(str(value).strip())
+
+
+def _hardware_snapshot_is_known(snapshot: Mapping[str, Any]) -> bool:
+    return _snapshot_value_is_present(snapshot)
+
+
 def _timestamp_bounds(values: Iterable[TimestampValue]) -> tuple[str | None, str | None]:
     parsed = sorted(
         timestamp
@@ -777,7 +918,13 @@ def _benchmark_summary(aggregates: Sequence[Any]) -> BenchmarkRunStatisticsSumma
     reliability = [aggregate.score.reliability_level if aggregate.score else None for aggregate in records]
     types = [_benchmark_type(aggregate.run) for aggregate in records]
     created = [aggregate.run.created_at for aggregate in records]
-    hardware_keys = [_benchmark_hardware_key(aggregate.run.hardware_snapshot) for aggregate in records]
+    hardware_snapshots = [aggregate.run.hardware_snapshot for aggregate in records]
+    hardware_keys = [_benchmark_hardware_key(snapshot) for snapshot in hardware_snapshots]
+    known_hardware_keys = [
+        _benchmark_hardware_key(snapshot)
+        for snapshot in hardware_snapshots
+        if _hardware_snapshot_is_known(snapshot)
+    ]
     session_keys = [
         aggregate.run.session_id
         if aggregate.run.session_id is not None
@@ -786,6 +933,7 @@ def _benchmark_summary(aggregates: Sequence[Any]) -> BenchmarkRunStatisticsSumma
     ]
     minimum, maximum = _timestamp_bounds(created)
     score_summary = numeric_summary(overall, total_count=len(records))
+    reviewed_runs = sum(aggregate.score is not None for aggregate in records)
     return BenchmarkRunStatisticsSummary(
         total_eligible_runs=len(records),
         scored_runs=score_summary.available_count,
@@ -801,6 +949,10 @@ def _benchmark_summary(aggregates: Sequence[Any]) -> BenchmarkRunStatisticsSumma
         benchmark_type=categorical_distribution(types, total_count=len(records)),
         created_at_min=minimum,
         created_at_max=maximum,
+        reviewed_runs=reviewed_runs,
+        unreviewed_runs=len(records) - reviewed_runs,
+        known_hardware_environment_count=_unique_count(known_hardware_keys),
+        missing_hardware_count=len(records) - len(known_hardware_keys),
     )
 
 
@@ -831,6 +983,45 @@ def _scoreboard_summary(aggregates: Sequence[Any]) -> ScoreboardStatisticsSummar
         reliability=categorical_distribution(reliability, total_count=len(records)),
         imported_at_min=minimum,
         imported_at_max=maximum,
+    )
+
+
+def _review_summary(aggregates: Sequence[Any]) -> ReviewStatisticsSummary:
+    from .reporting import BenchmarkRunAggregate
+
+    reviews = tuple(
+        aggregate.score
+        for aggregate in aggregates
+        if isinstance(aggregate, BenchmarkRunAggregate) and aggregate.score is not None
+    )
+    total = len(reviews)
+    return ReviewStatisticsSummary(
+        total_reviews=total,
+        accuracy_score=numeric_summary((review.accuracy_score for review in reviews), total_count=total),
+        depth_score=numeric_summary((review.depth_score for review in reviews), total_count=total),
+        signal_noise_score=numeric_summary((review.signal_noise_score for review in reviews), total_count=total),
+        actionability_score=numeric_summary((review.actionability_score for review in reviews), total_count=total),
+        seniority_score=numeric_summary((review.seniority_score for review in reviews), total_count=total),
+        overall_score=numeric_summary((review.overall_score for review in reviews), total_count=total),
+        hallucination=categorical_distribution((review.hallucination_level for review in reviews), total_count=total),
+        reliability=categorical_distribution((review.reliability_level for review in reviews), total_count=total),
+    )
+
+
+def _statistics_availability(
+    benchmark: BenchmarkRunStatisticsSummary,
+    scoreboard: ScoreboardStatisticsSummary,
+    reviews: ReviewStatisticsSummary,
+) -> StatisticsAvailability:
+    return StatisticsAvailability(
+        benchmark_runs=benchmark.total_eligible_runs > 0,
+        scoreboard_entries=scoreboard.total_eligible_entries > 0,
+        benchmark_reviews=reviews.total_reviews > 0,
+        benchmark_scores=benchmark.overall_score.available_count > 0,
+        benchmark_speed=benchmark.tokens_per_second.available_count > 0,
+        benchmark_hardware=benchmark.known_hardware_environment_count > 0,
+        scoreboard_scores=scoreboard.score.available_count > 0,
+        scoreboard_speed=scoreboard.tokens_per_second.available_count > 0,
     )
 
 
@@ -1009,6 +1200,58 @@ class StatisticsService:
     ) -> ScoreboardStatisticsSummary:
         return _scoreboard_summary(self.select_scoreboard_entries(entries, batches=batches, filters=filters))
 
+    def statistics_overview(
+        self,
+        runs: Sequence[Any] | None = None,
+        entries: Sequence[Any] | None = None,
+        *,
+        batches: Sequence[Any] | None = None,
+        benchmark_filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters(),
+        scoreboard_filters: ScoreboardStatisticsFilters = ScoreboardStatisticsFilters(),
+    ) -> StatisticsOverview:
+        """Return one read-only result covering both source families.
+
+        BenchmarkRun and ScoreboardEntry records are selected independently so
+        neither source can contribute values to the other's summaries.  Each
+        family is selected once and all derived values are calculated from the
+        resulting typed aggregates.
+        """
+
+        selected_runs = self.select_benchmark_runs(runs, filters=benchmark_filters)
+        selected_entries = self.select_scoreboard_entries(
+            entries,
+            batches=batches,
+            filters=scoreboard_filters,
+        )
+        benchmark = _benchmark_summary(selected_runs)
+        scoreboard = _scoreboard_summary(selected_entries)
+        reviews = _review_summary(selected_runs)
+        return StatisticsOverview(
+            benchmark_runs=benchmark,
+            scoreboard_entries=scoreboard,
+            reviews=reviews,
+            availability=_statistics_availability(benchmark, scoreboard, reviews),
+        )
+
+    def overview(
+        self,
+        runs: Sequence[Any] | None = None,
+        entries: Sequence[Any] | None = None,
+        *,
+        batches: Sequence[Any] | None = None,
+        benchmark_filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters(),
+        scoreboard_filters: ScoreboardStatisticsFilters = ScoreboardStatisticsFilters(),
+    ) -> StatisticsOverview:
+        """Compatibility-friendly shorthand for :meth:`statistics_overview`."""
+
+        return self.statistics_overview(
+            runs,
+            entries,
+            batches=batches,
+            benchmark_filters=benchmark_filters,
+            scoreboard_filters=scoreboard_filters,
+        )
+
     def summarize_benchmark_runs(self, runs: Sequence[Any] | None = None, *, filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters()) -> BenchmarkRunStatisticsSummary:
         return self.benchmark_run_statistics(runs, filters=filters)
 
@@ -1149,12 +1392,15 @@ __all__ = (
     "BenchmarkStatisticsSummary",
     "CategoricalDistribution",
     "NumericSummary",
+    "ReviewStatisticsSummary",
     "ScoreboardGroupBy",
     "ScoreboardStatisticsFilters",
     "ScoreboardStatisticsGroup",
     "ScoreboardStatisticsSummary",
     "ScoreboardStatistics",
     "ScoreboardEntryStatisticsFilters",
+    "StatisticsAvailability",
+    "StatisticsOverview",
     "StatisticsService",
     "TimeBucketGranularity",
     "TimeBucketResult",

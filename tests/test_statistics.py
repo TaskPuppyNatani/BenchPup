@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from engine import NumericSummary, StatisticsService
+from engine import NumericSummary, StatisticsOverview, StatisticsService
 from engine.database import EngineDatabase
 from engine.domain import BenchmarkRun, BenchmarkSession, ReviewScore, ScoreboardEntry, ScoreboardImportBatch
 from engine.reporting import (
@@ -63,6 +63,11 @@ class StatisticsTests(unittest.TestCase):
         speed: float | None = 100.0,
         hallucination: str = "Low",
         reliability: str = "High",
+        accuracy: float | None = None,
+        depth: float | None = None,
+        signal_noise: float | None = None,
+        actionability: float | None = None,
+        seniority: float | None = None,
         created_at: str = "2026-07-10T12:00:00+00:00",
         is_deleted: bool = False,
     ) -> BenchmarkRunAggregate:
@@ -85,8 +90,13 @@ class StatisticsTests(unittest.TestCase):
             ReviewScore(
                 run_id=run_id,
                 overall_score=score,
+                accuracy_score=accuracy,
                 hallucination_level=hallucination,
                 reliability_level=reliability,
+                depth_score=depth,
+                signal_noise_score=signal_noise,
+                actionability_score=actionability,
+                seniority_score=seniority,
             )
             if with_review
             else None
@@ -310,6 +320,88 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual(summary.total_runs, 1)
         self.assertEqual(summary.unique_hardware_environment_count, 1)
         self.assertEqual(historical.run.__dict__, source_before)
+
+    def test_summary_tracks_review_and_known_hardware_availability(self) -> None:
+        records = self.benchmark_records()
+        records.append(
+            self.make_run(
+                run_id=5,
+                model_name="No hardware",
+                hardware={},
+                with_review=False,
+                created_at="2026-07-14T12:00:00+00:00",
+            )
+        )
+        summary = self.statistics.benchmark_run_statistics(records)
+
+        self.assertEqual((summary.reviewed_runs, summary.unreviewed_runs), (3, 1))
+        self.assertEqual(summary.known_hardware_environment_count, 2)
+        self.assertEqual(summary.missing_hardware_count, 1)
+
+    def test_statistics_overview_is_typed_source_separated_and_read_only(self) -> None:
+        records = self.benchmark_records()
+        rated = self.make_run(
+            run_id=20,
+            model_name="Rated",
+            score=4.5,
+            accuracy=4.0,
+            depth=3.5,
+            signal_noise=4.0,
+            actionability=4.5,
+            seniority=3.0,
+            hardware={"name": "Rated rig"},
+        )
+        records.append(rated)
+        entries, batches = self.scoreboard_records()
+        runs_before = copy.deepcopy([aggregate.run.__dict__ for aggregate in records])
+        entries_before = copy.deepcopy([aggregate.entry.__dict__ for aggregate in entries])
+
+        overview = self.statistics.statistics_overview(records, entries, batches=batches)
+
+        self.assertIsInstance(overview, StatisticsOverview)
+        self.assertEqual(overview.benchmark_runs.total_eligible_runs, 4)
+        self.assertEqual(overview.scoreboard_entries.total_eligible_entries, 2)
+        self.assertEqual(overview.reviews.total_reviews, 4)
+        self.assertEqual(overview.reviews.accuracy_score.mean, 4.0)
+        self.assertEqual(overview.reviews.depth_score.mean, 3.5)
+        self.assertEqual(overview.reviews.signal_noise_score.mean, 4.0)
+        self.assertEqual(overview.reviews.actionability_score.mean, 4.5)
+        self.assertEqual(overview.reviews.seniority_score.mean, 3.0)
+        self.assertTrue(overview.availability.benchmark_runs)
+        self.assertTrue(overview.availability.scoreboard_entries)
+        self.assertTrue(overview.availability.benchmark_reviews)
+        self.assertTrue(overview.availability.benchmark_hardware)
+        self.assertEqual([aggregate.run.__dict__ for aggregate in records], runs_before)
+        self.assertEqual([aggregate.entry.__dict__ for aggregate in entries], entries_before)
+
+    def test_empty_statistics_overview_marks_optional_metrics_unavailable(self) -> None:
+        overview = self.statistics.statistics_overview()
+
+        self.assertEqual(overview.benchmark_runs.total_eligible_runs, 0)
+        self.assertEqual(overview.scoreboard_entries.total_eligible_entries, 0)
+        self.assertEqual(overview.reviews.total_reviews, 0)
+        self.assertFalse(overview.availability.benchmark_runs)
+        self.assertFalse(overview.availability.scoreboard_entries)
+        self.assertFalse(overview.availability.benchmark_scores)
+        self.assertFalse(overview.availability.benchmark_hardware)
+
+    def test_database_statistics_overview_is_read_only(self) -> None:
+        saved, _ = self.service.save_run(
+            BenchmarkRun(
+                raw_model_output="persisted output",
+                model_snapshot={"model_name": "Persisted"},
+                benchmark_snapshot={"name": "Persisted benchmark"},
+            )
+        )
+        runs_before = copy.deepcopy(self.service.runs.list())
+        reviews_before = copy.deepcopy(self.service.scores.list())
+
+        overview = self.statistics.statistics_overview()
+
+        self.assertEqual(overview.benchmark_runs.total_eligible_runs, 1)
+        self.assertEqual(self.service.runs.list(), runs_before)
+        self.assertEqual(self.service.scores.list(), reviews_before)
+        self.assertEqual(self.service.runs.get(saved.id), runs_before[0])
 
     def test_benchmark_grouping_is_separate_and_deterministic(self) -> None:
         records = self.benchmark_records()

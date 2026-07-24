@@ -50,6 +50,18 @@ def _format_speed(value: Any) -> str:
     return str(value)
 
 
+def _format_review_availability(reviewed: int, total: int) -> str:
+    if total <= 0 or reviewed <= 0:
+        return "Unavailable"
+    return f"{reviewed} / {total} reviewed"
+
+
+def _format_known_count(value: int, *, has_records: bool) -> str:
+    if not has_records:
+        return "0"
+    return str(value) if value > 0 else "Unavailable"
+
+
 class DashboardTableModel(QAbstractTableModel):
     """Small immutable-source table adapter with no write actions."""
 
@@ -181,10 +193,15 @@ class DashboardView(QWidget):
         self.summary_cards: dict[str, SummaryCard] = {
             "benchmark_run_count": SummaryCard("Benchmark runs"),
             "scored_run_count": SummaryCard("Scored runs"),
+            "unscored_run_count": SummaryCard("Unscored runs"),
             "model_count": SummaryCard("Models"),
+            "benchmark_count": SummaryCard("Benchmarks covered"),
             "session_count": SummaryCard("Sessions"),
+            "hardware_count": SummaryCard("Hardware environments"),
             "scoreboard_entry_count": SummaryCard("Scoreboard entries"),
             "average_overall_score": SummaryCard("Average overall score"),
+            "median_overall_score": SummaryCard("Median overall score"),
+            "review_availability": SummaryCard("Review availability"),
         }
         cards = QGridLayout()
         cards.setHorizontalSpacing(12)
@@ -259,11 +276,31 @@ class DashboardView(QWidget):
         summary = snapshot.summary
         self.summary_cards["benchmark_run_count"].set_value(str(summary.benchmark_run_count))
         self.summary_cards["scored_run_count"].set_value(str(summary.scored_run_count))
-        self.summary_cards["model_count"].set_value(str(summary.model_count))
+        self.summary_cards["unscored_run_count"].set_value(str(summary.unscored_run_count))
+        self.summary_cards["model_count"].set_value(
+            _format_known_count(summary.model_count, has_records=summary.benchmark_run_count > 0)
+        )
+        self.summary_cards["benchmark_count"].set_value(
+            _format_known_count(summary.benchmark_count, has_records=summary.benchmark_run_count > 0)
+        )
         self.summary_cards["session_count"].set_value(str(summary.session_count))
+        self.summary_cards["hardware_count"].set_value(
+            _format_known_count(summary.known_hardware_count, has_records=summary.benchmark_run_count > 0)
+        )
         self.summary_cards["scoreboard_entry_count"].set_value(str(summary.scoreboard_entry_count))
         self.summary_cards["average_overall_score"].set_value(_format_score(summary.average_overall_score))
+        self.summary_cards["median_overall_score"].set_value(_format_score(summary.median_overall_score))
+        self.summary_cards["review_availability"].set_value(
+            _format_review_availability(summary.reviewed_run_count, summary.benchmark_run_count)
+        )
         self.table_model.set_rows(snapshot.recent_runs)
         has_runs = summary.benchmark_run_count > 0
-        self.empty_state.setText("No benchmark runs have been recorded yet." if not has_runs else "")
+        if has_runs:
+            self.empty_state.setText("")
+        elif summary.scoreboard_entry_count > 0:
+            self.empty_state.setText(
+                "No benchmark runs have been recorded yet. Scoreboard entries are available separately."
+            )
+        else:
+            self.empty_state.setText("No benchmark runs have been recorded yet.")
         self.empty_state.setVisible(not has_runs)

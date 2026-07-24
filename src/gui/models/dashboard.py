@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 from ..context import GuiApplicationContext
 
 try:
-    from ...engine.statistics import parse_utc_timestamp
+    from ...engine.statistics import (
+        ReviewStatisticsSummary,
+        StatisticsAvailability,
+        StatisticsOverview,
+        parse_utc_timestamp,
+    )
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
-    from engine.statistics import parse_utc_timestamp  # type: ignore[no-redef]
+    from engine.statistics import (  # type: ignore[no-redef]
+        ReviewStatisticsSummary,
+        StatisticsAvailability,
+        StatisticsOverview,
+        parse_utc_timestamp,
+    )
 
 
 @dataclass(frozen=True)
@@ -22,6 +32,13 @@ class DashboardSummary:
     session_count: int
     scoreboard_entry_count: int
     average_overall_score: float | None
+    unscored_run_count: int = 0
+    benchmark_count: int = 0
+    known_hardware_count: int = 0
+    median_overall_score: float | None = None
+    reviewed_run_count: int = 0
+    review_summary: ReviewStatisticsSummary = field(default_factory=ReviewStatisticsSummary)
+    availability: StatisticsAvailability = field(default_factory=StatisticsAvailability)
 
 
 @dataclass(frozen=True)
@@ -38,6 +55,7 @@ class DashboardRecentRun:
 class DashboardSnapshot:
     summary: DashboardSummary
     recent_runs: tuple[DashboardRecentRun, ...]
+    statistics: StatisticsOverview | None = None
 
 
 def _snapshot_label(snapshot: dict[str, Any], *keys: str, default: str) -> str:
@@ -63,7 +81,9 @@ class DashboardDataProvider:
 
     def load(self) -> DashboardSnapshot:
         aggregates = self.context.statistics.select_benchmark_runs()
-        summary = self.context.statistics.benchmark_run_statistics(aggregates)
+        overview = self.context.statistics.statistics_overview(runs=aggregates)
+        summary = overview.benchmark_runs
+        scoreboard = overview.scoreboard_entries
         recent = tuple(
             DashboardRecentRun(
                 run_id=aggregate.run.id,
@@ -85,10 +105,18 @@ class DashboardDataProvider:
             summary=DashboardSummary(
                 benchmark_run_count=summary.total_eligible_runs,
                 scored_run_count=summary.scored_runs,
-                model_count=len(self.context.catalog.list_model_profiles()),
-                session_count=len(self.context.catalog.list_sessions()),
-                scoreboard_entry_count=len(self.context.catalog.scoreboard_entries.list()),
+                model_count=summary.unique_model_count,
+                session_count=summary.unique_session_count,
+                scoreboard_entry_count=scoreboard.total_eligible_entries,
                 average_overall_score=summary.overall_score.mean,
+                unscored_run_count=summary.unscored_runs,
+                benchmark_count=summary.unique_benchmark_count,
+                known_hardware_count=summary.known_hardware_environment_count,
+                median_overall_score=summary.overall_score.median,
+                reviewed_run_count=summary.reviewed_runs,
+                review_summary=overview.reviews,
+                availability=overview.availability,
             ),
             recent_runs=recent,
+            statistics=overview,
         )
