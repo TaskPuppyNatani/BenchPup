@@ -32,6 +32,7 @@ from .views.prompt_templates import PromptTemplatesView
 from .views.runs import RunsView
 from .views.sessions import SessionsView
 from .dialogs.standard_export import StandardExportDialog
+from .dialogs.backup_restore import BackupRestoreDialog
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +54,7 @@ class MainWindow(QMainWindow):
         self.page_indices: dict[str, int] = {}
         self._active_add_run: AddRunWizard | None = None
         self._active_export: StandardExportDialog | None = None
+        self._active_backup_restore: BackupRestoreDialog | None = None
         self._build_shell()
         self.navigation.page_changed.connect(self._show_page)
         self.navigation.set_current_page("dashboard")
@@ -119,6 +121,7 @@ class MainWindow(QMainWindow):
             if isinstance(page, ExportsView):
                 page.export_requested.connect(self.open_export)
                 page.dataset_builder_requested.connect(self.open_dataset_builder)
+                page.backup_restore_requested.connect(self.open_backup_restore)
             if isinstance(page, CatalogPage):
                 page.catalog_changed.connect(self._handle_catalog_changed)
                 page.status_message.connect(lambda message: self.status_bar.showMessage(message, 6000))
@@ -220,6 +223,23 @@ class MainWindow(QMainWindow):
             self._active_export.reject()
         self.navigate_to("dataset_builder")
 
+    def open_backup_restore(self) -> None:
+        """Open the one shared backup and restore workflow from Reports & Exports."""
+
+        if self._active_backup_restore is not None:
+            self._active_backup_restore.raise_()
+            self._active_backup_restore.activateWindow()
+            return
+        dialog = BackupRestoreDialog(self.context, self)
+        dialog.backup_succeeded.connect(self._handle_backup_succeeded)
+        dialog.restore_succeeded.connect(self._handle_archive_restore_succeeded)
+        self._active_backup_restore = dialog
+        try:
+            dialog.exec()
+        finally:
+            self._active_backup_restore = None
+            dialog.deleteLater()
+
     def _handle_catalog_changed(self, _entity: str) -> None:
         """Keep catalog-dependent pages and an open Add Run wizard current."""
 
@@ -258,6 +278,32 @@ class MainWindow(QMainWindow):
     def _handle_export_succeeded(self, path: str) -> None:
         self.exports.show_success(path)
         self.status_bar.showMessage(f"Export completed successfully: {path}", 6000)
+
+    def _handle_backup_succeeded(self, path: str) -> None:
+        self.exports.show_backup_success(path)
+        self.status_bar.showMessage(f"Backup completed successfully: {path}", 6000)
+
+    def _handle_archive_restore_succeeded(self, action: str) -> None:
+        """Refresh loaded views only after the archive engine reports success."""
+
+        if self._active_add_run is not None:
+            self._active_add_run.refresh_catalog_choices()
+        self.dataset_builder.refresh_catalog_choices()
+        if self.dashboard.has_loaded:
+            self.dashboard.refresh()
+        if self.runs.has_loaded:
+            self.runs.refresh()
+        for page in (
+            self.sessions,
+            self.models,
+            self.benchmarks,
+            self.prompt_templates,
+            self.hardware_profiles,
+        ):
+            if page.has_loaded:
+                page.refresh()
+        label = "merged into" if action == "merge" else "replaced"
+        self.status_bar.showMessage(f"Archive successfully {label} the current database.", 6000)
 
     @property
     def dashboard(self) -> DashboardView:

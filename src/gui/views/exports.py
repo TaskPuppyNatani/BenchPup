@@ -13,6 +13,7 @@ class ExportsView(QWidget):
 
     export_requested = Signal()
     dataset_builder_requested = Signal()
+    backup_restore_requested = Signal()
 
     def __init__(self, context: GuiApplicationContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -56,6 +57,19 @@ class ExportsView(QWidget):
         self.dataset_builder_button.clicked.connect(self.open_dataset_builder)
         dataset_layout.addWidget(self.dataset_builder_button)
 
+        backup_restore_group = QGroupBox("Backup & Restore")
+        backup_restore_layout = QVBoxLayout(backup_restore_group)
+        backup_restore_description = QLabel(
+            "Create an atomic archive or review, merge, and replace from a validated BenchPup archive."
+        )
+        backup_restore_description.setWordWrap(True)
+        backup_restore_layout.addWidget(backup_restore_description)
+        self.backup_restore_button = QPushButton("Open Backup & Restore")
+        self.backup_restore_button.setObjectName("openBackupRestoreButton")
+        self.backup_restore_button.setAccessibleName("Open Backup and Restore workflow")
+        self.backup_restore_button.clicked.connect(self.open_backup_restore)
+        backup_restore_layout.addWidget(self.backup_restore_button)
+
         out_of_scope_label = QLabel(
             "Comparison and Trend exports are out of scope for this phase."
         )
@@ -72,6 +86,7 @@ class ExportsView(QWidget):
         layout.addWidget(description)
         layout.addWidget(standard_group)
         layout.addWidget(dataset_group)
+        layout.addWidget(backup_restore_group)
         layout.addWidget(out_of_scope_label)
         layout.addWidget(self.status_label)
         layout.addStretch(1)
@@ -82,8 +97,14 @@ class ExportsView(QWidget):
     def open_dataset_builder(self, _checked: bool = False) -> None:
         self.dataset_builder_requested.emit()
 
+    def open_backup_restore(self, _checked: bool = False) -> None:
+        self.backup_restore_requested.emit()
+
     def show_success(self, path: str) -> None:
         self.status_label.setText(f"Export completed successfully: {path}")
+
+    def show_backup_success(self, path: str) -> None:
+        self.status_label.setText(f"Backup completed successfully: {path}")
 
 
 __all__ = ("ExportsView",)

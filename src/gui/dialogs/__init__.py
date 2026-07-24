@@ -10,6 +10,7 @@ from .prompt_template_editor import PromptTemplateEditorDialog
 from .review_editor import ReviewEditorDialog
 from .session_editor import SessionEditorDialog
 from .standard_export import StandardExportDialog
+from .backup_restore import BackupRestoreDialog
 
 __all__ = (
     "BackendVersionsEditor",
@@ -24,4 +25,5 @@ __all__ = (
     "ReviewEditorDialog",
     "SessionEditorDialog",
     "StandardExportDialog",
+    "BackupRestoreDialog",
 )

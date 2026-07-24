@@ -9,6 +9,7 @@ from typing import Callable
 
 try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH.
     from ..engine import (
+        ArchiveService,
         BenchmarkService,
         CatalogService,
         ComparisonService,
@@ -25,6 +26,7 @@ try:  # Support both ``python -m src.gui`` and test imports with ``src`` on PATH
     from ..engine.settings import DefaultWorkingDirectorySettings
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine import (  # type: ignore[no-redef]
+        ArchiveService,
         BenchmarkService,
         CatalogService,
         ComparisonService,
@@ -118,6 +120,7 @@ class GuiApplicationContext:
 
     paths: GuiPaths
     database: EngineDatabase
+    archives: ArchiveService
     catalog: CatalogService
     benchmarks: BenchmarkService
     reporting: ReportingService
@@ -150,6 +153,7 @@ class GuiApplicationContext:
         active_logger = logger or logger_factory(paths.log_path)
         database = EngineDatabase(paths.database_path)
         database.migrate()
+        archives = ArchiveService(database)
         catalog = CatalogService(database)
         benchmarks = BenchmarkService(database, catalog)
         reporting = ReportingService(benchmarks, catalog)
@@ -173,6 +177,7 @@ class GuiApplicationContext:
         return cls(
             paths=paths,
             database=database,
+            archives=archives,
             catalog=catalog,
             benchmarks=benchmarks,
             reporting=reporting,
