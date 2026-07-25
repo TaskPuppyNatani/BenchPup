@@ -374,6 +374,40 @@ class StatisticsTests(unittest.TestCase):
         self.assertEqual([aggregate.run.__dict__ for aggregate in records], runs_before)
         self.assertEqual([aggregate.entry.__dict__ for aggregate in entries], entries_before)
 
+    def test_public_review_statistics_helper_uses_authoritative_review_summary(self) -> None:
+        records = [
+            self.make_run(
+                run_id=30,
+                accuracy=4.0,
+                depth=3.0,
+                signal_noise=5.0,
+                actionability=4.0,
+                seniority=2.0,
+            ),
+            self.make_run(
+                run_id=31,
+                accuracy=None,
+                depth=None,
+                signal_noise=None,
+                actionability=None,
+                seniority=None,
+                with_review=False,
+            ),
+        ]
+        before = copy.deepcopy([aggregate.run.__dict__ for aggregate in records])
+
+        summary = self.statistics.review_statistics(records)
+
+        self.assertEqual(summary.total_reviews, 1)
+        self.assertEqual(summary.accuracy.mean, 4.0)
+        self.assertEqual(summary.depth.mean, 3.0)
+        self.assertEqual(summary.signal_to_noise.mean, 5.0)
+        self.assertEqual(summary.actionability.mean, 4.0)
+        self.assertEqual(summary.seniority.mean, 2.0)
+        self.assertEqual(self.statistics.review_summary(records), summary)
+        self.assertEqual(self.statistics.summarize_reviews(records), summary)
+        self.assertEqual([aggregate.run.__dict__ for aggregate in records], before)
+
     def test_empty_statistics_overview_marks_optional_metrics_unavailable(self) -> None:
         overview = self.statistics.statistics_overview()
 

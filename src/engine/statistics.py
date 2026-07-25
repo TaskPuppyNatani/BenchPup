@@ -1191,6 +1191,42 @@ class StatisticsService:
     ) -> BenchmarkRunStatisticsSummary:
         return _benchmark_summary(self.select_benchmark_runs(runs, filters=filters))
 
+    def review_statistics(
+        self,
+        runs: Sequence[Any] | None = None,
+        *,
+        filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters(),
+    ) -> ReviewStatisticsSummary:
+        """Return typed review summaries for the selected BenchmarkRun records.
+
+        ``runs`` may already contain the aggregate records selected by another
+        engine service.  In that case selection remains in-memory, while the
+        review calculation continues to use the same authoritative helper as
+        :meth:`statistics_overview`.
+        """
+
+        return _review_summary(self.select_benchmark_runs(runs, filters=filters))
+
+    def review_summary(
+        self,
+        runs: Sequence[Any] | None = None,
+        *,
+        filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters(),
+    ) -> ReviewStatisticsSummary:
+        """Compatibility-friendly alias for :meth:`review_statistics`."""
+
+        return self.review_statistics(runs, filters=filters)
+
+    def summarize_reviews(
+        self,
+        runs: Sequence[Any] | None = None,
+        *,
+        filters: BenchmarkStatisticsFilters = BenchmarkStatisticsFilters(),
+    ) -> ReviewStatisticsSummary:
+        """Return the review summary using the descriptive-statistics API."""
+
+        return self.review_statistics(runs, filters=filters)
+
     def scoreboard_statistics(
         self,
         entries: Sequence[Any] | None = None,
