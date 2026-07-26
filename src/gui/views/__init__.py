@@ -2,6 +2,7 @@
 
 from .add_run import AddRunWizard, OptionalScoreField
 from .dashboard import DashboardTableModel, DashboardView
+from .comparisons import ComparisonsView
 from .dataset_builder import (
     DatasetBuilderState,
     DatasetBuilderView,
@@ -20,6 +21,7 @@ __all__ = (
     "AddRunWizard",
     "DashboardTableModel",
     "DashboardView",
+    "ComparisonsView",
     "DatasetBuilderState",
     "DatasetBuilderView",
     "DatasetValidationGuiState",

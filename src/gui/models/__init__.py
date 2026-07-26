@@ -14,6 +14,14 @@ from .runs import UNAVAILABLE, RunBrowserRow, RunsDataProvider
 from .import_table_model import ImportTableModel
 from .dataset_preview_model import DATASET_PREVIEW_HEADERS, DatasetPreviewTableModel
 from .validation_issue_model import VALIDATION_ISSUE_HEADERS, ValidationIssueTableModel
+from .comparison_table_model import (
+    SUBJECT_ROW_ROLE,
+    TABLE_ROW_ROLE,
+    ComparisonSubjectRow,
+    ComparisonSubjectTableModel,
+    ComparisonTableModel,
+    ComparisonTableRow,
+)
 
 __all__ = (
     "DashboardDataProvider",
@@ -42,4 +50,10 @@ __all__ = (
     "display_timestamp",
     "timestamp_sort_value",
     "UNAVAILABLE",
+    "SUBJECT_ROW_ROLE",
+    "TABLE_ROW_ROLE",
+    "ComparisonSubjectRow",
+    "ComparisonSubjectTableModel",
+    "ComparisonTableModel",
+    "ComparisonTableRow",
 )

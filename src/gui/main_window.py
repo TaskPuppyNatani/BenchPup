@@ -22,6 +22,7 @@ from .views.add_run import AddRunWizard
 from .views.benchmarks import BenchmarksView
 from .views.catalog_page import CatalogPage
 from .views.dashboard import DashboardView
+from .views.comparisons import ComparisonsView
 from .views.dataset_builder import DatasetBuilderView
 from .views.exports import ExportsView
 from .views.hardware_profiles import HardwareProfilesView
@@ -111,6 +112,8 @@ class MainWindow(QMainWindow):
                 if destination.key == "reports"
                 else DatasetBuilderView(self.context)
                 if destination.key == "dataset_builder"
+                else ComparisonsView(self.context)
+                if destination.key == "comparisons"
                 else PlaceholderPage(destination.label, destination.description)
             )
             if isinstance(page, RunsView):
@@ -176,6 +179,8 @@ class MainWindow(QMainWindow):
         if key == "dashboard" and isinstance(page, DashboardView) and not page.has_loaded:
             page.refresh()
         if key == "runs" and isinstance(page, RunsView) and not page.has_loaded:
+            page.refresh()
+        if key == "comparisons" and isinstance(page, ComparisonsView) and not page.has_loaded:
             page.refresh()
         if key in {"sessions", "models", "benchmarks", "prompt_templates", "hardware_profiles"} and isinstance(page, CatalogPage) and not page.has_loaded:
             page.refresh()
@@ -363,6 +368,12 @@ class MainWindow(QMainWindow):
     def dataset_builder(self) -> DatasetBuilderView:
         page = self.pages["dataset_builder"]
         assert isinstance(page, DatasetBuilderView)
+        return page
+
+    @property
+    def comparisons(self) -> ComparisonsView:
+        page = self.pages["comparisons"]
+        assert isinstance(page, ComparisonsView)
         return page
 
     def closeEvent(self, event: object) -> None:

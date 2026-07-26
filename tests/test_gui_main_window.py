@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QApplication, QLabel
 from gui.context import GuiApplicationContext
 from gui.main_window import MainWindow
 from gui.navigation import NAVIGATION_DESTINATIONS
+from gui.views.comparisons import ComparisonsView
 
 
 class GuiMainWindowTests(unittest.TestCase):
@@ -72,6 +73,18 @@ class GuiMainWindowTests(unittest.TestCase):
             self.window.dashboard.recent_table.model().headerData(0, Qt.Orientation.Horizontal),
             "Recorded",
         )
+
+    def test_comparisons_destination_is_a_reused_real_page_and_refreshes_on_activation(self) -> None:
+        self.assertIsInstance(self.window.pages["comparisons"], ComparisonsView)
+        self.assertFalse(self.window.comparisons.has_loaded)
+
+        self.window.navigate_to("comparisons")
+
+        self.assertTrue(self.window.comparisons.has_loaded)
+        page = self.window.pages["comparisons"]
+        self.window.navigate_to("dashboard")
+        self.window.navigate_to("comparisons")
+        self.assertIs(self.window.pages["comparisons"], page)
 
     def test_close_closes_shared_context_cleanly(self) -> None:
         self.window.close()
