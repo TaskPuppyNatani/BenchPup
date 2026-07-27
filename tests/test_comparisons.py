@@ -12,10 +12,13 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 import engine
 from engine import ComparisonService, ReportingService
 from engine.comparisons import (
+    BenchmarkComparisonRequest,
     BenchmarkModelComparisonRequest,
+    BenchmarkComparisonResult,
     ComparisonEntitySummary,
     ComparisonResultState,
     ComparisonSourceFamily,
+    ComparisonType,
     ComparisonWarning,
     ComparisonWarningCode,
     ModelComparisonResult,
@@ -23,9 +26,11 @@ from engine.comparisons import (
     ScoreboardModelComparisonRequest,
     ScoreboardModelComparisonResult,
     SessionComparisonResult,
+    _benchmark_snapshot_fallback_identity,
 )
 from engine.database import EngineDatabase
 from engine.domain import (
+    BenchmarkDefinition,
     BenchmarkRun,
     BenchmarkSession,
     ReviewScore,
@@ -40,7 +45,8 @@ from engine.statistics import BenchmarkStatisticsFilters, ScoreboardStatisticsFi
 class ComparisonServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        database = EngineDatabase(Path(self.directory.name) / "comparisons.db")
+        self.database_path = Path(self.directory.name) / "comparisons.db"
+        database = EngineDatabase(self.database_path)
         database.migrate()
         self.catalog = CatalogService(database)
         self.service = BenchmarkService(database, self.catalog)
@@ -59,8 +65,11 @@ class ComparisonServiceTests(unittest.TestCase):
         session: BenchmarkSession | None,
         score: float | None,
         speed: float | None,
+        benchmark_definition_id: int | None = None,
+        benchmark_snapshot: dict[str, object] | None = None,
         hallucination: str = "Low",
         reliability: str = "High",
+        complete_review: bool = False,
         deleted: bool = False,
         created_at: str = "2026-07-10T12:00:00+00:00",
     ) -> BenchmarkRunAggregate:
@@ -68,19 +77,46 @@ class ComparisonServiceTests(unittest.TestCase):
             id=run_id,
             raw_model_output="private output that must not be rendered",
             session_id=session.id if session else None,
+            benchmark_definition_id=benchmark_definition_id,
             model_snapshot={"model_name": model, "tokens_per_second": speed},
-            benchmark_snapshot={"name": benchmark, "benchmark_type": "code_review"},
+            benchmark_snapshot=(
+                {"name": benchmark, "benchmark_type": "code_review"}
+                if benchmark_snapshot is None
+                else benchmark_snapshot
+            ),
             hardware_snapshot={"name": "Rig A", "cpu": "CPU A"},
             created_at=created_at,
             is_deleted=deleted,
         )
         review = ReviewScore(
             run_id=run_id,
+            accuracy_score=4.0 if complete_review else None,
             overall_score=score,
+            depth_score=4.0 if complete_review else None,
+            signal_noise_score=4.0 if complete_review else None,
+            actionability_score=4.0 if complete_review else None,
+            seniority_score=4.0 if complete_review else None,
             hallucination_level=hallucination,
             reliability_level=reliability,
         )
         return BenchmarkRunAggregate(run, review, session)
+
+    def make_definition(
+        self,
+        name: str,
+        file_path: str,
+        *,
+        benchmark_type: str = "code_review",
+        is_active: bool = True,
+    ) -> BenchmarkDefinition:
+        return self.catalog.create_benchmark_definition(
+            BenchmarkDefinition(
+                name=name,
+                file_path=file_path,
+                benchmark_type=benchmark_type,
+                is_active=is_active,
+            )
+        )
 
     def model_runs(self) -> tuple[BenchmarkRunAggregate, ...]:
         first = BenchmarkSession("First", id=1)
@@ -1152,6 +1188,1123 @@ class ComparisonServiceTests(unittest.TestCase):
             content = destination.read_bytes()
             self.assertFalse(content.startswith(b"\xef\xbb\xbf"))
             self.assertIn("# Model Comparison", content.decode("utf-8"))
+
+    def test_benchmark_discovery_uses_definition_ids_and_snapshot_fallbacks(self) -> None:
+        money = self.make_definition("Money", "benchmarks/money.py")
+        empty = self.make_definition("Empty", "benchmarks/empty.py", is_active=False)
+        session = BenchmarkSession("Discovery", id=501)
+        runs = (
+            self.make_run(
+                501,
+                model="Alpha",
+                benchmark="old-money-label",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=money.id,
+                benchmark_snapshot={
+                    "name": "old-money-label",
+                    "file_path": "benchmarks/money.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+            self.make_run(
+                502,
+                model="Legacy",
+                benchmark="legacy",
+                session=session,
+                score=3.0,
+                speed=80.0,
+                benchmark_snapshot={
+                    "name": "legacy",
+                    "file_path": "legacy/legacy.py",
+                    "benchmark_type": "revision",
+                },
+            ),
+            self.make_run(
+                503,
+                model="Unknown",
+                benchmark="",
+                session=session,
+                score=2.0,
+                speed=70.0,
+                benchmark_snapshot={},
+            ),
+        )
+
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        repeated = self.comparisons.discover_benchmark_subjects(runs)
+
+        self.assertEqual(discovery, repeated)
+        definition_subject = next(
+            subject for subject in discovery if subject.benchmark_reference and subject.benchmark_reference.definition_id == money.id
+        )
+        empty_subject = next(
+            subject for subject in discovery if subject.benchmark_reference and subject.benchmark_reference.definition_id == empty.id
+        )
+        legacy_subject = next(subject for subject in discovery if subject.status == "legacy")
+        self.assertEqual(definition_subject.identity, f"definition:{money.id}")
+        self.assertTrue(definition_subject.selectable)
+        self.assertEqual(definition_subject.record_count, 1)
+        self.assertFalse(empty_subject.selectable)
+        self.assertEqual(empty_subject.record_count, 0)
+        self.assertIn("inactive", empty_subject.status)
+        self.assertTrue(legacy_subject.identity.startswith("snapshot:"))
+        self.assertEqual(len(legacy_subject.identity.split(":", 1)[1]), 64)
+        self.assertIn(
+            ComparisonWarningCode.MISSING_SUBJECT_IDENTITY,
+            {warning.code for warning in discovery.warnings},
+        )
+
+    def test_benchmark_comparison_contracts_are_public_engine_exports(self) -> None:
+        self.assertIs(engine.BenchmarkSubjectRef, engine.comparisons.BenchmarkSubjectRef)
+        self.assertIs(engine.BenchmarkComparisonRequest, BenchmarkComparisonRequest)
+        self.assertIs(engine.BenchmarkComparisonResult, BenchmarkComparisonResult)
+
+    def test_benchmark_definition_rename_preserves_subject_identity(self) -> None:
+        definition = self.make_definition("Original", "benchmarks/original.py")
+        run = self.make_run(
+            510,
+            model="Alpha",
+            benchmark="Original",
+            session=BenchmarkSession("Rename", id=510),
+            score=4.0,
+            speed=100.0,
+            benchmark_definition_id=definition.id,
+        )
+
+        renamed = replace(definition, name="Renamed")
+        self.catalog.update_benchmark_definition(renamed)
+        subject = next(
+            subject
+            for subject in self.comparisons.discover_benchmark_subjects((run,))
+            if subject.benchmark_reference and subject.benchmark_reference.definition_id == definition.id
+        )
+
+        self.assertEqual(subject.identity, f"definition:{definition.id}")
+        self.assertEqual(subject.label, "Renamed")
+
+    def test_benchmark_raw_identity_requests_resolve_and_preserve_labels(self) -> None:
+        definition = self.make_definition("Catalog benchmark", "benchmarks/catalog.py")
+        session = BenchmarkSession("Identity labels", id=515)
+        legacy_run = self.make_run(
+            515,
+            model="Legacy",
+            benchmark="Historical benchmark",
+            session=session,
+            score=3.0,
+            speed=80.0,
+            benchmark_snapshot={
+                "name": "Historical benchmark",
+                "file_path": "legacy/historical.py",
+                "benchmark_type": "revision",
+            },
+        )
+        definition_run = self.make_run(
+            516,
+            model="Catalog",
+            benchmark="Historical catalog label",
+            session=session,
+            score=4.0,
+            speed=90.0,
+            benchmark_definition_id=definition.id,
+            benchmark_snapshot={
+                "name": "Historical catalog label",
+                "file_path": "benchmarks/catalog.py",
+                "benchmark_type": "code_review",
+            },
+        )
+        legacy_ref = next(
+            subject.benchmark_reference
+            for subject in self.comparisons.discover_benchmark_subjects((legacy_run,))
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.identity.startswith("snapshot:")
+        )
+
+        result = self.comparisons.compare_benchmarks(
+            (f"definition:{definition.id}", legacy_ref.identity),
+            (definition_run, legacy_run),
+        )
+
+        self.assertEqual(
+            [entity.label for entity in result.entities],
+            ["Catalog benchmark", "Historical benchmark"],
+        )
+        self.assertEqual(
+            list(result.metadata.selected_entities),
+            ["Catalog benchmark", "Historical benchmark"],
+        )
+
+        caller_labeled = replace(result.selected_benchmarks[0], label="Caller label")
+        labeled_result = self.comparisons.compare_benchmarks(
+            (caller_labeled, legacy_ref),
+            (definition_run, legacy_run),
+        )
+        self.assertEqual(labeled_result.entities[0].label, "Caller label")
+        self.assertTrue(all(entity.label.strip() for entity in labeled_result.entities))
+
+    def test_benchmark_duplicate_legacy_labels_same_path_different_types_are_unique(self) -> None:
+        session = BenchmarkSession("Legacy label collisions", id=516)
+        runs = (
+            self.make_run(
+                516,
+                model="Alpha",
+                benchmark="same.py",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_snapshot={
+                    "name": "same.py",
+                    "file_path": "shared/same.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+            self.make_run(
+                517,
+                model="Alpha",
+                benchmark="same.py",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_snapshot={
+                    "name": "same.py",
+                    "file_path": "shared/same.py",
+                    "benchmark_type": "revision",
+                },
+            ),
+        )
+
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        reversed_discovery = self.comparisons.discover_benchmark_subjects(tuple(reversed(runs)))
+        subjects = tuple(subject for subject in discovery if subject.identity.startswith("snapshot:"))
+        reversed_subjects = tuple(
+            subject for subject in reversed_discovery if subject.identity.startswith("snapshot:")
+        )
+        self.assertEqual(len(subjects), 2)
+        self.assertEqual(
+            {subject.identity: subject.label for subject in subjects},
+            {subject.identity: subject.label for subject in reversed_subjects},
+        )
+        self.assertEqual(len({subject.label.casefold() for subject in subjects}), 2)
+
+        references = tuple(subject.benchmark_reference for subject in subjects)
+        self.assertTrue(all(reference is not None for reference in references))
+        result = self.comparisons.compare_benchmarks(
+            tuple(reference.identity for reference in references if reference is not None),
+            runs,
+        )
+        self.assertEqual(
+            len({entity.label.casefold() for entity in result.entities}),
+            2,
+        )
+        self.assertEqual(
+            tuple(entity.label for entity in result.entities),
+            result.metadata.selected_entities,
+        )
+        self.assertEqual(
+            tuple(entity.identity for entity in result.entities),
+            tuple(reference.identity for reference in references if reference is not None),
+        )
+
+    def test_benchmark_duplicate_definition_labels_same_path_and_type_are_unique(self) -> None:
+        session = BenchmarkSession("Definition label collisions", id=518)
+        runs = (
+            self.make_run(
+                518,
+                model="Alpha",
+                benchmark="Duplicate benchmark",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=6001,
+                benchmark_snapshot={
+                    "name": "Duplicate benchmark",
+                    "file_path": "shared/benchmark.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+            self.make_run(
+                519,
+                model="Alpha",
+                benchmark="Duplicate benchmark",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=6002,
+                benchmark_snapshot={
+                    "name": "Duplicate benchmark",
+                    "file_path": "shared/benchmark.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+        )
+
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        reversed_discovery = self.comparisons.discover_benchmark_subjects(tuple(reversed(runs)))
+        labels = {
+            subject.benchmark_reference.definition_id: subject.label
+            for subject in discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id in {6001, 6002}
+        }
+        reversed_labels = {
+            subject.benchmark_reference.definition_id: subject.label
+            for subject in reversed_discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id in {6001, 6002}
+        }
+        self.assertEqual(set(labels), {6001, 6002})
+        self.assertEqual(len({label.casefold() for label in labels.values()}), 2)
+        self.assertEqual(labels, reversed_labels)
+
+    def test_benchmark_duplicate_definition_labels_are_unique_on_public_compare_path(self) -> None:
+        session = BenchmarkSession("Definition comparison collisions", id=5181)
+        runs = (
+            self.make_run(
+                5181,
+                model="Alpha",
+                benchmark="Duplicate benchmark",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=6001,
+                benchmark_snapshot={
+                    "name": "Duplicate benchmark",
+                    "file_path": "shared/benchmark.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+            self.make_run(
+                5182,
+                model="Alpha",
+                benchmark="Duplicate benchmark",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=6002,
+                benchmark_snapshot={
+                    "name": "Duplicate benchmark",
+                    "file_path": "shared/benchmark.py",
+                    "benchmark_type": "code_review",
+                },
+            ),
+        )
+        request = BenchmarkComparisonRequest(
+            ("definition:6002", "definition:6001"),
+            generated_at="fixed",
+        )
+        request_before = request.selected_benchmarks
+
+        result = self.comparisons.compare_benchmarks(request, runs)
+        reversed_result = self.comparisons.compare_benchmarks(request, tuple(reversed(runs)))
+        labels = tuple(entity.label for entity in result.entities)
+
+        self.assertEqual(
+            tuple(entity.identity for entity in result.entities),
+            ("definition:6002", "definition:6001"),
+        )
+        self.assertEqual(len({label.casefold() for label in labels}), 2)
+        self.assertEqual(result.metadata.selected_entities, labels)
+        self.assertEqual(result.metadata.selected_entities, reversed_result.metadata.selected_entities)
+        self.assertEqual(labels, tuple(entity.label for entity in reversed_result.entities))
+        for definition_id, label in zip((6002, 6001), labels):
+            self.assertIn(f"definition:{definition_id}", label)
+
+        self.assertEqual(request.selected_benchmarks, request_before)
+        self.assertTrue(all(not subject.label for subject in request.selected_benchmarks))
+
+        caller_labels = ("Caller first", "Caller second")
+        labeled_request = BenchmarkComparisonRequest(
+            tuple(
+                replace(subject, label=label)
+                for subject, label in zip(request.selected_benchmarks, caller_labels)
+            ),
+            generated_at="fixed",
+        )
+        labeled_request_before = labeled_request.selected_benchmarks
+        labeled_result = self.comparisons.compare_benchmarks(labeled_request, runs)
+
+        self.assertEqual(labeled_request.selected_benchmarks, labeled_request_before)
+        self.assertEqual(
+            tuple(entity.label for entity in labeled_result.entities),
+            caller_labels,
+        )
+
+    def test_benchmark_selected_duplicate_caller_labels_are_disambiguated(self) -> None:
+        first = self.make_definition("First benchmark", "first/benchmark.py")
+        second = self.make_definition("Second benchmark", "second/benchmark.py")
+        session = BenchmarkSession("Caller labels", id=519)
+        runs = (
+            self.make_run(
+                520,
+                model="Alpha",
+                benchmark="First benchmark",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=first.id,
+            ),
+            self.make_run(
+                521,
+                model="Alpha",
+                benchmark="Second benchmark",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=second.id,
+            ),
+        )
+        refs = {
+            subject.benchmark_reference.definition_id: subject.benchmark_reference
+            for subject in self.comparisons.discover_benchmark_subjects(runs)
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id in {first.id, second.id}
+        }
+        first_ref = replace(refs[first.id], label="Same caller label")
+        second_ref = replace(refs[second.id], label="Same caller label")
+        request = BenchmarkComparisonRequest((first_ref, second_ref), generated_at="fixed")
+
+        result = self.comparisons.compare_benchmarks(request, runs)
+
+        self.assertEqual(
+            [subject.label for subject in request.selected_benchmarks],
+            ["Same caller label", "Same caller label"],
+        )
+        self.assertEqual(len({entity.label.casefold() for entity in result.entities}), 2)
+        self.assertEqual(result.entities[0].identity, first_ref.identity)
+        self.assertEqual(result.metadata.selected_entities, tuple(entity.label for entity in result.entities))
+
+    def test_benchmark_catalog_snapshot_mismatch_preserves_historical_metadata(self) -> None:
+        definition = self.make_definition(
+            "Current name",
+            "current/benchmark.py",
+            benchmark_type="revision",
+        )
+        run = self.make_run(
+            517,
+            model="Alpha",
+            benchmark="Historical name",
+            session=BenchmarkSession("Mismatch", id=517),
+            score=4.0,
+            speed=100.0,
+            benchmark_definition_id=definition.id,
+            benchmark_snapshot={
+                "name": "Historical name",
+                "file_path": "legacy/benchmark.py",
+                "benchmark_type": "code_review",
+            },
+        )
+        snapshots_before = copy.deepcopy(run.run.benchmark_snapshot)
+
+        subject = next(
+            subject
+            for subject in self.comparisons.discover_benchmark_subjects((run,))
+            if subject.benchmark_reference is not None
+        )
+        reference = subject.benchmark_reference
+        assert reference is not None
+        self.assertEqual(reference.identity, f"definition:{definition.id}")
+        self.assertEqual(reference.label, "Current name")
+        self.assertEqual(
+            dict(reference.snapshot_metadata),
+            {
+                "name": "Historical name",
+                "file_path": "legacy/benchmark.py",
+                "benchmark_type": "code_review",
+            },
+        )
+        self.assertEqual(
+            reference.snapshot_mismatch_fields,
+            ("name", "file_path", "benchmark_type"),
+        )
+        mismatch_warnings = [
+            warning
+            for warning in subject.warnings
+            if warning.code is ComparisonWarningCode.BENCHMARK_SNAPSHOT_CATALOG_MISMATCH
+        ]
+        self.assertEqual(len(mismatch_warnings), 1)
+        self.assertEqual(mismatch_warnings[0].subject_identity, reference.identity)
+        self.assertEqual(mismatch_warnings[0].category, "name,file_path,benchmark_type")
+
+        matching_run = replace(
+            run,
+            run=replace(
+                run.run,
+                benchmark_snapshot={
+                    "name": "Current name",
+                    "file_path": "current\\benchmark.py",
+                    "benchmark_type": "REVISION",
+                },
+            ),
+        )
+        matching_variant_run = replace(
+            matching_run,
+            run=replace(
+                matching_run.run,
+                benchmark_snapshot={
+                    "name": " Current  name ",
+                    "file_path": "current//./benchmark.py",
+                    "benchmark_type": "revision",
+                },
+            ),
+        )
+        matching_subject = next(
+            subject
+            for subject in self.comparisons.discover_benchmark_subjects(
+                (matching_run, matching_variant_run)
+            )
+            if subject.benchmark_reference is not None
+        )
+        self.assertNotIn(
+            ComparisonWarningCode.BENCHMARK_SNAPSHOT_CATALOG_MISMATCH,
+            {warning.code for warning in matching_subject.warnings},
+        )
+        self.assertEqual(run.run.benchmark_snapshot, snapshots_before)
+
+    def test_benchmark_mixed_matching_and_differing_snapshot_variants_are_retained(self) -> None:
+        definition = self.make_definition(
+            "Current benchmark",
+            "current/benchmark.py",
+            benchmark_type="code_review",
+        )
+        session = BenchmarkSession("Mixed snapshot variants", id=5170)
+        matching_snapshot = {
+            "name": " Current  benchmark ",
+            "file_path": "current/benchmark.py",
+            "benchmark_type": "CODE_REVIEW",
+        }
+        differing_snapshot = {
+            "name": "Historical benchmark",
+            "file_path": "legacy/benchmark.py",
+            "benchmark_type": "revision",
+        }
+        runs = (
+            self.make_run(
+                5170,
+                model="Alpha",
+                benchmark="Current benchmark",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=definition.id,
+                benchmark_snapshot=matching_snapshot,
+            ),
+            self.make_run(
+                5171,
+                model="Alpha",
+                benchmark="Historical benchmark",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=definition.id,
+                benchmark_snapshot=differing_snapshot,
+            ),
+        )
+        snapshots_before = copy.deepcopy([run.run.benchmark_snapshot for run in runs])
+
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        reversed_discovery = self.comparisons.discover_benchmark_subjects(tuple(reversed(runs)))
+        reference = next(
+            subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id == definition.id
+        )
+        reversed_reference = next(
+            subject.benchmark_reference
+            for subject in reversed_discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id == definition.id
+        )
+
+        self.assertEqual(reference, reversed_reference)
+        self.assertEqual(reference.identity, f"definition:{definition.id}")
+        self.assertEqual(
+            [dict(variant) for variant in reference.historical_snapshot_variants],
+            [
+                {
+                    "name": "Current benchmark",
+                    "file_path": "current/benchmark.py",
+                    "benchmark_type": "CODE_REVIEW",
+                },
+                {
+                    "name": "Historical benchmark",
+                    "file_path": "legacy/benchmark.py",
+                    "benchmark_type": "revision",
+                },
+            ],
+        )
+        mismatch_warnings = [
+            warning
+            for warning in next(
+                subject for subject in discovery if subject.identity == reference.identity
+            ).warnings
+            if warning.code is ComparisonWarningCode.BENCHMARK_SNAPSHOT_CATALOG_MISMATCH
+        ]
+        self.assertEqual(len(mismatch_warnings), 1)
+        self.assertEqual(mismatch_warnings[0].category, "name,file_path,benchmark_type")
+        self.assertEqual(
+            [run.run.benchmark_snapshot for run in runs],
+            snapshots_before,
+        )
+
+    def test_benchmark_comparison_reports_model_filter_provenance_only_for_benchmark(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        session = BenchmarkSession("Model provenance", id=530)
+        runs = (
+            self.make_run(
+                530,
+                model="Alpha",
+                benchmark="First",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=first.id,
+            ),
+            self.make_run(
+                531,
+                model="Beta",
+                benchmark="First",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=first.id,
+            ),
+            self.make_run(
+                532,
+                model="Alpha",
+                benchmark="Second",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=second.id,
+            ),
+            self.make_run(
+                533,
+                model="Beta",
+                benchmark="Second",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=second.id,
+            ),
+        )
+        refs = {
+            subject.label: subject.benchmark_reference
+            for subject in self.comparisons.discover_benchmark_subjects(runs)
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id in {first.id, second.id}
+        }
+        filters = BenchmarkStatisticsFilters(model="Alpha", hardware="Rig A")
+        request = BenchmarkComparisonRequest((refs["First"], refs["Second"]), filters=filters)
+
+        result = self.comparisons.compare_benchmarks(request, runs)
+
+        self.assertEqual([entity.record_count for entity in result.entities], [1, 1])
+        self.assertEqual(result.filters.model, "Alpha")
+        self.assertEqual(result.metadata.active_filters["model"], "Alpha")
+        self.assertEqual(tuple(result.metadata.active_filters), ("model", "hardware"))
+        self.assertEqual(filters, BenchmarkStatisticsFilters(model="Alpha", hardware="Rig A"))
+        self.assertNotIn(
+            "model",
+            self.comparisons.compare_models(
+                ("Alpha", "Beta"),
+                runs,
+                filters=filters,
+            ).metadata.active_filters,
+        )
+        self.assertNotIn(
+            "model",
+            self.comparisons.compare_sessions(
+                (session,),
+                runs,
+                filters=filters,
+            ).metadata.active_filters,
+        )
+        self.assertNotIn(
+            "model",
+            self.comparisons.compare_benchmarks(
+                (refs["First"], refs["Second"]),
+                runs,
+            ).metadata.active_filters,
+        )
+
+    def test_benchmark_historical_snapshot_variants_are_order_independent(self) -> None:
+        definition = self.make_definition(
+            "Current benchmark",
+            "current/benchmark.py",
+            benchmark_type="code_review",
+        )
+        companion = self.make_definition(
+            "Companion benchmark",
+            "companion/benchmark.py",
+            benchmark_type="revision",
+        )
+        session = BenchmarkSession("Historical variants", id=5171)
+        snapshots = (
+            {
+                "name": "Historical A",
+                "file_path": "benchmarks/a.py",
+                "benchmark_type": "code_review",
+            },
+            {
+                "name": " Historical A ",
+                "file_path": r"benchmarks\a.py",
+                "benchmark_type": "CODE_REVIEW",
+            },
+            {
+                "name": "Historical B",
+                "file_path": "benchmarks/b.py",
+                "benchmark_type": "revision",
+            },
+            {
+                "name": "Historical C",
+                "file_path": "benchmarks/c.py",
+                "benchmark_type": "security",
+            },
+        )
+        runs = tuple(
+            self.make_run(
+                5172 + index,
+                model="Shared",
+                benchmark=snapshot["name"],
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_definition_id=definition.id,
+                benchmark_snapshot=snapshot,
+                complete_review=True,
+            )
+            for index, snapshot in enumerate(snapshots)
+        ) + (
+            self.make_run(
+                5176,
+                model="Shared",
+                benchmark="Companion benchmark",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_definition_id=companion.id,
+                complete_review=True,
+            ),
+        )
+
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        reversed_discovery = self.comparisons.discover_benchmark_subjects(tuple(reversed(runs)))
+        reference = next(
+            subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id == definition.id
+        )
+        reversed_reference = next(
+            subject.benchmark_reference
+            for subject in reversed_discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id == definition.id
+        )
+
+        self.assertEqual(reference, reversed_reference)
+        self.assertEqual(
+            [variant["name"] for variant in reference.historical_snapshot_variants],
+            ["Historical A", "Historical B", "Historical C"],
+        )
+        self.assertEqual(
+            [variant["file_path"] for variant in reference.historical_snapshot_variants[1:]],
+            ["benchmarks/b.py", "benchmarks/c.py"],
+        )
+        self.assertEqual(
+            [variant["benchmark_type"] for variant in reference.historical_snapshot_variants[1:]],
+            ["revision", "security"],
+        )
+        self.assertEqual(dict(reference.snapshot_metadata), dict(reference.historical_snapshot_variants[0]))
+        self.assertEqual(reference.identity, f"definition:{definition.id}")
+        self.assertEqual(reference.snapshot_mismatch_fields, ("name", "file_path", "benchmark_type"))
+        forward_subject = next(
+            subject for subject in discovery if subject.identity == reference.identity
+        )
+        mismatch_warnings = [
+            warning
+            for warning in forward_subject.warnings
+            if warning.code is ComparisonWarningCode.BENCHMARK_SNAPSHOT_CATALOG_MISMATCH
+        ]
+        self.assertEqual(len(mismatch_warnings), 1)
+        self.assertEqual(mismatch_warnings[0].category, "name,file_path,benchmark_type")
+        reverse_subject = next(
+            subject for subject in reversed_discovery if subject.identity == reference.identity
+        )
+        self.assertEqual(forward_subject.warnings, reverse_subject.warnings)
+        self.assertEqual(
+            [run.run.benchmark_snapshot for run in runs[: len(snapshots)]],
+            list(snapshots),
+        )
+
+        companion_reference = next(
+            subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None
+            and subject.benchmark_reference.definition_id == companion.id
+        )
+        request = BenchmarkComparisonRequest(
+            (reference, companion_reference),
+            generated_at="fixed",
+        )
+        result = self.comparisons.compare_benchmarks(request, runs)
+        reversed_result = self.comparisons.compare_benchmarks(request, tuple(reversed(runs)))
+        self.assertEqual(result, reversed_result)
+
+    def test_benchmark_mixed_availability_warnings_are_repeatable(self) -> None:
+        unavailable = self.make_definition("Unavailable", "benchmarks/unavailable.py")
+        available = self.make_definition("Available", "benchmarks/available.py")
+        run = self.make_run(
+            5177,
+            model="Alpha",
+            benchmark="Available",
+            session=BenchmarkSession("Mixed availability", id=5177),
+            score=4.0,
+            speed=100.0,
+            benchmark_definition_id=available.id,
+        )
+        request = BenchmarkComparisonRequest(
+            (f"definition:{unavailable.id}", f"definition:{available.id}"),
+            generated_at="fixed",
+        )
+
+        result = self.comparisons.compare_benchmarks(request, (run,))
+        repeated = self.comparisons.compare_benchmarks(request, (run,))
+        unavailable_warnings = [
+            warning
+            for warning in result.warnings
+            if warning.code is ComparisonWarningCode.SELECTED_SUBJECT_UNAVAILABLE
+        ]
+
+        self.assertEqual(result.state, ComparisonResultState.SELECTED_SUBJECTS_UNAVAILABLE)
+        self.assertEqual(
+            [warning.subject_identity for warning in unavailable_warnings],
+            [f"definition:{unavailable.id}"],
+        )
+        self.assertFalse(
+            any(warning.subject_identity == f"definition:{available.id}" for warning in unavailable_warnings)
+        )
+        self.assertIn(
+            ComparisonWarningCode.SUBJECT_HAS_NO_REVIEW_DATA,
+            {warning.code for warning in result.warnings},
+        )
+        self.assertEqual(result.warnings, repeated.warnings)
+        self.assertEqual(result.state, repeated.state)
+
+    def test_benchmark_snapshot_fallback_identity_uses_portable_lexical_paths(self) -> None:
+        base = {
+            "name": "Legacy benchmark",
+            "benchmark_type": "code_review",
+        }
+        equivalent_paths = (
+            "benchmarks/foo.py",
+            r"benchmarks\foo.py",
+            "benchmarks//foo.py",
+            "./benchmarks/foo.py",
+            "folder/../benchmarks/foo.py",
+        )
+        identities = {
+            _benchmark_snapshot_fallback_identity({**base, "file_path": path})
+            for path in equivalent_paths
+        }
+        self.assertEqual(len(identities), 1)
+        self.assertNotEqual(
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "Benchmarks/foo.py"}),
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "benchmarks/foo.py"}),
+        )
+        self.assertNotEqual(
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "benchmarks/foo.py"}),
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "benchmarks/bar.py"}),
+        )
+        self.assertNotEqual(
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "benchmarks/foo.py", "benchmark_type": "revision"}),
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "benchmarks/foo.py", "benchmark_type": "code_review"}),
+        )
+        self.assertIsNone(_benchmark_snapshot_fallback_identity({"name": "", "file_path": ""}))
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "missing/not-on-disk.py"}),
+            _benchmark_snapshot_fallback_identity({**base, "file_path": "missing/not-on-disk.py"}),
+        )
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": r"C:\BenchPup\benchmarks\foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "C:/BenchPup/benchmarks/foo.py"}
+            ),
+        )
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "C:/BenchPup/foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "c:/BenchPup/foo.py"}
+            ),
+        )
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "/opt/benchpup/benchmarks/foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "/opt//benchpup/./benchmarks/foo.py"}
+            ),
+        )
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "benchmarks/foo.py/"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "benchmarks/foo.py"}
+            ),
+        )
+        self.assertEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "../benchmarks/foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "../benchmarks/foo.py"}
+            ),
+        )
+        self.assertNotEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "../benchmarks/foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "../../benchmarks/foo.py"}
+            ),
+        )
+        self.assertNotEqual(
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "C:/BenchPup/foo.py"}
+            ),
+            _benchmark_snapshot_fallback_identity(
+                {**base, "file_path": "C:/benchpup/foo.py"}
+            ),
+        )
+
+    def test_benchmark_comparison_without_shared_models_is_limited(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        third = self.make_definition("Third", "benchmarks/third.py")
+        session = BenchmarkSession("Limited", id=518)
+        runs = (
+            self.make_run(518, model="Alpha", benchmark="First", session=session, score=4.0, speed=100.0, benchmark_definition_id=first.id, complete_review=True),
+            self.make_run(519, model="Beta", benchmark="Second", session=session, score=3.0, speed=90.0, benchmark_definition_id=second.id, complete_review=True),
+            self.make_run(520, model="Gamma", benchmark="Third", session=session, score=2.0, speed=80.0, benchmark_definition_id=third.id, complete_review=True),
+        )
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        refs = {
+            subject.label: subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None
+        }
+
+        result = self.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest((refs["First"], refs["Second"])),
+            runs,
+        )
+        three = self.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest((refs["First"], refs["Second"], refs["Third"])),
+            runs,
+        )
+
+        self.assertEqual(result.state, ComparisonResultState.READY_WITH_MISSING_VALUES)
+        self.assertEqual(three.state, ComparisonResultState.READY_WITH_MISSING_VALUES)
+        self.assertIsNone(result.pairwise)
+        self.assertEqual(len(result.entities), 2)
+        self.assertIn(ComparisonWarningCode.NO_SHARED_MODELS, {warning.code for warning in result.warnings})
+
+    def test_benchmark_unavailable_warnings_are_one_per_subject(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        available = self.make_definition("Available", "benchmarks/available.py")
+        run = self.make_run(
+            521,
+            model="Alpha",
+            benchmark="Available",
+            session=BenchmarkSession("Unavailable", id=521),
+            score=4.0,
+            speed=100.0,
+            benchmark_definition_id=available.id,
+        )
+
+        result = self.comparisons.compare_benchmarks(
+            (f"definition:{first.id}", f"definition:{second.id}"),
+            (run,),
+        )
+        unavailable = [
+            warning
+            for warning in result.warnings
+            if warning.code is ComparisonWarningCode.SELECTED_SUBJECT_UNAVAILABLE
+        ]
+        self.assertEqual(
+            [warning.subject_identity for warning in unavailable],
+            [f"definition:{first.id}", f"definition:{second.id}"],
+        )
+        self.assertEqual(
+            len({(warning.code, warning.subject_identity) for warning in unavailable}),
+            2,
+        )
+
+    def test_duplicate_legacy_labels_remain_distinct_and_disambiguated(self) -> None:
+        session = BenchmarkSession("Duplicates", id=520)
+        runs = (
+            self.make_run(
+                521,
+                model="Alpha",
+                benchmark="same.py",
+                session=session,
+                score=4.0,
+                speed=100.0,
+                benchmark_snapshot={"name": "same.py", "file_path": "one/same.py", "benchmark_type": "code_review"},
+            ),
+            self.make_run(
+                522,
+                model="Alpha",
+                benchmark="same.py",
+                session=session,
+                score=3.0,
+                speed=90.0,
+                benchmark_snapshot={"name": "same.py", "file_path": "two/same.py", "benchmark_type": "code_review"},
+            ),
+        )
+
+        subjects = tuple(
+            subject
+            for subject in self.comparisons.discover_benchmark_subjects(runs)
+            if subject.identity.startswith("snapshot:")
+        )
+
+        self.assertEqual(len(subjects), 2)
+        self.assertNotEqual(subjects[0].identity, subjects[1].identity)
+        self.assertNotEqual(subjects[0].label, subjects[1].label)
+
+    def test_benchmark_comparison_preserves_filters_and_aggregates_all_runs(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        session = BenchmarkSession("Aligned", id=530)
+        runs = (
+            self.make_run(531, model="Alpha", benchmark="First", session=session, score=4.0, speed=100.0, benchmark_definition_id=first.id),
+            self.make_run(532, model="Alpha", benchmark="First", session=session, score=2.0, speed=80.0, benchmark_definition_id=first.id),
+            self.make_run(533, model="Beta", benchmark="First", session=session, score=5.0, speed=120.0, benchmark_definition_id=first.id),
+            self.make_run(534, model="Alpha", benchmark="Second", session=session, score=3.0, speed=90.0, benchmark_definition_id=second.id),
+            self.make_run(535, model="Gamma", benchmark="Second", session=session, score=1.0, speed=60.0, benchmark_definition_id=second.id),
+        )
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        refs = {
+            subject.label: subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None and subject.selectable
+        }
+        request = BenchmarkComparisonRequest(
+            (refs["First"], refs["Second"]),
+            filters=BenchmarkStatisticsFilters(benchmark="First"),
+            generated_at="fixed",
+        )
+
+        result = self.comparisons.compare_benchmarks(request, runs)
+
+        self.assertIsInstance(result, BenchmarkComparisonResult)
+        self.assertEqual(result.comparison_type, ComparisonType.BENCHMARK)
+        self.assertEqual([entity.record_count for entity in result.entities], [3, 2])
+        self.assertEqual(result.alignment.shared_model_identities, ("alpha",))
+        self.assertEqual(
+            result.alignment.represented_model_counts,
+            {refs["First"].identity: 2, refs["Second"].identity: 2},
+        )
+        self.assertEqual(result.filters.benchmark, "")
+        self.assertNotIn("benchmark", result.metadata.active_filters)
+        self.assertIsNotNone(result.pairwise)
+        assert result.pairwise is not None
+        score_delta = result.pairwise.metric("mean_overall_score")
+        self.assertIsNotNone(score_delta)
+        assert score_delta is not None
+        self.assertAlmostEqual(score_delta.absolute_delta or 0.0, 0.0)
+
+    def test_benchmark_pairwise_requires_shared_models_and_two_subjects(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        third = self.make_definition("Third", "benchmarks/third.py")
+        session = BenchmarkSession("Pairwise", id=540)
+        runs = (
+            self.make_run(541, model="Alpha", benchmark="First", session=session, score=4.0, speed=100.0, benchmark_definition_id=first.id),
+            self.make_run(542, model="Beta", benchmark="Second", session=session, score=3.0, speed=90.0, benchmark_definition_id=second.id),
+            self.make_run(543, model="Gamma", benchmark="Third", session=session, score=2.0, speed=80.0, benchmark_definition_id=third.id),
+        )
+        discovery = self.comparisons.discover_benchmark_subjects(runs)
+        refs = {
+            subject.label: subject.benchmark_reference
+            for subject in discovery
+            if subject.benchmark_reference is not None
+        }
+
+        no_shared = self.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest((refs["First"], refs["Second"])),
+            runs,
+        )
+        three = self.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest((refs["First"], refs["Second"], refs["Third"])),
+            runs,
+        )
+
+        self.assertIsNone(no_shared.pairwise)
+        self.assertIn(ComparisonWarningCode.NO_SHARED_MODELS, {warning.code for warning in no_shared.warnings})
+        self.assertIsNone(three.pairwise)
+        self.assertIn(
+            ComparisonWarningCode.PAIRWISE_REQUIRES_TWO_SUBJECTS,
+            {warning.code for warning in three.warnings},
+        )
+
+    def test_benchmark_request_rejects_unavailable_and_duplicate_subjects(self) -> None:
+        definition = self.make_definition("Unavailable", "benchmarks/unavailable.py")
+        discovery = self.comparisons.discover_benchmark_subjects(())
+        subject = next(
+            subject
+            for subject in discovery
+            if subject.benchmark_reference and subject.benchmark_reference.definition_id == definition.id
+        )
+        self.assertFalse(subject.selectable)
+        with self.assertRaises(ValueError):
+            BenchmarkComparisonRequest((subject.benchmark_reference, subject.benchmark_reference))
+
+        with self.assertRaises(ValueError):
+            BenchmarkComparisonRequest(("definition:1", "definition:1"))
+
+    def test_benchmark_comparison_is_read_only_and_rejects_scoreboard_records(self) -> None:
+        first = self.make_definition("First", "benchmarks/first.py")
+        second = self.make_definition("Second", "benchmarks/second.py")
+        session = BenchmarkSession("Read only", id=550)
+        runs = (
+            self.make_run(551, model="Alpha", benchmark="First", session=session, score=4.0, speed=100.0, benchmark_definition_id=first.id),
+            self.make_run(552, model="Alpha", benchmark="Second", session=session, score=3.0, speed=90.0, benchmark_definition_id=second.id),
+        )
+        refs = {
+            subject.label: subject.benchmark_reference
+            for subject in self.comparisons.discover_benchmark_subjects(runs)
+            if subject.benchmark_reference is not None
+        }
+        snapshots_before = copy.deepcopy([run.run.benchmark_snapshot for run in runs])
+        database_before = self.database_path.read_bytes()
+
+        self.comparisons.discover_benchmark_subjects(runs)
+        self.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest((refs["First"], refs["Second"])),
+            runs,
+        )
+
+        self.assertEqual([run.run.benchmark_snapshot for run in runs], snapshots_before)
+        self.assertEqual(self.database_path.read_bytes(), database_before)
+        entries, batches = self.scoreboard_entries()
+        with self.assertRaises(TypeError):
+            self.comparisons.discover_benchmark_subjects(entries)  # type: ignore[arg-type]
+        with self.assertRaises(TypeError):
+            self.comparisons.compare_benchmarks(
+                BenchmarkComparisonRequest(("definition:1", "definition:2")),
+                entries,  # type: ignore[arg-type]
+            )
 
 
 if __name__ == "__main__":
