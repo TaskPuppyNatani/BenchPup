@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from enum import Enum
 import math
@@ -48,6 +48,7 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
 
 try:
     from ...engine.comparisons import (
+        BenchmarkComparisonRequest,
         BenchmarkModelComparisonRequest,
         ComparisonResultState,
         ComparisonSubject,
@@ -61,6 +62,7 @@ try:
     from ...engine.statistics import BenchmarkStatisticsFilters, ScoreboardStatisticsFilters
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine.comparisons import (  # type: ignore[no-redef]
+        BenchmarkComparisonRequest,
         BenchmarkModelComparisonRequest,
         ComparisonResultState,
         ComparisonSubject,
@@ -82,6 +84,7 @@ class ComparisonSource(str, Enum):
 class ComparisonDimension(str, Enum):
     MODELS = "models"
     SESSIONS = "sessions"
+    BENCHMARKS = "benchmarks"
 
 
 class _FilterValidationError(ValueError):
@@ -613,6 +616,8 @@ class _Selection:
     tooltip: str
     records: int | None = None
     availability: str = "Available"
+    selectable: bool = True
+    status: str = ""
 
 
 STATE_COPY = {
@@ -707,6 +712,7 @@ class ComparisonsView(QWidget):
         self.dimension_selector.setAccessibleName("Comparison dimension")
         self.dimension_selector.addItem("Models", ComparisonDimension.MODELS.value)
         self.dimension_selector.addItem("Sessions", ComparisonDimension.SESSIONS.value)
+        self.dimension_selector.addItem("Benchmarks", ComparisonDimension.BENCHMARKS.value)
         _configure_comparison_control(self.dimension_selector)
         self.source_selector.currentIndexChanged.connect(self._on_source_changed)
         self.dimension_selector.currentIndexChanged.connect(self._on_dimension_changed)
@@ -993,12 +999,11 @@ class ComparisonsView(QWidget):
         value = self.source_selector.currentData()
         self._source = ComparisonSource(value)
         if self._source is ComparisonSource.SCOREBOARDS:
-            with QSignalBlocker(self.dimension_selector):
-                self.dimension_selector.setCurrentIndex(0)
-            self._dimension = ComparisonDimension.MODELS
+            self._set_dimension_options(include_benchmarks=False)
             self.dimension_selector.setEnabled(False)
             self.filter_stack.setCurrentIndex(1)
         else:
+            self._set_dimension_options(include_benchmarks=True)
             self.dimension_selector.setEnabled(True)
             self.filter_stack.setCurrentIndex(0)
         self._reset_mode_state()
@@ -1009,6 +1014,27 @@ class ComparisonsView(QWidget):
         self._dimension = ComparisonDimension(value)
         self._reset_mode_state()
         self._discover()
+
+    def _set_dimension_options(self, *, include_benchmarks: bool) -> None:
+        """Keep the source/dimension matrix explicit and source-safe."""
+
+        current_value = self.dimension_selector.currentData()
+        options = [("Models", ComparisonDimension.MODELS.value)]
+        if include_benchmarks:
+            options.extend(
+                (
+                    ("Sessions", ComparisonDimension.SESSIONS.value),
+                    ("Benchmarks", ComparisonDimension.BENCHMARKS.value),
+                )
+            )
+        with QSignalBlocker(self.dimension_selector):
+            self.dimension_selector.clear()
+            for label, option_value in options:
+                self.dimension_selector.addItem(label, option_value)
+            values = [option_value for _label, option_value in options]
+            target = current_value if current_value in values else ComparisonDimension.MODELS.value
+            self.dimension_selector.setCurrentIndex(values.index(target))
+        self._dimension = ComparisonDimension(self.dimension_selector.currentData())
 
     def _reset_mode_state(self) -> None:
         self._available.clear()
@@ -1036,34 +1062,24 @@ class ComparisonsView(QWidget):
                 discovery = self.context.comparisons.discover_benchmark_model_subjects(
                     filters=active_filters  # type: ignore[arg-type]
                 )
-                selections = tuple(
-                    _Selection(
-                        subject.identity,
-                        subject.label,
-                        subject.identity,
-                        subject.label,
-                        records=subject.eligible_record_count,
-                        availability=self._subject_availability(subject),
-                    )
-                    for subject in discovery.subjects
+                selections = tuple(self._subject_selection(subject) for subject in discovery.subjects)
+                self._discovery_state = discovery.state
+                self._discovery_warnings = discovery.warnings
+            elif (
+                self._source is ComparisonSource.BENCHMARK_RUNS
+                and self._dimension is ComparisonDimension.BENCHMARKS
+            ):
+                discovery = self.context.comparisons.discover_benchmark_subjects(
+                    filters=active_filters  # type: ignore[arg-type]
                 )
+                selections = tuple(self._subject_selection(subject) for subject in discovery.subjects)
                 self._discovery_state = discovery.state
                 self._discovery_warnings = discovery.warnings
             elif self._source is ComparisonSource.SCOREBOARDS:
                 discovery = self.context.comparisons.discover_scoreboard_model_subjects(
                     filters=active_filters  # type: ignore[arg-type]
                 )
-                selections = tuple(
-                    _Selection(
-                        subject.identity,
-                        subject.label,
-                        subject.identity,
-                        subject.label,
-                        records=subject.eligible_record_count,
-                        availability=self._subject_availability(subject),
-                    )
-                    for subject in discovery.subjects
-                )
+                selections = tuple(self._subject_selection(subject) for subject in discovery.subjects)
                 self._discovery_state = discovery.state
                 self._discovery_warnings = discovery.warnings
             else:
@@ -1124,6 +1140,22 @@ class ComparisonsView(QWidget):
             label = f"{label} [deleted]"
         return _Selection(key, label, session, label)
 
+    @classmethod
+    def _subject_selection(cls, subject: ComparisonSubject) -> _Selection:
+        tooltip = subject.label
+        if subject.status:
+            tooltip = f"{tooltip}\nStatus: {subject.status}"
+        return _Selection(
+            key=subject.identity,
+            label=subject.label,
+            value=subject.identity,
+            tooltip=tooltip,
+            records=subject.eligible_record_count,
+            availability=cls._subject_availability(subject),
+            selectable=subject.selectable,
+            status=subject.status,
+        )
+
     @staticmethod
     def _subject_availability(subject: ComparisonSubject) -> str:
         available = []
@@ -1136,7 +1168,12 @@ class ComparisonsView(QWidget):
         return ", ".join(available) if available else "No metrics recorded"
 
     def _set_available(self, selections: tuple[_Selection, ...]) -> None:
+        previous_selected = tuple(self._selected)
         self._available = {selection.key: selection for selection in selections}
+        self._selected = [
+            self._available.get(selection.key, replace(selection, selectable=False))
+            for selection in previous_selected
+        ]
         rows = tuple(
             ComparisonSubjectRow(
                 identity=selection.key,
@@ -1144,6 +1181,8 @@ class ComparisonsView(QWidget):
                 records=selection.records,
                 availability=selection.availability,
                 tooltip=selection.tooltip,
+                selectable=selection.selectable,
+                status=selection.status,
             )
             for selection in selections
         )
@@ -1156,7 +1195,7 @@ class ComparisonsView(QWidget):
             item = QListWidgetItem(selection.label)
             item.setData(Qt.ItemDataRole.UserRole, selection.key)
             item.setToolTip(selection.tooltip)
-            if selection.key not in self._available:
+            if selection.key not in self._available or not selection.selectable:
                 item.setText(f"{selection.label} — unavailable under current filters")
             if index == 0:
                 item.setText(f"Baseline — {item.text()}")
@@ -1173,10 +1212,10 @@ class ComparisonsView(QWidget):
             return
         source_index = self.available_proxy.mapToSource(indexes[0])
         row = self.available_model.row_at(source_index.row())
-        if row is None or row.identity in {item.key for item in self._selected}:
+        if row is None or not row.selectable or row.identity in {item.key for item in self._selected}:
             return
         selection = self._available.get(row.identity)
-        if selection is None:
+        if selection is None or not selection.selectable:
             return
         self._selected.append(selection)
         self._clear_result_for_configuration_change()
@@ -1250,6 +1289,24 @@ class ComparisonsView(QWidget):
                 )
                 result = self.context.comparisons.compare_benchmark_models(
                     BenchmarkModelComparisonRequest(selected_models=selected_models, filters=filters),  # type: ignore[arg-type]
+                )
+            elif (
+                self._source is ComparisonSource.BENCHMARK_RUNS
+                and self._dimension is ComparisonDimension.BENCHMARKS
+            ):
+                if any(
+                    not selection.selectable or selection.key not in self._available
+                    for selection in self._selected
+                ):
+                    self.state_banner.setText(
+                        "One or more selected benchmarks are unavailable under the active filters."
+                    )
+                    return
+                result = self.context.comparisons.compare_benchmarks(
+                    BenchmarkComparisonRequest(
+                        selected_benchmarks=tuple(selection.key for selection in self._selected),
+                        filters=filters,  # type: ignore[arg-type]
+                    ),
                 )
             elif self._source is ComparisonSource.BENCHMARK_RUNS:
                 selected_sessions = tuple(
@@ -1934,15 +1991,28 @@ class ComparisonsView(QWidget):
 
     def _update_selection_actions(self) -> None:
         selected_row = self.selected_list.currentRow()
-        available_selected = bool(self.available_table.selectionModel()) and bool(
-            self.available_table.selectionModel().selectedRows()
-        )
+        available_selected = False
+        if self.available_table.selectionModel():
+            indexes = self.available_table.selectionModel().selectedRows()
+            if indexes:
+                source_index = self.available_proxy.mapToSource(indexes[0])
+                row = self.available_model.row_at(source_index.row())
+                available_selected = row is not None and row.selectable
         self.add_subject_button.setEnabled(available_selected)
         self.remove_subject_button.setEnabled(0 <= selected_row < len(self._selected))
         self.move_up_button.setEnabled(0 < selected_row < len(self._selected))
         self.move_down_button.setEnabled(0 <= selected_row < len(self._selected) - 1)
         self.clear_selection_button.setEnabled(bool(self._selected))
-        self.compare_button.setEnabled(len(self._selected) >= 2 and not self._busy)
+        can_compare = len(self._selected) >= 2 and not self._busy
+        if (
+            self._source is ComparisonSource.BENCHMARK_RUNS
+            and self._dimension is ComparisonDimension.BENCHMARKS
+        ):
+            can_compare = can_compare and all(
+                selection.selectable and selection.key in self._available
+                for selection in self._selected
+            )
+        self.compare_button.setEnabled(can_compare)
 
     def _render_state(self, state: ComparisonResultState) -> None:
         presentation = STATE_COPY.get(state)

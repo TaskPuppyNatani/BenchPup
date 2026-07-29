@@ -21,6 +21,8 @@ class ComparisonSubjectRow:
     records: int | None
     availability: str
     tooltip: str
+    selectable: bool = True
+    status: str = ""
 
     @property
     def values(self) -> tuple[str, ...]:
@@ -29,6 +31,7 @@ class ComparisonSubjectRow:
             self.identity,
             "Not calculated" if self.records is None else str(self.records),
             self.availability,
+            self.status,
         )
 
 
@@ -43,7 +46,7 @@ class ComparisonTableRow:
 class ComparisonSubjectTableModel(QAbstractTableModel):
     """Non-editable table model for available comparison subjects."""
 
-    headers = ("Subject", "Identity", "Records", "Availability")
+    headers = ("Subject", "Identity", "Records", "Availability", "Status")
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -89,6 +92,9 @@ class ComparisonSubjectTableModel(QAbstractTableModel):
 
     def flags(self, index: QModelIndex | QPersistentModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        row = self._rows[index.row()]
+        if not row.selectable:
             return Qt.ItemFlag.NoItemFlags
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 

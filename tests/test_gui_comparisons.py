@@ -13,8 +13,23 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from PySide6.QtWidgets import QApplication, QLabel, QScrollArea, QTableView
 from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
-from engine.domain import BenchmarkRun, BenchmarkSession, ReviewScore, ScoreboardEntry, ScoreboardImportBatch
+from engine.comparisons import (
+    BenchmarkComparisonRequest,
+    ComparisonResultState,
+    ComparisonSourceFamily,
+    ComparisonSubject,
+    ComparisonSubjectDiscovery,
+)
+from engine.domain import (
+    BenchmarkDefinition,
+    BenchmarkRun,
+    BenchmarkSession,
+    ReviewScore,
+    ScoreboardEntry,
+    ScoreboardImportBatch,
+)
 from gui.context import GuiApplicationContext
 from gui.views.comparisons import ComparisonsView
 
@@ -54,6 +69,436 @@ class GuiComparisonsTests(unittest.TestCase):
         )
         assert saved.id is not None
         return saved.id
+
+    def add_definition(
+        self,
+        name: str,
+        file_path: str,
+        *,
+        is_active: bool = True,
+    ) -> BenchmarkDefinition:
+        return self.context.catalog.create_benchmark_definition(
+            BenchmarkDefinition(
+                name=name,
+                file_path=file_path,
+                benchmark_type="code_review",
+                is_active=is_active,
+            )
+        )
+
+    def add_definition_run(
+        self,
+        definition: BenchmarkDefinition,
+        model: str,
+        *,
+        score: float | None = 4.0,
+    ) -> int:
+        assert definition.id is not None
+        run = BenchmarkRun(
+            raw_model_output=f"output-{model}-{definition.id}",
+            benchmark_definition_id=definition.id,
+            model_snapshot={"model_name": model, "tokens_per_second": 100.0},
+            benchmark_snapshot={
+                "name": definition.name,
+                "file_path": definition.file_path,
+                "benchmark_type": definition.benchmark_type,
+            },
+            hardware_snapshot={"name": "Rig"},
+        )
+        saved, _ = self.context.benchmarks.save_run(
+            run,
+            ReviewScore(
+                run_id=0,
+                overall_score=score,
+                hallucination_level="Low",
+                reliability_level="High",
+            ),
+        )
+        assert saved.id is not None
+        return saved.id
+
+    @staticmethod
+    def _select_identity(view: ComparisonsView, identity: str) -> None:
+        row = next(index for index, item in enumerate(view.available_model.rows()) if item.identity == identity)
+        view.available_table.selectRow(row)
+        view.add_subject_button.click()
+
+    @staticmethod
+    def _selected_identities(view: ComparisonsView) -> list[str]:
+        return [
+            str(view.selected_list.item(row).data(Qt.ItemDataRole.UserRole))
+            for row in range(view.selected_list.count())
+        ]
+
+    def test_benchmark_dimension_is_available_only_for_benchmark_runs(self) -> None:
+        view = ComparisonsView(self.context)
+
+        self.assertEqual(
+            [view.dimension_selector.itemData(index) for index in range(view.dimension_selector.count())],
+            ["models", "sessions", "benchmarks"],
+        )
+
+        view.source_selector.setCurrentIndex(1)
+
+        self.assertEqual(
+            [view.dimension_selector.itemData(index) for index in range(view.dimension_selector.count())],
+            ["models"],
+        )
+        self.assertFalse(view.dimension_selector.isEnabled())
+        view.source_selector.setCurrentIndex(0)
+        self.assertEqual(
+            [view.dimension_selector.itemData(index) for index in range(view.dimension_selector.count())],
+            ["models", "sessions", "benchmarks"],
+        )
+        view.deleteLater()
+
+    def test_benchmark_discovery_preserves_engine_identity_labels_and_status(self) -> None:
+        first = self.add_definition("Shared benchmark", "benchmarks/shared.py")
+        second = self.add_definition("Shared benchmark second", "benchmarks/shared.py")
+        inactive = self.add_definition(
+            "Inactive benchmark",
+            "benchmarks/inactive.py",
+            is_active=False,
+        )
+        self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+        self.add_run("Legacy", benchmark="Legacy benchmark")
+
+        expected = self.context.comparisons.discover_benchmark_subjects()
+        view = ComparisonsView(self.context)
+        original_discovery = view.context.comparisons.discover_benchmark_subjects
+        with patch.object(
+            view.context.comparisons,
+            "discover_benchmark_subjects",
+            wraps=original_discovery,
+        ) as discover:
+            view.dimension_selector.setCurrentIndex(2)
+        self.assertEqual(discover.call_count, 1)
+
+        rows = view.available_model.rows()
+        self.assertEqual(
+            {row.identity: row.label for row in rows},
+            {subject.identity: subject.label for subject in expected.subjects},
+        )
+        self.assertEqual(
+            {row.identity: row.status for row in rows},
+            {subject.identity: subject.status for subject in expected.subjects},
+        )
+        self.assertIn(f"definition:{first.id}", {row.identity for row in rows})
+        self.assertIn(f"definition:{second.id}", {row.identity for row in rows})
+        legacy_identity = next(row.identity for row in rows if row.identity.startswith("snapshot:"))
+        self._select_identity(view, legacy_identity)
+        self.assertEqual(self._selected_identities(view), [legacy_identity])
+        inactive_row = next(row for row in rows if row.identity == f"definition:{inactive.id}")
+        self.assertFalse(inactive_row.selectable)
+        inactive_index = next(index for index, row in enumerate(rows) if row.identity == inactive_row.identity)
+        flags = view.available_model.flags(view.available_model.index(inactive_index, 0))
+        self.assertFalse(bool(flags & Qt.ItemFlag.ItemIsEnabled))
+        self.assertIn("inactive", inactive_row.status)
+
+        view.available_table.selectRow(inactive_index)
+        view.add_subject_button.click()
+        self.assertNotIn(inactive_row.identity, self._selected_identities(view))
+        view.deleteLater()
+
+    def test_benchmark_selection_is_stable_ordered_unique_and_routes_typed_request(self) -> None:
+        first = self.add_definition("Same name first", "benchmarks/same.py")
+        second = self.add_definition("Same name second", "benchmarks/same.py")
+        first_run_id = self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        first_identity = f"definition:{first.id}"
+        second_identity = f"definition:{second.id}"
+        self._select_identity(view, first_identity)
+        self._select_identity(view, first_identity)
+        self._select_identity(view, second_identity)
+        self.assertEqual(self._selected_identities(view), [first_identity, second_identity])
+
+        before_run = self.context.benchmarks.get_run(first_run_id)[0]
+        assert before_run is not None
+        before_snapshot = dict(before_run.model_snapshot)
+        before_database = self.context.paths.database_path.read_bytes()
+        with patch.object(
+            view.context.comparisons,
+            "compare_benchmarks",
+            wraps=view.context.comparisons.compare_benchmarks,
+        ) as compare:
+            view.compare_button.click()
+
+        self.assertEqual(compare.call_count, 1)
+        request = compare.call_args.args[0]
+        self.assertIsInstance(request, BenchmarkComparisonRequest)
+        assert isinstance(request, BenchmarkComparisonRequest)
+        self.assertEqual(request.benchmark_identities, (first_identity, second_identity))
+        self.assertEqual(request.filters.benchmark, "")
+        self.assertEqual(self.context.paths.database_path.read_bytes(), before_database)
+        after_run = self.context.benchmarks.get_run(first_run_id)[0]
+        assert after_run is not None
+        self.assertEqual(after_run.model_snapshot, before_snapshot)
+        self.assertIsNotNone(view.current_result)
+        assert view.current_result is not None
+        self.assertEqual(
+            [item.identity for item in view.current_result.selected_benchmarks],
+            [first_identity, second_identity],
+        )
+        view.deleteLater()
+
+    def test_benchmark_subject_alternate_activation_paths_share_selection_guards(self) -> None:
+        first = self.add_definition("Selectable first", "benchmarks/first.py")
+        second = self.add_definition("Selectable second", "benchmarks/second.py")
+        inactive = self.add_definition(
+            "Inactive benchmark",
+            "benchmarks/inactive.py",
+            is_active=False,
+        )
+        self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        first_identity = f"definition:{first.id}"
+        second_identity = f"definition:{second.id}"
+        inactive_identity = f"definition:{inactive.id}"
+        rows = view.available_model.rows()
+        first_row = next(index for index, row in enumerate(rows) if row.identity == first_identity)
+        second_row = next(index for index, row in enumerate(rows) if row.identity == second_identity)
+        inactive_row = next(index for index, row in enumerate(rows) if row.identity == inactive_identity)
+        first_label = next(row.label for row in rows if row.identity == first_identity)
+        second_label = next(row.label for row in rows if row.identity == second_identity)
+
+        # Exercise the table's connected double-click signal path.
+        view.available_table.selectRow(first_row)
+        view.available_table.doubleClicked.emit(view.available_proxy.index(first_row, 0))
+        self.assertEqual(self._selected_identities(view), [first_identity])
+        self.assertIn(first_label, view.selected_list.item(0).text())
+
+        # A second double-click cannot duplicate the stable identity.
+        view.available_table.doubleClicked.emit(view.available_proxy.index(first_row, 0))
+        self.assertEqual(self._selected_identities(view), [first_identity])
+
+        # Exercise keyboard activation through the connected Add button.
+        view.available_table.selectRow(second_row)
+        view.add_subject_button.setFocus()
+        QTest.keyClick(view.add_subject_button, Qt.Key.Key_Space)
+        self.assertEqual(self._selected_identities(view), [first_identity, second_identity])
+        self.assertIn(second_label, view.selected_list.item(1).text())
+        labels_before_rejected_activation = [
+            view.selected_list.item(row).text()
+            for row in range(view.selected_list.count())
+        ]
+
+        # Keyboard activation cannot duplicate the second stable identity.
+        QTest.keyClick(view.add_subject_button, Qt.Key.Key_Space)
+        self.assertEqual(self._selected_identities(view), [first_identity, second_identity])
+
+        # A nonselectable subject is rejected by the double-click handler and
+        # leaves the keyboard Add action disabled.
+        view.available_table.selectRow(inactive_row)
+        view.available_table.doubleClicked.emit(view.available_proxy.index(inactive_row, 0))
+        self.assertFalse(view.add_subject_button.isEnabled())
+        view.add_subject_button.setFocus()
+        QTest.keyClick(view.add_subject_button, Qt.Key.Key_Space)
+        self.assertEqual(self._selected_identities(view), [first_identity, second_identity])
+        self.assertEqual(
+            [view.selected_list.item(row).text() for row in range(view.selected_list.count())],
+            labels_before_rejected_activation,
+        )
+        view.deleteLater()
+
+    def test_benchmark_source_transition_clears_state_and_rebuilds_typed_selection(self) -> None:
+        first = self.add_definition("Transition first", "benchmarks/first.py")
+        second = self.add_definition("Transition second", "benchmarks/second.py")
+        self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+        self.add_run("Legacy", benchmark="Legacy benchmark")
+        self.context.catalog.scoreboard_entries.create(ScoreboardEntry(model_name="Score Alpha", score=4.0))
+        self.context.catalog.scoreboard_entries.create(ScoreboardEntry(model_name="Score Beta", score=3.0))
+
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        first_identity = f"definition:{first.id}"
+        second_identity = f"definition:{second.id}"
+        legacy_identity = next(
+            row.identity
+            for row in view.available_model.rows()
+            if row.identity.startswith("snapshot:")
+        )
+        self._select_identity(view, first_identity)
+        self._select_identity(view, legacy_identity)
+        view.compare_button.click()
+        self.assertIsNotNone(view.current_result)
+        self.assertGreater(view.warning_list.count(), 0)
+        self.assertEqual(
+            self._selected_identities(view),
+            [first_identity, legacy_identity],
+        )
+
+        with patch.object(
+            view.context.comparisons,
+            "compare_benchmarks",
+            wraps=view.context.comparisons.compare_benchmarks,
+        ) as compare:
+            view.source_selector.setCurrentIndex(1)
+            view.compare_button.click()
+
+        self.assertEqual(compare.call_count, 0)
+        self.assertEqual(view.source_selector.currentData(), "scoreboards")
+        self.assertEqual(view.dimension_selector.currentData(), "models")
+        self.assertFalse(view.dimension_selector.isEnabled())
+        self.assertEqual(self._selected_identities(view), [])
+        self.assertIsNone(view.current_result)
+        self.assertFalse(
+            any(
+                legacy_identity in view.warning_list.item(row).text()
+                for row in range(view.warning_list.count())
+            )
+        )
+        self.assertFalse(view.compare_button.isEnabled())
+        self.assertEqual(
+            [row.label for row in view.available_model.rows()],
+            ["Score Alpha", "Score Beta"],
+        )
+
+        with patch.object(
+            view.context.comparisons,
+            "discover_benchmark_subjects",
+            wraps=view.context.comparisons.discover_benchmark_subjects,
+        ) as discover:
+            view.source_selector.setCurrentIndex(0)
+            view.dimension_selector.setCurrentIndex(2)
+
+        self.assertEqual(discover.call_count, 1)
+        self.assertEqual(view.source_selector.currentData(), "benchmark_runs")
+        self.assertEqual(view.dimension_selector.currentData(), "benchmarks")
+        self.assertEqual(self._selected_identities(view), [])
+        self.assertIn(first_identity, {row.identity for row in view.available_model.rows()})
+        self.assertIn(second_identity, {row.identity for row in view.available_model.rows()})
+
+        self._select_identity(view, first_identity)
+        self._select_identity(view, second_identity)
+        with patch.object(
+            view.context.comparisons,
+            "compare_benchmarks",
+            wraps=view.context.comparisons.compare_benchmarks,
+        ) as compare:
+            view.compare_button.click()
+
+        self.assertEqual(compare.call_count, 1)
+        request = compare.call_args.args[0]
+        self.assertIsInstance(request, BenchmarkComparisonRequest)
+        assert isinstance(request, BenchmarkComparisonRequest)
+        self.assertEqual(request.benchmark_identities, (first_identity, second_identity))
+        self.assertEqual(len(set(request.benchmark_identities)), 2)
+        self.assertIsNotNone(view.current_result)
+        assert view.current_result is not None
+        self.assertEqual(
+            [item.identity for item in view.current_result.selected_benchmarks],
+            [first_identity, second_identity],
+        )
+        view.deleteLater()
+
+    def test_benchmark_gui_keeps_distinct_engine_disambiguation_labels(self) -> None:
+        first = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:101",
+            label="Same benchmark [definition:101]",
+            eligible_record_count=1,
+            selectable=True,
+        )
+        second = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:102",
+            label="Same benchmark [definition:102]",
+            eligible_record_count=1,
+            selectable=True,
+        )
+        discovery = ComparisonSubjectDiscovery(
+            ComparisonSourceFamily.BENCHMARK_RUN,
+            (first, second),
+            state=ComparisonResultState.READY,
+        )
+        view = ComparisonsView(self.context)
+        with patch.object(
+            view.context.comparisons,
+            "discover_benchmark_subjects",
+            return_value=discovery,
+        ):
+            view.dimension_selector.setCurrentIndex(2)
+
+        self.assertEqual(
+            [row.label for row in view.available_model.rows()],
+            [first.label, second.label],
+        )
+        self._select_identity(view, first.identity)
+        self._select_identity(view, second.identity)
+        self.assertEqual(self._selected_identities(view), [first.identity, second.identity])
+        view.deleteLater()
+
+    def test_benchmark_refresh_reconciles_identity_labels_and_retains_missing_selection(self) -> None:
+        first = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:1",
+            label="First label",
+            eligible_record_count=2,
+            selectable=True,
+            status="",
+        )
+        second = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:2",
+            label="Second label",
+            eligible_record_count=1,
+            selectable=True,
+            status="",
+        )
+        refreshed_first = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:1",
+            label="First label refreshed",
+            eligible_record_count=3,
+            selectable=True,
+            status="",
+        )
+        newly_discovered = ComparisonSubject(
+            source_family=ComparisonSourceFamily.BENCHMARK_RUN,
+            identity="definition:3",
+            label="New label",
+            eligible_record_count=1,
+            selectable=True,
+            status="",
+        )
+        discovery_one = ComparisonSubjectDiscovery(
+            ComparisonSourceFamily.BENCHMARK_RUN,
+            (first, second),
+            state=ComparisonResultState.READY,
+        )
+        discovery_two = ComparisonSubjectDiscovery(
+            ComparisonSourceFamily.BENCHMARK_RUN,
+            (refreshed_first, newly_discovered),
+            state=ComparisonResultState.READY,
+        )
+        view = ComparisonsView(self.context)
+        with patch.object(
+            view.context.comparisons,
+            "discover_benchmark_subjects",
+            side_effect=(discovery_one, discovery_two),
+        ) as discover:
+            view.dimension_selector.setCurrentIndex(2)
+            self._select_identity(view, "definition:1")
+            self._select_identity(view, "definition:2")
+            view.refresh()
+
+        self.assertEqual(discover.call_count, 2)
+        self.assertEqual(self._selected_identities(view), ["definition:1", "definition:2"])
+        self.assertTrue(view.selected_list.item(0).text().startswith("Baseline"))
+        self.assertIn("First label refreshed", view.selected_list.item(0).text())
+        self.assertIn("unavailable", view.selected_list.item(1).text().casefold())
+        self.assertNotIn("definition:3", self._selected_identities(view))
+        view.selected_list.setCurrentRow(1)
+        view.remove_subject_button.click()
+        self.assertEqual(self._selected_identities(view), ["definition:1"])
+        view.deleteLater()
 
     def test_empty_benchmark_model_discovery_has_readable_state_and_disabled_compare(self) -> None:
         view = ComparisonsView(self.context)
