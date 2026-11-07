@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PySide6.QtCore import QCoreApplication, QEvent
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
@@ -25,6 +27,14 @@ class Phase5D1ACsvImportGuiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication(["benchpup-phase5d1a-tests"])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        for widget in cls.application.topLevelWidgets():
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        cls.application.processEvents()
+        super().tearDownClass()
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()

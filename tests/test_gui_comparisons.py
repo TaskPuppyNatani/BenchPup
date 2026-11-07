@@ -1275,6 +1275,37 @@ print("isolated cleanup complete")
         self.assertEqual(self.context.paths.database_path.read_bytes(), before_database)
         view.deleteLater()
 
+    def test_themed_controls_preserve_first_render_heights_in_isolated_process(self) -> None:
+        script = """
+import unittest
+from gui.application import configure_application, create_application
+
+application = create_application([])
+configure_application(application)
+tests = unittest.defaultTestLoader.loadTestsFromNames([
+    "tests.test_gui_comparisons.GuiComparisonsTests.test_comparisons_normal_window_scrolls_and_preserves_control_heights",
+    "tests.test_gui_imports.Phase5D1ACsvImportGuiTests.test_mapping_controls_have_stable_first_render_dimensions",
+])
+result = unittest.TextTestRunner().run(tests)
+raise SystemExit(not result.wasSuccessful())
+"""
+        environment = os.environ.copy()
+        environment["QT_QPA_PLATFORM"] = "offscreen"
+        source_path = str(Path(__file__).parents[1] / "src")
+        environment["PYTHONPATH"] = os.pathsep.join(
+            value for value in (source_path, environment.get("PYTHONPATH", "")) if value
+        )
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).parents[1],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_comparisons_normal_window_scrolls_and_preserves_control_heights(self) -> None:
         view = ComparisonsView(self.context)
         view.resize(900, 560)

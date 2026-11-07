@@ -100,6 +100,7 @@ _COMPARISON_SELECTION_PANEL_MIN_HEIGHT = 220
 def _configure_comparison_control(widget: QWidget, *, expand_horizontally: bool = True) -> None:
     """Keep styled controls readable while preserving responsive width behavior."""
 
+    widget.ensurePolished()
     minimum_height = max(
         _COMPARISON_CONTROL_MIN_HEIGHT,
         widget.sizeHint().height(),

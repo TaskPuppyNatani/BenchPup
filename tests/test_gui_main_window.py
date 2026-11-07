@@ -9,7 +9,7 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, Qt
 from PySide6.QtWidgets import QApplication, QLabel
 
 from gui.context import GuiApplicationContext
@@ -22,6 +22,14 @@ class GuiMainWindowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.application = QApplication.instance() or QApplication(["benchpup-main-window-tests"])
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        for widget in cls.application.topLevelWidgets():
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        cls.application.processEvents()
+        super().tearDownClass()
 
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()

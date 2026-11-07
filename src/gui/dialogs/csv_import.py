@@ -99,6 +99,7 @@ _MAPPING_COMBO_CHROME_FALLBACK = 24
 def _configure_mapping_combo(combo: QComboBox) -> tuple[int, int]:
     """Size one mapping combo for its styled cell and complete item labels."""
 
+    combo.ensurePolished()
     combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
     font_metrics = combo.fontMetrics()
     longest_label_width = max(
