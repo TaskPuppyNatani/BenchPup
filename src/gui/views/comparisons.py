@@ -49,6 +49,7 @@ except ImportError:  # pragma: no cover - exercised by the top-level test import
 try:
     from ...engine.comparisons import (
         BenchmarkComparisonRequest,
+        BenchmarkComparisonResult,
         BenchmarkModelComparisonRequest,
         ComparisonResultState,
         ComparisonSubject,
@@ -63,6 +64,7 @@ try:
 except ImportError:  # pragma: no cover - exercised by the top-level test import path.
     from engine.comparisons import (  # type: ignore[no-redef]
         BenchmarkComparisonRequest,
+        BenchmarkComparisonResult,
         BenchmarkModelComparisonRequest,
         ComparisonResultState,
         ComparisonSubject,
@@ -306,6 +308,10 @@ class _BenchmarkFilterPanel(QGroupBox):
         super().__init__("Benchmark Run filters", parent)
         self.setObjectName("comparisonBenchmarkFilters")
         self.benchmark_edit = self._line_edit("comparisonBenchmarkFilter", "Any benchmark")
+        self.benchmark_label = QLabel("Benchmark")
+        self.model_edit = self._line_edit("comparisonModelFilter", "Any model")
+        self.model_label = QLabel("Model")
+        self.model_label.setBuddy(self.model_edit)
         self.benchmark_type = QComboBox()
         self.benchmark_type.setObjectName("comparisonBenchmarkTypeFilter")
         self.benchmark_type.setAccessibleName("Benchmark type filter")
@@ -341,7 +347,7 @@ class _BenchmarkFilterPanel(QGroupBox):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setHorizontalSpacing(10)
         layout.setVerticalSpacing(8)
-        layout.addWidget(QLabel("Benchmark"), 0, 0)
+        layout.addWidget(self.benchmark_label, 0, 0)
         layout.addWidget(self.benchmark_edit, 0, 1)
         layout.addWidget(QLabel("Type"), 0, 2)
         layout.addWidget(self.benchmark_type, 0, 3)
@@ -367,11 +373,14 @@ class _BenchmarkFilterPanel(QGroupBox):
         layout.addWidget(QLabel("Exclude run IDs"), 6, 2)
         layout.addWidget(self.exclude_run_ids, 6, 3)
         layout.addWidget(self.include_deleted, 7, 0, 1, 4)
+        layout.addWidget(self.model_label, 8, 0)
+        layout.addWidget(self.model_edit, 8, 1, 1, 3)
         for column in (1, 3):
             layout.setColumnStretch(column, 1)
 
         for control in (
             self.benchmark_edit,
+            self.model_edit,
             self.benchmark_type,
             self.session_edit,
             self.session_id,
@@ -434,9 +443,27 @@ class _BenchmarkFilterPanel(QGroupBox):
         self.session_id_label.setVisible(not enabled)
         self.session_id.setVisible(not enabled)
 
+    def set_benchmark_mode(self, enabled: bool) -> None:
+        self.model_label.setVisible(enabled)
+        self.model_edit.setVisible(enabled)
+        self.benchmark_edit.setEnabled(not enabled)
+        if enabled:
+            self.benchmark_edit.setPlaceholderText("Selected benchmarks define this filter")
+            self.benchmark_edit.setToolTip(
+                "Selected stable benchmark identities define which records are compared."
+            )
+            self.benchmark_edit.setAccessibleDescription(
+                "Free-text filtering is unavailable because selected benchmark identities define the subjects."
+            )
+        else:
+            self.benchmark_edit.setPlaceholderText("Any benchmark")
+            self.benchmark_edit.setToolTip("")
+            self.benchmark_edit.setAccessibleDescription("Free-text benchmark filter.")
+
     def clear(self) -> None:
         blockers = (
             QSignalBlocker(self.benchmark_edit),
+            QSignalBlocker(self.model_edit),
             QSignalBlocker(self.benchmark_type),
             QSignalBlocker(self.session_edit),
             QSignalBlocker(self.session_id),
@@ -451,6 +478,7 @@ class _BenchmarkFilterPanel(QGroupBox):
             QSignalBlocker(self.include_deleted),
         )
         self.benchmark_edit.clear()
+        self.model_edit.clear()
         self.benchmark_type.setCurrentIndex(0)
         self.session_edit.clear()
         self.session_id.setCurrentIndex(0)
@@ -466,7 +494,7 @@ class _BenchmarkFilterPanel(QGroupBox):
         self.date_range.clear()
         del blockers
 
-    def filters(self, *, session_mode: bool) -> BenchmarkStatisticsFilters:
+    def filters(self, *, session_mode: bool, benchmark_mode: bool) -> BenchmarkStatisticsFilters:
         start, end = self.date_range.values()
         if start is not None and end is not None and start > end:
             raise _FilterValidationError("The created date range is reversed.", self.date_range)
@@ -485,7 +513,8 @@ class _BenchmarkFilterPanel(QGroupBox):
         if minimum is not None and maximum is not None and minimum > maximum:
             raise _FilterValidationError("Minimum score cannot exceed maximum score.", self.minimum_score)
         return BenchmarkStatisticsFilters(
-            benchmark=self.benchmark_edit.text().strip(),
+            model=self.model_edit.text().strip() if benchmark_mode else "",
+            benchmark="" if benchmark_mode else self.benchmark_edit.text().strip(),
             benchmark_type=str(self.benchmark_type.currentData() or ""),
             session="" if session_mode else self.session_edit.text().strip(),
             session_id=None if session_mode else self.session_id.currentData(),
@@ -724,6 +753,7 @@ class ComparisonsView(QWidget):
         self.scoreboard_filters.filters_changed.connect(self._on_filter_changed)
         self._populate_filter_catalogs()
         self.benchmark_filters.set_session_mode(False)
+        self.benchmark_filters.set_benchmark_mode(False)
         self.filter_stack = QStackedWidget()
         self.filter_stack.setObjectName("comparisonFilterStack")
         self.filter_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -971,7 +1001,10 @@ class ComparisonsView(QWidget):
     def _current_filters(self) -> BenchmarkStatisticsFilters | ScoreboardStatisticsFilters:
         if self._source is ComparisonSource.SCOREBOARDS:
             return self.scoreboard_filters.filters()
-        return self.benchmark_filters.filters(session_mode=self._dimension is ComparisonDimension.SESSIONS)
+        return self.benchmark_filters.filters(
+            session_mode=self._dimension is ComparisonDimension.SESSIONS,
+            benchmark_mode=self._dimension is ComparisonDimension.BENCHMARKS,
+        )
 
     def _apply_filters(self, *_args: object) -> None:
         self._clear_filter_error()
@@ -1048,6 +1081,7 @@ class ComparisonsView(QWidget):
         self.benchmark_filters.clear()
         self.scoreboard_filters.clear()
         self.benchmark_filters.set_session_mode(self._dimension is ComparisonDimension.SESSIONS)
+        self.benchmark_filters.set_benchmark_mode(self._dimension is ComparisonDimension.BENCHMARKS)
         self.apply_filters_button.setEnabled(False)
         self.clear_filters_button.setEnabled(False)
 
@@ -1349,14 +1383,20 @@ class ComparisonsView(QWidget):
 
     def _render_result(self, result: Any) -> None:
         self._render_state(result.state)
-        self._render_warnings(tuple(result.warnings))
+        self._render_warnings(
+            tuple(result.warnings),
+            deduplicate=not isinstance(result, BenchmarkComparisonResult),
+        )
         self._render_active_filters(result.metadata.active_filters)
         self._reset_results()
         if not result.entities:
             self.results_placeholder.setText("No comparison entities are available for the current selection.")
             return
 
-        if isinstance(result, ScoreboardModelComparisonResult):
+        if isinstance(result, BenchmarkComparisonResult):
+            self._render_benchmark_comparison_summary(result)
+            self._render_review(result)
+        elif isinstance(result, ScoreboardModelComparisonResult):
             self._render_scoreboard_summary(result)
         else:
             self._render_benchmark_summary(result)
@@ -1372,6 +1412,9 @@ class ComparisonsView(QWidget):
         elif isinstance(result, SessionComparisonResult):
             if self._alignment_has_content(result.alignment):
                 self._render_session_alignment(result)
+        elif isinstance(result, BenchmarkComparisonResult):
+            if self._alignment_has_content(result.alignment):
+                self._render_benchmark_alignment(result)
         self._render_pairwise(result)
         self._activate_primary_result_tab()
 
@@ -1468,6 +1511,54 @@ class ComparisonsView(QWidget):
             )
         self._add_table_tab("Summary", headers, tuple(rows))
 
+    def _render_benchmark_comparison_summary(self, result: BenchmarkComparisonResult) -> None:
+        headers = (
+            "Order",
+            "Benchmark",
+            "Eligible observations",
+            "Scored",
+            "Unscored",
+            "Mean score",
+            "Median score",
+            "Mean tokens / second",
+            "Reviews",
+            "Models",
+            "Sessions",
+            "Hardware",
+            "Availability",
+        )
+        order_labels = self._baseline_labels(result.entities)
+        rows = []
+        for entity in result.entities:
+            summary = entity.summary
+            represented = (
+                *entity.represented_models,
+                *entity.represented_sessions,
+                *entity.represented_hardware,
+            )
+            rows.append(
+                self._row(
+                    (
+                        order_labels.get(entity.identity, ""),
+                        entity.label,
+                        str(summary.total_eligible_runs),
+                        str(summary.scored_runs),
+                        str(summary.unscored_runs),
+                        _format_summary_value(summary.overall_score, kind="score"),
+                        _format_score(summary.overall_score.median),
+                        _format_summary_value(summary.tokens_per_second, kind="speed"),
+                        str(entity.review.total_reviews),
+                        str(summary.unique_model_count),
+                        str(summary.unique_session_count),
+                        str(summary.unique_hardware_environment_count),
+                        entity.benchmark.status
+                        or ("Available" if entity.benchmark.selectable else "Unavailable"),
+                    ),
+                    tooltip=(entity.identity, entity.label, *represented),
+                )
+            )
+        self._add_table_tab("Summary", headers, tuple(rows))
+
     def _render_scoreboard_summary(self, result: ScoreboardModelComparisonResult) -> None:
         headers = (
             "Order",
@@ -1516,7 +1607,10 @@ class ComparisonsView(QWidget):
     def _row(values: tuple[str, ...], tooltip: tuple[str, ...] = ()) -> ComparisonTableRow:
         return ComparisonTableRow(values, tooltip)
 
-    def _render_review(self, result: ModelComparisonResult | SessionComparisonResult) -> None:
+    def _render_review(
+        self,
+        result: BenchmarkComparisonResult | ModelComparisonResult | SessionComparisonResult,
+    ) -> None:
         headers = ("Metric", "Subject", "Mean", "Median", "Available", "Missing", "Distribution")
         metric_fields = (
             ("Accuracy", "accuracy_score"),
@@ -1630,6 +1724,8 @@ class ComparisonsView(QWidget):
         for name in (
             "shared_benchmark_count",
             "shared_model_count",
+            "excluded_model_count",
+            "excluded_run_count",
             "shared_model_benchmark_pair_count",
             "excluded_benchmark_count",
         ):
@@ -1640,12 +1736,13 @@ class ComparisonsView(QWidget):
             for name in (
                 "shared_benchmarks",
                 "shared_models",
+                "shared_model_identities",
+                "non_overlapping_models",
                 "shared_model_benchmark_pairs",
                 "aligned_benchmarks",
                 "aligned_models",
                 "aligned_model_benchmarks",
                 "non_overlapping_benchmarks",
-                "non_overlapping_models",
                 "non_overlapping_model_benchmark_pairs",
             )
         )
@@ -1734,6 +1831,109 @@ class ComparisonsView(QWidget):
             headers,
             tuple(rows),
             empty_message="No BenchmarkRun alignment details are available.",
+        )
+
+    def _render_benchmark_alignment(self, result: BenchmarkComparisonResult) -> None:
+        headers = (
+            "Alignment",
+            "Benchmark",
+            "Model / value",
+            "Count",
+            "Observations",
+            "Scored",
+            "Mean score",
+            "Mean tokens / second",
+        )
+        rows: list[ComparisonTableRow] = []
+        alignment = result.alignment
+        labels = {entity.identity: entity.label for entity in result.entities}
+        if alignment.shared_models or alignment.shared_model_count:
+            rows.append(
+                self._row(
+                    (
+                        "Shared models",
+                        "All selected benchmarks",
+                        ", ".join(alignment.shared_models),
+                        str(alignment.shared_model_count),
+                        "",
+                        "",
+                        "",
+                        "",
+                    ),
+                    tooltip=alignment.shared_model_identities,
+                )
+            )
+        for aligned in alignment.aligned_models:
+            for entity in result.entities:
+                values = aligned.entities.get(entity.identity)
+                if values is None:
+                    continue
+                rows.append(
+                    self._row(
+                        (
+                            "Aligned model",
+                            entity.label,
+                            aligned.model_label,
+                            "",
+                            str(values.record_count),
+                            str(values.scored_count),
+                            _format_summary_value(values.overall_score, kind="score"),
+                            _format_summary_value(values.tokens_per_second, kind="speed"),
+                        ),
+                        tooltip=(aligned.model_key, entity.identity),
+                    )
+                )
+        for identity, models in alignment.non_overlapping_models.items():
+            for model in models:
+                rows.append(
+                    self._row(
+                        (
+                            "Non-overlapping model",
+                            labels.get(identity, identity),
+                            model,
+                            "",
+                            "",
+                            "",
+                            "",
+                            "",
+                        ),
+                        tooltip=(identity, model),
+                    )
+                )
+        if rows or alignment.excluded_model_count or alignment.excluded_run_count:
+            rows.extend(
+                (
+                    self._row(
+                        (
+                            "Excluded model count",
+                            "All selected benchmarks",
+                            "",
+                            str(alignment.excluded_model_count),
+                            "",
+                            "",
+                            "",
+                            "",
+                        )
+                    ),
+                    self._row(
+                        (
+                            "Excluded run count",
+                            "All selected benchmarks",
+                            "",
+                            str(alignment.excluded_run_count),
+                            "",
+                            "",
+                            "",
+                            "",
+                        )
+                    ),
+                )
+            )
+        self._add_table_tab(
+            "Alignment",
+            headers,
+            tuple(rows),
+            empty_message="No shared model alignment details are available.",
         )
 
     def _render_session_alignment(self, result: SessionComparisonResult) -> None:
@@ -1904,13 +2104,23 @@ class ComparisonsView(QWidget):
 
     def _render_pairwise(self, result: Any) -> None:
         pairwise = result.pairwise
-        if pairwise is None and len(self._selected) != 2:
-            if len(self._selected) > 2:
+        selected_count = (
+            len(result.selected_benchmarks)
+            if isinstance(result, BenchmarkComparisonResult)
+            else len(self._selected)
+        )
+        is_benchmark_comparison = isinstance(result, BenchmarkComparisonResult)
+        if pairwise is None and selected_count != 2:
+            if selected_count > 2:
                 self._add_table_tab(
                     "Pairwise",
                     ("Pairwise comparison",),
                     (),
-                    empty_message="Pairwise comparison is available only for two selected subjects.",
+                    empty_message=(
+                        "Pairwise comparison is available only for exactly two selected benchmarks."
+                        if is_benchmark_comparison
+                        else "Pairwise comparison is available only for two selected subjects."
+                    ),
                 )
             return
         if pairwise is None:
@@ -1918,7 +2128,11 @@ class ComparisonsView(QWidget):
                 "Pairwise",
                 ("Pairwise comparison",),
                 (),
-                empty_message="No pairwise values were provided for the selected subjects.",
+                empty_message=(
+                    "No pairwise values were provided for the selected benchmarks."
+                    if is_benchmark_comparison
+                    else "No pairwise values were provided for the selected subjects."
+                ),
             )
             return
 
@@ -2027,21 +2241,22 @@ class ComparisonsView(QWidget):
             self.state_banner.setToolTip("")
         self.state_banner.setText(f"{title}: {explanation}")
 
-    def _render_warnings(self, warnings: tuple[Any, ...]) -> None:
+    def _render_warnings(self, warnings: tuple[Any, ...], *, deduplicate: bool = True) -> None:
         self.warning_list.clear()
         seen: set[tuple[Any, ...]] = set()
         for warning in warnings:
-            key = (
-                warning.code,
-                warning.source_family,
-                warning.subject_identity,
-                warning.metric,
-                warning.category,
-                warning.message,
-            )
-            if key in seen:
-                continue
-            seen.add(key)
+            if deduplicate:
+                key = (
+                    warning.code,
+                    warning.source_family,
+                    warning.subject_identity,
+                    warning.metric,
+                    warning.category,
+                    warning.message,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
             source = str(warning.source_family.value).replace("_", " ").title()
             context = " — ".join(
                 value

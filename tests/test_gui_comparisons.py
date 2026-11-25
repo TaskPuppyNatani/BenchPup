@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -92,12 +93,14 @@ class GuiComparisonsTests(unittest.TestCase):
         model: str,
         *,
         score: float | None = 4.0,
+        tokens_per_second: float | None = 100.0,
+        output_suffix: str = "",
     ) -> int:
         assert definition.id is not None
         run = BenchmarkRun(
-            raw_model_output=f"output-{model}-{definition.id}",
+            raw_model_output=f"output-{model}-{definition.id}{output_suffix}",
             benchmark_definition_id=definition.id,
-            model_snapshot={"model_name": model, "tokens_per_second": 100.0},
+            model_snapshot={"model_name": model, "tokens_per_second": tokens_per_second},
             benchmark_snapshot={
                 "name": definition.name,
                 "file_path": definition.file_path,
@@ -150,6 +153,422 @@ class GuiComparisonsTests(unittest.TestCase):
             [view.dimension_selector.itemData(index) for index in range(view.dimension_selector.count())],
             ["models", "sessions", "benchmarks"],
         )
+        view.deleteLater()
+
+    def test_model_and_benchmark_filters_are_scoped_to_comparison_dimension(self) -> None:
+        view = ComparisonsView(self.context)
+        model_edit = view.benchmark_filters.model_edit
+        benchmark_edit = view.benchmark_filters.benchmark_edit
+
+        self.assertTrue(model_edit.isHidden())
+        self.assertTrue(benchmark_edit.isEnabled())
+        model_edit.setText("hidden model value")
+        benchmark_edit.setText("model-mode benchmark")
+        model_filters = view._current_filters()
+        self.assertEqual(model_filters.model, "")
+        self.assertEqual(model_filters.benchmark, "model-mode benchmark")
+
+        view.dimension_selector.setCurrentIndex(1)
+        self.assertTrue(model_edit.isHidden())
+        model_edit.setText("session-mode model value")
+        benchmark_edit.setText("session-mode benchmark")
+        session_filters = view._current_filters()
+        self.assertEqual(session_filters.model, "")
+        self.assertEqual(session_filters.benchmark, "session-mode benchmark")
+
+        view.dimension_selector.setCurrentIndex(2)
+        self.assertFalse(model_edit.isHidden())
+        self.assertFalse(benchmark_edit.isEnabled())
+        self.assertIn("Selected benchmarks define", benchmark_edit.placeholderText())
+        self.assertEqual(model_edit.text(), "")
+        model_edit.setText("Alpha")
+        benchmark_edit.setText("stale benchmark text")
+        benchmark_filters = view._current_filters()
+        self.assertEqual(benchmark_filters.model, "Alpha")
+        self.assertEqual(benchmark_filters.benchmark, "")
+
+        view.clear_filters_button.click()
+        self.assertEqual(model_edit.text(), "")
+        self.assertEqual(benchmark_edit.text(), "")
+        self.assertEqual(view._current_filters().model, "")
+
+        view.dimension_selector.setCurrentIndex(0)
+        self.assertTrue(model_edit.isHidden())
+        self.assertTrue(benchmark_edit.isEnabled())
+        model_edit.setText("hidden model value")
+        benchmark_edit.setText("model mode retained")
+        model_filters = view._current_filters()
+        self.assertEqual(model_filters.model, "")
+        self.assertEqual(model_filters.benchmark, "model mode retained")
+
+        view.source_selector.setCurrentIndex(1)
+        self.assertFalse(view.dimension_selector.isEnabled())
+        self.assertTrue(model_edit.isHidden())
+        model_edit.setText("must not leak into Scoreboards")
+        scoreboard_filters = view._current_filters()
+        self.assertEqual(scoreboard_filters.model, "")
+        view.deleteLater()
+
+    def test_benchmark_model_filter_request_provenance_and_all_reruns(self) -> None:
+        first = self.add_definition("Filtered first", "benchmarks/first.py")
+        second = self.add_definition("Filtered second", "benchmarks/second.py")
+        first_run_ids = (
+            self.add_definition_run(first, "Alpha", score=None, tokens_per_second=None),
+            self.add_definition_run(
+                first,
+                "Alpha",
+                score=None,
+                tokens_per_second=None,
+                output_suffix="-rerun",
+            ),
+        )
+        self.add_definition_run(second, "Alpha", score=3.0, tokens_per_second=100.0)
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        view.benchmark_filters.model_edit.setText("Alpha")
+        view.benchmark_filters.benchmark_edit.setText("stale benchmark text")
+        view.apply_filters_button.click()
+        self._select_identity(view, f"definition:{first.id}")
+        self._select_identity(view, f"definition:{second.id}")
+
+        before_database = self.context.paths.database_path.read_bytes()
+        first_run = self.context.benchmarks.get_run(first_run_ids[0])[0]
+        assert first_run is not None
+        before_snapshot = dict(first_run.benchmark_snapshot)
+        with patch.object(
+            view.context.comparisons,
+            "compare_benchmarks",
+            wraps=view.context.comparisons.compare_benchmarks,
+        ) as compare:
+            view.compare_button.click()
+
+        self.assertEqual(compare.call_count, 1)
+        request = compare.call_args.args[0]
+        self.assertIsInstance(request, BenchmarkComparisonRequest)
+        assert isinstance(request, BenchmarkComparisonRequest)
+        self.assertEqual(
+            request.benchmark_identities,
+            (f"definition:{first.id}", f"definition:{second.id}"),
+        )
+        self.assertEqual(request.filters.model, "Alpha")
+        self.assertEqual(request.filters.benchmark, "")
+        self.assertIsNotNone(view.current_result)
+        result = view.current_result
+        assert result is not None
+        self.assertEqual(result.filters.model, "Alpha")
+        self.assertEqual(result.metadata.active_filters.get("model"), "Alpha")
+        self.assertNotIn("benchmark", result.metadata.active_filters)
+        self.assertIn("Model: Alpha", view.active_filter_summary.text())
+        self.assertNotIn("Benchmark:", view.active_filter_summary.text())
+        self.assertEqual(
+            [subject.identity for subject in result.selected_benchmarks],
+            [f"definition:{first.id}", f"definition:{second.id}"],
+        )
+        self.assertEqual(result.state, ComparisonResultState.READY_WITH_MISSING_VALUES)
+
+        summary = view.result_tables["Summary"]
+        self.assertEqual(summary.rowCount(), 2)
+        first_entity = result.entities[0]
+        self.assertEqual(summary.data(summary.index(0, 1)), first_entity.label)
+        self.assertEqual(summary.data(summary.index(0, 2)), "2")
+        self.assertEqual(summary.data(summary.index(0, 3)), "0")
+        self.assertEqual(summary.data(summary.index(0, 4)), "2")
+        self.assertEqual(summary.data(summary.index(0, 5)), "Not recorded")
+        self.assertEqual(summary.data(summary.index(0, 6)), "Not recorded")
+        self.assertEqual(summary.data(summary.index(0, 7)), "Unavailable")
+        self.assertEqual(summary.data(summary.index(0, 8)), str(first_entity.review.total_reviews))
+        self.assertEqual(summary.data(summary.index(0, 9)), "1")
+        self.assertEqual(summary.data(summary.index(0, 10)), "0")
+        self.assertEqual(summary.data(summary.index(0, 11)), "1")
+        self.assertEqual(summary.data(summary.index(0, 12)), "Available")
+        self.assertNotIn("Rankings", [view.results_tabs.tabText(i) for i in range(view.results_tabs.count())])
+        self.assertIsNotNone(result.pairwise)
+        pairwise_values = " ".join(
+            str(view.result_tables["Pairwise"].data(view.result_tables["Pairwise"].index(row, column)))
+            for row in range(view.result_tables["Pairwise"].rowCount())
+            for column in range(view.result_tables["Pairwise"].columnCount())
+        )
+        self.assertIn("Not recorded", pairwise_values)
+        self.assertIn("Unavailable", pairwise_values)
+        self.assertEqual(self.context.paths.database_path.read_bytes(), before_database)
+        first_run_after = self.context.benchmarks.get_run(first_run_ids[0])[0]
+        assert first_run_after is not None
+        self.assertEqual(first_run_after.benchmark_snapshot, before_snapshot)
+        view.deleteLater()
+
+    def test_benchmark_alignment_and_pairwise_render_engine_values(self) -> None:
+        first = self.add_definition("First aligned benchmark", "benchmarks/first.py")
+        second = self.add_definition("Second aligned benchmark", "benchmarks/second.py")
+        self.add_definition_run(first, "Alpha", score=4.0, tokens_per_second=50.0)
+        self.add_definition_run(
+            first,
+            "Alpha",
+            score=2.0,
+            tokens_per_second=70.0,
+            output_suffix="-rerun",
+        )
+        self.add_definition_run(first, "Beta", score=1.0, tokens_per_second=20.0)
+        self.add_definition_run(second, "Alpha", score=3.0, tokens_per_second=100.0)
+        self.add_definition_run(second, "Gamma", score=2.0, tokens_per_second=30.0)
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        self._select_identity(view, f"definition:{first.id}")
+        self._select_identity(view, f"definition:{second.id}")
+
+        view.compare_button.click()
+
+        result = view.current_result
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.entities[0].summary.total_eligible_runs, 3)
+        self.assertEqual(result.entities[1].summary.total_eligible_runs, 2)
+        alignment = view.result_tables["Alignment"]
+        rows = [
+            tuple(alignment.data(alignment.index(row, column)) for column in range(alignment.columnCount()))
+            for row in range(alignment.rowCount())
+        ]
+        shared_row = next(row for row in rows if row[0] == "Shared models")
+        self.assertEqual(shared_row[2], ", ".join(result.alignment.shared_models))
+        self.assertEqual(shared_row[3], str(result.alignment.shared_model_count))
+        self.assertIn("Alpha", shared_row[2])
+        aligned_rows = [row for row in rows if row[0] == "Aligned model"]
+        self.assertEqual(len(aligned_rows), 2)
+        self.assertEqual(
+            {row[1] for row in aligned_rows},
+            {result.entities[0].label, result.entities[1].label},
+        )
+        first_aligned = next(row for row in aligned_rows if row[1] == result.entities[0].label)
+        second_aligned = next(row for row in aligned_rows if row[1] == result.entities[1].label)
+        self.assertEqual(first_aligned[2], result.alignment.aligned_models[0].model_label)
+        self.assertEqual(first_aligned[4], "2")
+        self.assertEqual(first_aligned[5], "2")
+        self.assertEqual(first_aligned[6], "3.00 / 5")
+        self.assertEqual(first_aligned[7], "60.0 tok/s")
+        self.assertEqual(second_aligned[4], "1")
+        self.assertEqual(second_aligned[5], "1")
+        self.assertEqual(second_aligned[6], "3.00 / 5")
+        self.assertEqual(second_aligned[7], "100.0 tok/s")
+        self.assertEqual(
+            {row[2] for row in rows if row[0] == "Non-overlapping model"},
+            {"Beta", "Gamma"},
+        )
+        excluded_models = next(row for row in rows if row[0] == "Excluded model count")
+        excluded_runs = next(row for row in rows if row[0] == "Excluded run count")
+        self.assertEqual(excluded_models[3], str(result.alignment.excluded_model_count))
+        self.assertEqual(excluded_runs[3], str(result.alignment.excluded_run_count))
+        self.assertIsNotNone(result.pairwise)
+        pairwise = result.pairwise
+        assert pairwise is not None
+        pairwise_table = view.result_tables["Pairwise"]
+        self.assertEqual(pairwise_table.rowCount(), len(pairwise.metrics))
+        self.assertEqual(
+            tuple(
+                pairwise_table.headerData(column, Qt.Orientation.Horizontal)
+                for column in range(pairwise_table.columnCount())
+            ),
+            (
+                "Metric",
+                "Baseline",
+                "Compared",
+                "Delta",
+                "Percent delta",
+                "Direction",
+                "Status",
+            ),
+        )
+        self.assertEqual(pairwise.baseline_entity, result.entities[0].identity)
+        self.assertEqual(pairwise.comparison_entity, result.entities[1].identity)
+        self.assertEqual(
+            tuple(
+                pairwise_table.data(pairwise_table.index(row, 0))
+                for row in range(pairwise_table.rowCount())
+            ),
+            tuple(metric.metric_name for metric in pairwise.metrics),
+        )
+        has_nonzero_delta = False
+        for row, metric in enumerate(pairwise.metrics):
+            baseline = metric.baseline_entity or pairwise.baseline_entity
+            compared = metric.comparison_entity or pairwise.comparison_entity
+            kind = view._metric_kind(metric.metric_name)
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 1)),
+                view._format_metric(metric.values.get(baseline), kind),
+            )
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 2)),
+                view._format_metric(metric.values.get(compared), kind),
+            )
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 3)),
+                view._format_metric(metric.absolute_delta, kind),
+            )
+            expected_percent_delta = (
+                "Unavailable"
+                if metric.percentage_delta is None
+                else f"{float(metric.percentage_delta):.1f}%"
+            )
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 4)),
+                expected_percent_delta,
+            )
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 5)),
+                str(metric.direction.value).replace("_", " "),
+            )
+            self.assertEqual(
+                pairwise_table.data(pairwise_table.index(row, 6)),
+                metric.unavailable_reason or "Available",
+            )
+            if metric.absolute_delta is not None and metric.absolute_delta != 0:
+                has_nonzero_delta = True
+                self.assertNotIn(
+                    pairwise_table.data(pairwise_table.index(row, 3)),
+                    ("Not recorded", "Unavailable"),
+                )
+        self.assertTrue(has_nonzero_delta)
+        summary_tooltip = view.result_tables["Summary"].data(
+            view.result_tables["Summary"].index(0, 0),
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self.assertIn(f"definition:{first.id}", str(summary_tooltip))
+        self.assertNotIn("Rankings", [view.results_tabs.tabText(i) for i in range(view.results_tabs.count())])
+        view.deleteLater()
+
+    def test_benchmark_pairwise_without_shared_models_keeps_engine_missing_state(self) -> None:
+        first = self.add_definition("Alpha-only benchmark", "benchmarks/first.py")
+        second = self.add_definition("Beta-only benchmark", "benchmarks/second.py")
+        self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        self._select_identity(view, f"definition:{first.id}")
+        self._select_identity(view, f"definition:{second.id}")
+
+        view.compare_button.click()
+
+        result = view.current_result
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.state, ComparisonResultState.READY_WITH_MISSING_VALUES)
+        self.assertIsNone(result.pairwise)
+        self.assertIn("missing values", view.state_banner.text().casefold())
+        self.assertGreater(view.warning_list.count(), 0)
+        pairwise = view.result_tables["Pairwise"]
+        self.assertEqual(pairwise.rowCount(), 0)
+        pairwise_page_index = next(
+            index for index in range(view.results_tabs.count())
+            if view.results_tabs.tabText(index) == "Pairwise"
+        )
+        pairwise_page = view.results_tabs.widget(pairwise_page_index)
+        assert pairwise_page is not None
+        pairwise_text = " ".join(label.text() for label in pairwise_page.findChildren(QLabel))
+        self.assertIn("No pairwise values were provided for the selected benchmarks", pairwise_text)
+        view.deleteLater()
+
+    def test_benchmark_warning_rendering_preserves_engine_order_and_duplicates(self) -> None:
+        first = self.add_definition("Warning benchmark one", "benchmarks/first.py")
+        second = self.add_definition("Warning benchmark two", "benchmarks/second.py")
+        self.add_definition_run(first, "Alpha")
+        self.add_definition_run(second, "Beta")
+        engine_result = self.context.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest(
+                (f"definition:{first.id}", f"definition:{second.id}")
+            )
+        )
+        self.assertTrue(engine_result.warnings)
+        seed_warning = engine_result.warnings[0]
+        first_warning = replace(seed_warning, message="Engine warning first")
+        second_warning = replace(seed_warning, message="Engine warning second")
+        engine_order = (first_warning, second_warning, first_warning)
+        result = replace(engine_result, warnings=engine_order)
+        view = ComparisonsView(self.context)
+
+        view._render_result(result)
+
+        rendered_warnings = tuple(
+            view.warning_list.item(index).toolTip()
+            for index in range(view.warning_list.count())
+        )
+        self.assertEqual(rendered_warnings, tuple(warning.message for warning in engine_order))
+
+        view._render_warnings(engine_order)
+        self.assertEqual(
+            tuple(
+                view.warning_list.item(index).toolTip()
+                for index in range(view.warning_list.count())
+            ),
+            (first_warning.message, second_warning.message),
+        )
+        view.deleteLater()
+
+    def test_three_benchmark_comparison_suppresses_pairwise_values(self) -> None:
+        definitions = tuple(
+            self.add_definition(f"Benchmark {index}", f"benchmarks/{index}.py")
+            for index in range(3)
+        )
+        for definition in definitions:
+            self.add_definition_run(definition, "Alpha")
+        view = ComparisonsView(self.context)
+        view.dimension_selector.setCurrentIndex(2)
+        for definition in definitions:
+            self._select_identity(view, f"definition:{definition.id}")
+
+        view.compare_button.click()
+
+        result = view.current_result
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(len(result.entities), 3)
+        self.assertIsNone(result.pairwise)
+        self.assertEqual(view.result_tables["Summary"].rowCount(), 3)
+        self.assertIn("Alignment", [view.results_tabs.tabText(i) for i in range(view.results_tabs.count())])
+        pairwise = view.result_tables["Pairwise"]
+        self.assertEqual(pairwise.rowCount(), 0)
+        pairwise_page_index = next(
+            index for index in range(view.results_tabs.count())
+            if view.results_tabs.tabText(index) == "Pairwise"
+        )
+        pairwise_page = view.results_tabs.widget(pairwise_page_index)
+        assert pairwise_page is not None
+        pairwise_text = " ".join(label.text() for label in pairwise_page.findChildren(QLabel))
+        self.assertIn("exactly two selected benchmarks", pairwise_text)
+        self.assertTrue(any("exactly two selected benchmarks" in view.warning_list.item(i).text()
+                            for i in range(view.warning_list.count())))
+        view.deleteLater()
+
+    def test_empty_and_unavailable_benchmark_results_keep_typed_states(self) -> None:
+        empty_view = ComparisonsView(self.context)
+        empty_view.dimension_selector.setCurrentIndex(2)
+        self.assertEqual(empty_view.available_model.rowCount(), 0)
+        self.assertFalse(empty_view.compare_button.isEnabled())
+        self.assertIn("Select at least two subjects", empty_view.results_placeholder.text())
+        empty_view.deleteLater()
+
+        available = self.add_definition("Available benchmark", "benchmarks/available.py")
+        unavailable = self.add_definition("Unavailable benchmark", "benchmarks/unavailable.py")
+        self.add_definition_run(available, "Alpha")
+        view = ComparisonsView(self.context)
+
+        unavailable_result = self.context.comparisons.compare_benchmarks(
+            BenchmarkComparisonRequest(
+                (f"definition:{available.id}", f"definition:{unavailable.id}")
+            )
+        )
+        view._render_result(unavailable_result)
+        self.assertEqual(unavailable_result.state, ComparisonResultState.SELECTED_SUBJECTS_UNAVAILABLE)
+        self.assertIn("unavailable", view.state_banner.text().casefold())
+        summary = view.result_tables["Summary"]
+        self.assertEqual(summary.rowCount(), 2)
+        unavailable_row = next(
+            row
+            for row in range(summary.rowCount())
+            if summary.data(summary.index(row, 1)) == unavailable_result.entities[1].label
+        )
+        self.assertEqual(summary.data(summary.index(unavailable_row, 2)), "0")
+        self.assertEqual(summary.data(summary.index(unavailable_row, 5)), "Not recorded")
+        self.assertEqual(summary.data(summary.index(unavailable_row, 7)), "Unavailable")
+        self.assertEqual(summary.data(summary.index(unavailable_row, 12)), "no eligible runs")
+        self.assertEqual(view.result_tables["Pairwise"].rowCount(), 0)
         view.deleteLater()
 
     def test_benchmark_discovery_preserves_engine_identity_labels_and_status(self) -> None:
